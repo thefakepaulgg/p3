@@ -1,0 +1,66 @@
+version: pi-workflow/v1
+id: rpiv
+name: Research, Plan, Implement, Validate
+description: A sequential evidence-driven implementation workflow.
+inputs:
+  goal:
+    type: string
+    required: true
+defaults:
+  retry: 1
+steps:
+  - id: research
+    name: Research
+    route: luna
+    phase: other
+    prompt: |
+      Research the requested change. Gather concrete repository evidence and risks for: {{inputs.goal}}
+    context:
+      - inputs.goal
+    completion:
+      require: [routed-task-completed, output-nonempty]
+    sideEffects:
+      trackGit: true
+  - id: plan
+    name: Plan
+    route: sol
+    phase: plan
+    needs: [research]
+    prompt: |
+      Produce an implementation plan for {{inputs.goal}} using this research:
+      {{steps.research.output}}
+    context:
+      - inputs.goal
+      - steps.research.output
+    approval:
+      after: true
+    completion:
+      require: [routed-task-completed, output-nonempty]
+  - id: implement
+    name: Implement
+    route: sol
+    phase: implement
+    needs: [plan]
+    prompt: |
+      Implement {{inputs.goal}} according to this approved plan:
+      {{steps.plan.output}}
+    context:
+      - inputs.goal
+      - steps.plan.output
+    completion:
+      require: [routed-task-completed, output-nonempty]
+    sideEffects:
+      trackGit: true
+  - id: validate
+    name: Validate
+    route: sol
+    phase: review
+    needs: [implement]
+    prompt: |
+      Validate the implementation for {{inputs.goal}}. Inspect the implementation and report test evidence:
+      {{steps.implement.output}}
+    context:
+      - inputs.goal
+      - steps.implement.output
+    completion:
+      require: [routed-task-completed, output-nonempty]

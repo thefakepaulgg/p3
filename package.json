@@ -1,0 +1,40 @@
+{
+  "name": "@therealpaulgg/p3",
+  "version": "0.1.0",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": "github:therealpaulgg/p3",
+  "files": [
+    "extensions",
+    "themes",
+    "workflows"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/advisor.ts",
+      "./extensions/model-routing.ts",
+      "./extensions/model-style.ts",
+      "./extensions/tasks.ts",
+      "./extensions/telegram-notify.ts",
+      "./extensions/tutor-mode.ts",
+      "./extensions/workflow-engine.ts"
+    ],
+    "themes": [
+      "./themes"
+    ]
+  },
+  "scripts": {
+    "test": "./scripts/test-extensions.sh"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
