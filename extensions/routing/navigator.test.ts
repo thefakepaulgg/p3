@@ -1,55 +1,62 @@
 import { afterEach, expect, test } from "bun:test";
-import { focusManifestPane, installRoutedNavigator } from "./navigator.ts";
+import { focusManifestPane, RoutedTaskWidget } from "./navigator.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
-import { ROUTING_MANIFEST_VERSION, type RoutingManifest } from "./manifest.ts";
 
 afterEach(() => setHerdrTestTransportForTests(undefined));
 
-const manifest: RoutingManifest = {
-  version: ROUTING_MANIFEST_VERSION, parentSessionId: "session", parentPaneId: "w1:p1", updatedAt: 1,
-  sessionTotal: 0.0123, sessionTotalKnown: true,
-  tasks: [{ handle: "rt-1", label: "Sibling", agentName: "sibling", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-5.6-luna", state: "running", startedAt: Date.now() - 1000 }],
-};
-
-const install = (getManifest: () => RoutingManifest | undefined, editorText = "") => {
-  let input: ((data: string) => any) | undefined;
-  let rendered: string[] = [];
-  const ctx: any = {
-    ui: {
-      getEditorText: () => editorText,
-      onTerminalInput: (handler: (data: string) => any) => { input = handler; return () => {}; },
-      custom: async (factory: any) => {
-        const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
-        const component = await factory({ requestRender: () => {} }, theme, {}, () => {});
-        rendered = component.render(120);
-        component.dispose?.();
-        return undefined;
-      },
-      notify: () => {},
-    },
+const setupWidget = (constructedOutsideEditor = false) => {
+  const editor = { render: () => [], invalidate: () => {}, getText: () => "", setText: () => {}, handleInput: () => {} };
+  const tree = { render: () => [], invalidate: () => {} };
+  let focused: any = constructedOutsideEditor ? tree : editor;
+  let renders = 0;
+  const focusedPanes: string[] = [];
+  let widget: RoutedTaskWidget;
+  const tui: any = {
+    getFocusedComponent: () => focused,
+    setFocus: (component: any) => { focused = component; },
+    requestRender: () => { renders += 1; },
   };
-  installRoutedNavigator({ pi: {} as any, ctx, getManifest });
-  return { trigger: (data: string) => input?.(data), rendered: () => rendered };
+  widget = new RoutedTaskWidget(
+    tui,
+    () => [
+      { handle: "rt-1", paneId: "w1:p2" },
+      { handle: "rt-2", paneId: "w1:p3" },
+      { handle: "rt-closed", paneId: "w1:p4", paneClosedAt: 1 },
+    ],
+    (selected) => [`selected:${selected ?? "none"}`],
+    async (paneId) => { focusedPanes.push(paneId); },
+    () => {},
+  );
+  return { editor, tree, widget, focused: () => focused, focus: (component: any) => { focused = component; }, renders: () => renders, focusedPanes };
 };
 
-test("Down on an empty parent editor opens main and routed siblings", async () => {
-  const navigator = install(() => manifest);
-  expect(navigator.trigger("\x1b[B")).toEqual({ consume: true });
-  await Promise.resolve();
-  expect(navigator.rendered().join("\n")).toContain("main · parent");
-  expect(navigator.rendered().join("\n")).toContain("Sibling · running · Luna");
-  expect(navigator.rendered()[0]).toContain("session total ~$0.01");
+test("Down from the main editor focuses the inline routed-agent widget even when it was created during reload", () => {
+  const ui = setupWidget(true);
+  ui.focus(ui.editor);
+  expect(ui.widget.handleTerminalInput("\x1b[B", "")).toEqual({ consume: true });
+  expect(ui.focused()).toBe(ui.widget);
+  expect(ui.widget.render(120)).toEqual(["selected:rt-1"]);
+  ui.widget.handleInput("\x1b[B");
+  expect(ui.widget.render(120)).toEqual(["selected:rt-2"]);
+  ui.widget.handleInput("\x1b[A");
+  ui.widget.handleInput("\x1b[A");
+  expect(ui.focused()).toBe(ui.editor);
 });
 
-test("manifest-fed child has the same navigator and typed editors keep normal arrows", async () => {
-  process.env.PI_ROUTING_MANIFEST = "/tmp/manifest.json";
-  try {
-    const child = install(() => manifest);
-    expect(child.trigger("\x1b[B")).toEqual({ consume: true });
-    await Promise.resolve();
-    expect(child.rendered().join("\n")).toContain("Sibling");
-    expect(install(() => manifest, "draft").trigger("\x1b[B")).toBeUndefined();
-  } finally { delete process.env.PI_ROUTING_MANIFEST; }
+test("Down remains owned by another focused view such as /tree", () => {
+  const ui = setupWidget();
+  ui.focus(ui.tree);
+  expect(ui.widget.handleTerminalInput("\x1b[B", "")).toBeUndefined();
+  expect(ui.focused()).toBe(ui.tree);
+});
+
+test("Enter focuses the selected routed pane", async () => {
+  const ui = setupWidget();
+  ui.widget.handleTerminalInput("\x1b[B", "");
+  ui.widget.handleInput("\x1b[B");
+  ui.widget.handleInput("\r");
+  await Promise.resolve();
+  expect(ui.focusedPanes).toEqual(["w1:p3"]);
 });
 
 test("focus validates that the target pane still exists", async () => {

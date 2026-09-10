@@ -189,7 +189,9 @@ export function formatModelLabel(model: string): string {
   return id;
 }
 
-export function formatTaskRow(task: TaskHandle, now: number): string {
+export type TaskWidgetItem = Pick<TaskHandle, "handle" | "label" | "model" | "state" | "startedAt" | "endedAt" | "estimatedCost" | "costKnown" | "paneId" | "paneClosedAt" | "clearedAt">;
+
+export function formatTaskRow(task: TaskWidgetItem, now: number): string {
   const until = isActiveTask(task) ? now : task.endedAt ?? now;
   const parts = [
     `${STATE_MARKER[task.state] ?? "?"} ${truncate(task.label, 52)}`,
@@ -204,15 +206,24 @@ export function formatTaskRow(task: TaskHandle, now: number): string {
   return truncate(parts.join(" · "), 120);
 }
 
+export function taskWidgetItems(tasks: Iterable<TaskWidgetItem>, now = Date.now(), maxRows = WIDGET_MAX_ROWS): TaskWidgetItem[] {
+  const items = [...tasks].filter((task) => !task.clearedAt);
+  const active = items.filter(isActiveTask).sort((a, b) => a.startedAt - b.startedAt);
+  const recent = items
+    .filter((task) => !isActiveTask(task) && now - (task.endedAt ?? task.startedAt) <= WIDGET_RECENT_WINDOW_MS)
+    .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt));
+  return [...active, ...recent].slice(0, Math.max(1, maxRows));
+}
+
 /** Compact semantic widget lines; model-routing adds theme colors and a light border. */
-export function formatTaskWidget(tasks: Iterable<TaskHandle>, now = Date.now(), maxRows = WIDGET_MAX_ROWS): string[] | undefined {
+export function formatTaskWidget(tasks: Iterable<TaskWidgetItem>, now = Date.now(), maxRows = WIDGET_MAX_ROWS): string[] | undefined {
   const items = [...tasks].filter((task) => !task.clearedAt);
   const active = items.filter(isActiveTask).sort((a, b) => a.startedAt - b.startedAt);
   const recent = items
     .filter((task) => !isActiveTask(task) && now - (task.endedAt ?? task.startedAt) <= WIDGET_RECENT_WINDOW_MS)
     .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt));
   if (!active.length && !recent.length) return undefined;
-  const shown = [...active, ...recent].slice(0, Math.max(1, maxRows));
+  const shown = taskWidgetItems(items, now, maxRows);
   const counts = [active.length ? `${active.length} active` : "", recent.length ? `${recent.length} recent` : ""].filter(Boolean).join(" · ");
   const lines = [`Routed agents · ${counts}`];
   for (const task of shown) lines.push(formatTaskRow(task, now));

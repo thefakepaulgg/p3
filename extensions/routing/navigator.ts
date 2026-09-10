@@ -1,27 +1,76 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, type Component, type TUI } from "@earendil-works/pi-tui";
-import { formatElapsed, formatModelLabel } from "./state.ts";
-import { formatEstimatedCost } from "./usage.ts";
-import type { RoutingManifest } from "./manifest.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { matchesKey, type Component, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
 import { parseJson, runHerdr } from "./herdr.ts";
 
-interface NavigationTarget { label: string; paneId: string; detail: string }
+export interface RoutedWidgetTarget { handle: string; paneId?: string; paneClosedAt?: number }
 
-const targets = (manifest: RoutingManifest): NavigationTarget[] => {
-  const now = Date.now();
-  const rows: NavigationTarget[] = [{ label: "main", paneId: manifest.parentPaneId, detail: "parent" }];
-  for (const task of manifest.tasks) {
-    if (task.clearedAt || task.paneClosedAt) continue;
-    const until = task.endedAt ?? now;
-    const cost = formatEstimatedCost(task.estimatedCost, task.costKnown);
-    rows.push({
-      label: task.label,
-      paneId: task.paneId,
-      detail: [task.state, formatModelLabel(task.model), formatElapsed(until - task.startedAt), cost].filter(Boolean).join(" · "),
-    });
+const isEditorComponent = (component: Component | null): component is EditorComponent =>
+  !!component && typeof (component as EditorComponent).getText === "function" && typeof (component as EditorComponent).setText === "function";
+
+export class RoutedTaskWidget implements Component {
+  private selectedHandle: string | undefined;
+  private editor: Component | null = null;
+
+  constructor(
+    private readonly tui: TUI,
+    private readonly getTargets: () => RoutedWidgetTarget[],
+    private readonly renderLines: (selectedHandle?: string) => string[],
+    private readonly focusPane: (paneId: string) => Promise<void>,
+    private readonly warn: (message: string) => void,
+  ) {}
+
+  handleTerminalInput(data: string, editorText: string): { consume: true } | undefined {
+    const focused = this.focusedComponent();
+    if (!matchesKey(data, "down") || editorText.length > 0 || !isEditorComponent(focused)) return;
+    const first = this.availableTargets()[0];
+    if (!first) return;
+    this.editor = focused;
+    this.selectedHandle = first.handle;
+    this.tui.setFocus(this);
+    this.tui.requestRender();
+    return { consume: true };
   }
-  return rows;
-};
+
+  handleInput(data: string): void {
+    if (matchesKey(data, "escape")) { this.leave(); return; }
+    const targets = this.availableTargets();
+    const selected = targets.findIndex((target) => target.handle === this.selectedHandle);
+    if (matchesKey(data, "up")) {
+      if (selected <= 0) this.leave();
+      else { this.selectedHandle = targets[selected - 1].handle; this.tui.requestRender(); }
+      return;
+    }
+    if (matchesKey(data, "down")) {
+      if (selected >= 0 && selected < targets.length - 1) {
+        this.selectedHandle = targets[selected + 1].handle;
+        this.tui.requestRender();
+      }
+      return;
+    }
+    if (matchesKey(data, "enter")) {
+      const target = targets[selected];
+      if (target?.paneId) void this.focusPane(target.paneId).catch((error) => this.warn(error instanceof Error ? error.message : String(error)));
+    }
+  }
+
+  render(_width: number): string[] { return this.renderLines(this.selectedHandle); }
+  invalidate(): void {}
+  requestRender(): void { this.tui.requestRender(); }
+
+  private availableTargets(): RoutedWidgetTarget[] {
+    return this.getTargets().filter((target) => target.paneId && !target.paneClosedAt);
+  }
+
+  private focusedComponent(): Component | null {
+    return (this.tui as TUI & { getFocusedComponent(): Component | null }).getFocusedComponent();
+  }
+
+  private leave(): void {
+    this.selectedHandle = undefined;
+    this.tui.setFocus(this.editor);
+    this.tui.requestRender();
+  }
+}
 
 export async function focusManifestPane(pi: ExtensionAPI, paneId: string): Promise<void> {
   const workspaceId = process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID;
@@ -29,73 +78,4 @@ export async function focusManifestPane(pi: ExtensionAPI, paneId: string): Promi
   const panes = parseJson(raw, "herdr pane list")?.result?.panes ?? [];
   if (!panes.some((pane: any) => pane.pane_id === paneId)) throw new Error(`Routed pane ${paneId} no longer exists`);
   await runHerdr(pi, ["agent", "focus", paneId], 5000);
-}
-
-class RoutedNavigator implements Component {
-  private selected = 0;
-  private signature = "";
-  private readonly timer: ReturnType<typeof setInterval>;
-  constructor(
-    private readonly getManifest: () => RoutingManifest,
-    private readonly tui: TUI,
-    private readonly theme: Theme,
-    private readonly done: (paneId?: string) => void,
-  ) {
-    this.signature = JSON.stringify(getManifest());
-    this.timer = setInterval(() => {
-      const next = JSON.stringify(this.getManifest());
-      if (next === this.signature) return;
-      this.signature = next;
-      this.tui.requestRender();
-    }, 500);
-  }
-  handleInput(data: string): void {
-    const rows = targets(this.getManifest());
-    if (matchesKey(data, "escape")) { this.done(); return; }
-    if (matchesKey(data, "up")) {
-      if (this.selected === 0) this.done(); else this.selected -= 1;
-      return;
-    }
-    if (matchesKey(data, "down")) { this.selected = Math.min(rows.length - 1, this.selected + 1); return; }
-    if (matchesKey(data, "enter")) this.done(rows[this.selected]?.paneId);
-  }
-  render(width: number): string[] {
-    const manifest = this.getManifest();
-    const rows = targets(manifest);
-    this.selected = Math.min(this.selected, Math.max(0, rows.length - 1));
-    const total = formatEstimatedCost(manifest.sessionTotal, manifest.sessionTotalKnown);
-    const output = [this.theme.fg("accent", this.theme.bold(`Routed agents${total ? ` · session total ${total}` : ""}`))];
-    rows.forEach((row, index) => {
-      const marker = index === this.selected ? "›" : " ";
-      const line = `${marker} ${row.label} · ${row.detail}`;
-      output.push(index === this.selected ? this.theme.fg("accent", line) : this.theme.fg("text", line));
-    });
-    output.push(this.theme.fg("dim", "↑/↓ navigate · Enter focus · Escape close"));
-    return output.map((line) => line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line);
-  }
-  invalidate(): void {}
-  dispose(): void { clearInterval(this.timer); }
-}
-
-export function installRoutedNavigator(options: {
-  pi: ExtensionAPI;
-  ctx: ExtensionContext;
-  getManifest: () => RoutingManifest | undefined;
-}): () => void {
-  const { pi, ctx, getManifest } = options;
-  let open = false;
-  return ctx.ui.onTerminalInput((data) => {
-    if (open || !matchesKey(data, "down") || ctx.ui.getEditorText().length > 0) return;
-    const manifest = getManifest();
-    if (!manifest || targets(manifest).length <= 1) return;
-    open = true;
-    void ctx.ui.custom<string | undefined>((tui, theme, _keys, done) => new RoutedNavigator(() => getManifest() ?? manifest, tui, theme, done), { overlay: true })
-      .then(async (paneId) => {
-        if (!paneId) return;
-        try { await focusManifestPane(pi, paneId); }
-        catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning"); }
-      })
-      .finally(() => { open = false; });
-    return { consume: true };
-  });
 }

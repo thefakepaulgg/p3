@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import routing from "../model-routing.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
+import { manifestPathForPane, readRoutingManifest, ROUTING_MANIFEST_VERSION, writeRoutingManifest } from "./manifest.ts";
 import { NOTIFICATION_LIMIT } from "./state.ts";
 
 setHerdrTestTransportForTests(async (pi: any, args, timeout) => {
@@ -76,6 +77,111 @@ test("registers the simplified public surface", () => {
   expect(properties.isolation).toBeUndefined();
   expect(properties.route.enum).toEqual(["sol", "luna"]);
   expect(commands).toEqual(["routed", "route"]);
+});
+
+test("registers routed-agent navigation input in TUI mode", async () => {
+  const restoreEnv = herdrEnv();
+  const lifecycle = new Map<string, Function>();
+  let terminalInputHandlers = 0;
+  const fake: any = {
+    registerTool: () => {}, registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
+    on: (name: string, handler: Function) => lifecycle.set(name, handler),
+    events: { on: () => () => {}, emit: () => {} },
+    exec: async () => ({ code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" }),
+  };
+  const ctx: any = {
+    hasUI: true, mode: "tui", cwd: "/repo", sessionManager: sessionManager(),
+    ui: {
+      setStatus: () => {}, setWidget: () => {},
+      onTerminalInput: () => { terminalInputHandlers += 1; return () => {}; },
+      theme: { fg: (_color: string, text: string) => text },
+    },
+  };
+  try {
+    routing(fake);
+    await lifecycle.get("session_start")?.({}, ctx);
+    expect(terminalInputHandlers).toBe(1);
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" });
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("child panes render a parent row below the editor", async () => {
+  const restoreEnv = herdrEnv();
+  temp = mkdtempSync(join(tmpdir(), "routing-child-"));
+  const path = join(temp, "manifest.json");
+  writeRoutingManifest(path, {
+    version: ROUTING_MANIFEST_VERSION, parentSessionId: "parent", parentPaneId: "w1:p1", updatedAt: 1,
+    tasks: [{ handle: "rt-1", label: "Legacy worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-5.6-luna", state: "running", startedAt: 1 }],
+  });
+  writeRoutingManifest(manifestPathForPane(temp, "w1:p1"), {
+    version: ROUTING_MANIFEST_VERSION, parentSessionId: "parent", parentPaneId: "w1:p1", updatedAt: 2,
+    tasks: [{ handle: "rt-1", label: "Stable worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-5.6-luna", state: "running", startedAt: 1 }],
+  });
+  process.env.PI_ROUTING_MANIFEST = path;
+  process.env.HERDR_PANE_ID = "w1:p2";
+  const lifecycle = new Map<string, Function>();
+  let rendered: string[] = [];
+  let placement: string | undefined;
+  const editor = { render: () => [], invalidate: () => {}, getText: () => "", setText: () => {}, handleInput: () => {} };
+  let focused: any = editor;
+  const tui: any = { getFocusedComponent: () => focused, setFocus: (value: any) => { focused = value; }, requestRender: () => {} };
+  const fake: any = {
+    registerTool: () => {}, registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
+  };
+  const ctx: any = {
+    hasUI: true, mode: "tui", cwd: "/repo", sessionManager: sessionManager(),
+    ui: {
+      setStatus: () => {}, onTerminalInput: () => () => {}, getEditorText: () => "",
+      theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+      setWidget: (_key: string, content: any, options: any) => {
+        placement = options?.placement;
+        if (typeof content === "function") rendered = content(tui).render(120);
+      },
+    },
+  };
+  try {
+    routing(fake);
+    await lifecycle.get("session_start")?.({}, ctx);
+    expect(placement).toBe("belowEditor");
+    expect(rendered.join("\n")).toContain("Parent · main");
+    expect(rendered.join("\n")).toContain("Stable worker");
+    await lifecycle.get("session_shutdown")?.();
+  } finally {
+    delete process.env.PI_ROUTING_MANIFEST;
+    restoreEnv();
+  }
+});
+
+test("restores routed tasks from stable pane context after a fresh Pi start", async () => {
+  const restoreEnv = herdrEnv();
+  temp = mkdtempSync(join(tmpdir(), "routing-restart-"));
+  const path = manifestPathForPane(temp, "w1:p1");
+  writeRoutingManifest(path, {
+    version: ROUTING_MANIFEST_VERSION, parentSessionId: "previous", parentPaneId: "w1:p1", updatedAt: 1,
+    tasks: [{ handle: "rt-old", label: "Retained worker", agentName: "worker", paneId: "w1:p2", route: "sol", model: "openai-codex/gpt-5.6-sol", state: "completed", startedAt: 1, endedAt: 2 }],
+  });
+  const tools: any[] = [];
+  const lifecycle = new Map<string, Function>();
+  const fake: any = {
+    registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
+  };
+  const widgets: Array<{ key: string; content: string[] | undefined }> = [];
+  const ctx = uiCtx(widgets);
+  ctx.sessionManager = { ...sessionManager(), getSessionDir: () => temp };
+  try {
+    routing(fake);
+    await lifecycle.get("session_start")?.({}, ctx);
+    const list = await tools.find((tool) => tool.name === "routed_task_control").execute("1", { action: "list" }, undefined, undefined, ctx);
+    expect(list.content[0].text).toContain("rt-old [completed]");
+    await lifecycle.get("session_shutdown")?.();
+    expect(readRoutingManifest(path)?.tasks[0]?.handle).toBe("rt-old");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("blocks direct Agent launches that bypass guarded routing", async () => {

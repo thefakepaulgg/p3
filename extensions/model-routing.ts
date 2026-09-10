@@ -2,14 +2,14 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { classifyDelegation, classifyModelRoute, planFallback, routes, type Route, type RouteName, type RoutingDecision } from "./routing/policy.ts";
-import { boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, taskMetadata, telemetryRecord, WIDGET_KEY, type TaskHandle } from "./routing/state.ts";
+import { boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
 import { parseJson, readHerdrResult, runHerdr, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
 import { ExplicitRouteRetryGuard } from "./routing/workflow.ts";
 import { launchRoutedTask, type RoutedTaskLaunchParams } from "./routing/launch.ts";
 import { registerRoutingRpc, type RoutingRpcResult } from "./routing/rpc.ts";
 import { emitTaskLifecycle } from "./routing/lifecycle.ts";
-import { manifestPathForSession, readRoutingManifest, removeRoutingManifest, ROUTING_MANIFEST_VERSION, taskManifestRecord, writeRoutingManifest, type RoutingManifest } from "./routing/manifest.ts";
-import { focusManifestPane, installRoutedNavigator } from "./routing/navigator.ts";
+import { manifestPathForPane, readRoutingManifest, restoreTaskHandle, ROUTING_MANIFEST_VERSION, taskManifestRecord, writeRoutingManifest, type RoutingManifest } from "./routing/manifest.ts";
+import { focusManifestPane, RoutedTaskWidget } from "./routing/navigator.ts";
 import { formatEstimatedCost, sumSessionCost } from "./routing/usage.ts";
 
 const RouteParams = Type.Object({
@@ -67,6 +67,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   let ownsManifest = false;
   let manifestTimer: ReturnType<typeof setInterval> | undefined;
   let terminalInputUnsubscribe: (() => void) | undefined;
+  let routedWidget: RoutedTaskWidget | undefined;
   let manifestSignature = "";
 
   const routeSummary = (name: RouteName) => {
@@ -108,38 +109,76 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     manifestSignature = JSON.stringify(routingManifest);
   };
 
+  const widgetData = () => {
+    const manifestTasks = routingManifest?.tasks;
+    const tasks: TaskWidgetItem[] = ownsManifest || !manifestTasks ? [...taskHandles.values()] : [...manifestTasks];
+    const shown = taskWidgetItems(tasks);
+    const lines = formatTaskWidget(tasks) ?? [];
+    const targets = [...shown];
+    const parentPaneId = routingManifest?.parentPaneId;
+    const isChildPane = !ownsManifest && parentPaneId && process.env.HERDR_PANE_ID !== parentPaneId;
+    if (isChildPane) {
+      if (!lines.length) lines.push("Routed agents");
+      lines.splice(1, 0, "↩ Parent · main");
+      targets.unshift({ handle: "parent", label: "Parent", model: "main", state: "completed", startedAt: 0, paneId: parentPaneId });
+    }
+    const total = formatEstimatedCost(routingManifest?.sessionTotal, routingManifest?.sessionTotalKnown);
+    if (lines.length && total) lines[0] += ` · session total ${total}`;
+    return { lines, targets };
+  };
+
   /** Repaint a compact, themed routed-agent card. Internal handles remain in the control tool, not the widget. */
   const refreshWidget = () => {
     const ctx = uiCtx;
     if (!ctx || typeof ctx.ui?.setWidget !== "function") return;
-    const lines = formatTaskWidget(taskHandles.values());
-    const total = formatEstimatedCost(routingManifest?.sessionTotal, routingManifest?.sessionTotalKnown);
-    if (lines && total) lines[0] += ` · session total ${total}`;
-    const signature = lines?.join("\n") ?? "";
+    const initial = widgetData();
+    const signature = initial.lines.join("\n");
     if (signature === widgetSignature) return;
     widgetSignature = signature;
-    if (!lines) {
+    if (!initial.lines.length) {
+      routedWidget = undefined;
       try { ctx.ui.setWidget(WIDGET_KEY, undefined); } catch { /* the UI may already be gone */ }
       return;
     }
-    const theme = ctx.ui.theme;
-    const markerColor = { "○": "muted", "●": "accent", "◆": "warning", "✓": "success", "×": "error", "−": "dim", "?": "warning" } as const;
-    const title = typeof theme.bold === "function" ? theme.bold(lines[0]) : lines[0];
-    const rendered = [theme.fg("accent", `╭─ ${title}`)];
-    for (const line of lines.slice(1)) {
-      if (line.startsWith("…")) {
-        rendered.push(`${theme.fg("dim", "│")} ${theme.fg("dim", line)}`);
-        continue;
+    const renderLines = (selectedHandle?: string) => {
+      const current = widgetData();
+      const theme = ctx.ui.theme;
+      const markerColor = { "○": "muted", "●": "accent", "◆": "warning", "✓": "success", "×": "error", "−": "dim", "?": "warning", "↩": "accent" } as const;
+      const title = typeof theme.bold === "function" ? theme.bold(current.lines[0]) : current.lines[0];
+      const rendered = [theme.fg("accent", `╭─ ${title}`)];
+      for (const [index, line] of current.lines.slice(1).entries()) {
+        if (line.startsWith("…")) {
+          rendered.push(`${theme.fg("dim", "│")} ${theme.fg("dim", line)}`);
+          continue;
+        }
+        const marker = line[0] ?? "?";
+        const segments = line.slice(2).split(" · ");
+        const label = segments.shift() ?? "";
+        const meta = segments.map((segment) => theme.fg(segment === "needs input" || segment === "failed" || segment === "abandoned" ? "warning" : "muted", segment)).join(theme.fg("dim", " · "));
+        const color = markerColor[marker as keyof typeof markerColor] ?? "muted";
+        const branch = current.targets[index]?.handle === selectedHandle ? theme.fg("accent", "›") : theme.fg("dim", "│");
+        rendered.push(`${branch} ${theme.fg(color, marker)} ${theme.fg("text", label)}${meta ? `${theme.fg("dim", " · ")}${meta}` : ""}`);
       }
-      const marker = line[0] ?? "?";
-      const segments = line.slice(2).split(" · ");
-      const label = segments.shift() ?? "";
-      const meta = segments.map((segment) => theme.fg(segment === "needs input" || segment === "failed" || segment === "abandoned" ? "warning" : "muted", segment)).join(theme.fg("dim", " · "));
-      const color = markerColor[marker as keyof typeof markerColor] ?? "muted";
-      rendered.push(`${theme.fg("dim", "│")} ${theme.fg(color, marker)} ${theme.fg("text", label)}${meta ? `${theme.fg("dim", " · ")}${meta}` : ""}`);
+      rendered.push(ctx.ui.theme.fg("dim", "╰─"));
+      return rendered;
+    };
+    if (ctx.mode !== "tui") {
+      try { ctx.ui.setWidget(WIDGET_KEY, renderLines(), { placement: "belowEditor" }); } catch { /* the UI may already be gone */ }
+      return;
     }
-    rendered.push(theme.fg("dim", "╰─"));
-    try { ctx.ui.setWidget(WIDGET_KEY, rendered, { placement: "aboveEditor" }); } catch { /* the UI may already be gone */ }
+    if (routedWidget) { routedWidget.requestRender(); return; }
+    try {
+      ctx.ui.setWidget(WIDGET_KEY, (tui) => {
+        routedWidget = new RoutedTaskWidget(
+          tui,
+          () => widgetData().targets,
+          renderLines,
+          (paneId) => focusManifestPane(pi, paneId),
+          (message) => ctx.ui.notify(message, "warning"),
+        );
+        return routedWidget;
+      }, { placement: "belowEditor" });
+    } catch { /* the UI may already be gone */ }
   };
 
   const updateStatus = (ctx: ExtensionContext) => {
@@ -625,8 +664,13 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     terminalInputUnsubscribe?.();
     const inheritedManifest = process.env.PI_ROUTING_MANIFEST?.trim();
     ownsManifest = !inheritedManifest && process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
-    manifestPath = inheritedManifest || (ownsManifest ? manifestPathForSession(ctx.sessionManager.getSessionDir(), ctx.sessionManager.getSessionId()) : undefined);
+    manifestPath = inheritedManifest || (ownsManifest ? manifestPathForPane(ctx.sessionManager.getSessionDir(), process.env.HERDR_PANE_ID!) : undefined);
     routingManifest = readRoutingManifest(manifestPath);
+    if (inheritedManifest && routingManifest) {
+      const stableParentPath = manifestPathForPane(ctx.sessionManager.getSessionDir(), routingManifest.parentPaneId);
+      const stableManifest = readRoutingManifest(stableParentPath);
+      if (stableManifest) { manifestPath = stableParentPath; routingManifest = stableManifest; }
+    }
     const seenTasks = new Set<string>();
     for (const candidate of [...ctx.sessionManager.getEntries()].reverse()) {
       if (candidate.type !== "custom") continue;
@@ -640,11 +684,18 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         }
       }
     }
+    if (ownsManifest) {
+      for (const task of routingManifest?.tasks ?? []) {
+        if (!seenTasks.has(task.handle) && !taskHandles.has(task.handle) && (task.route === "sol" || task.route === "luna")) {
+          taskHandles.set(task.handle, restoreTaskHandle(task));
+        }
+      }
+    }
     syncManifest();
     updateStatus(ctx);
     refreshWidget();
     if (ctx.mode === "tui" && manifestPath) {
-      terminalInputUnsubscribe = installRoutedNavigator({ pi, ctx, getManifest: () => routingManifest ?? readRoutingManifest(manifestPath) });
+      terminalInputUnsubscribe = ctx.ui.onTerminalInput((data) => routedWidget?.handleTerminalInput(data, ctx.ui.getEditorText()));
       manifestTimer = setInterval(() => {
         const next = readRoutingManifest(manifestPath);
         if (!next) return;
@@ -656,6 +707,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       }, 500);
     }
 
+    if (!ownsManifest) return;
     for (const task of taskHandles.values()) {
       if (["completed", "failed", "stopped", "abandoned"].includes(task.state)) continue;
       if (!task.agentName) continue;
@@ -664,17 +716,17 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_shutdown", async (event) => {
+  pi.on("session_shutdown", async () => {
     for (const watcher of watchers.values()) watcher.abort();
     watchers.clear();
     if (uiCtx && typeof uiCtx.ui?.setWidget === "function") {
       try { uiCtx.ui.setWidget(WIDGET_KEY, undefined); } catch { /* the UI may already be gone */ }
     }
+    routedWidget = undefined;
     terminalInputUnsubscribe?.();
     terminalInputUnsubscribe = undefined;
     if (manifestTimer) clearInterval(manifestTimer);
     manifestTimer = undefined;
-    if (ownsManifest && event?.reason !== "reload") removeRoutingManifest(manifestPath);
     uiCtx = undefined;
     activeCtx = undefined;
     widgetSignature = undefined;

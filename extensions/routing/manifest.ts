@@ -10,17 +10,32 @@ export interface ManifestTask {
   agentName: string;
   paneId: string;
   tabId?: string;
-  route: string;
+  route: TaskHandle["route"];
+  fallbackFrom?: TaskHandle["fallbackFrom"];
+  routeExplicit?: boolean;
+  target?: string;
   model: string;
-  state: string;
+  thinking?: TaskHandle["thinking"];
+  state: TaskHandle["state"];
   startedAt: number;
   endedAt?: number;
+  cwd?: string;
+  phase?: TaskHandle["phase"];
+  dependsOn?: string[];
+  ownedPaths?: string[];
+  allowConcurrent?: boolean;
+  owner?: TaskHandle["owner"];
   sessionPath?: string;
+  usageOffset?: number;
   estimatedCost?: number;
   costKnown?: boolean;
   paneRetention?: "keep" | "close";
   paneClosedAt?: number;
   clearedAt?: number;
+  transitions?: number;
+  notifiedStates?: string[];
+  completionNotifiedAt?: number;
+  completionDeliveredVia?: TaskHandle["completionDeliveredVia"];
 }
 
 export interface RoutingManifest {
@@ -36,16 +51,35 @@ export interface RoutingManifest {
   tasks: ManifestTask[];
 }
 
-export const manifestPathForSession = (sessionDir: string, sessionId: string) =>
-  join(sessionDir, `routing-${sessionId.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
+export const manifestPathForPane = (sessionDir: string, paneId: string) =>
+  join(sessionDir, `routing-pane-${paneId.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
+
+export function restoreTaskHandle(task: ManifestTask): TaskHandle {
+  return {
+    handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId,
+    route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit ?? false,
+    target: task.target ?? "herdr", model: task.model, thinking: task.thinking ?? "medium",
+    state: task.state, startedAt: task.startedAt, endedAt: task.endedAt, cwd: task.cwd, phase: task.phase,
+    dependsOn: task.dependsOn, ownedPaths: task.ownedPaths, allowConcurrent: task.allowConcurrent, owner: task.owner,
+    sessionPath: task.sessionPath, usageOffset: task.usageOffset, estimatedCost: task.estimatedCost, costKnown: task.costKnown,
+    paneRetention: task.paneRetention, paneClosedAt: task.paneClosedAt, clearedAt: task.clearedAt,
+    transitions: task.transitions ?? 0, notifiedStates: task.notifiedStates ?? [],
+    completionNotifiedAt: task.completionNotifiedAt, completionDeliveredVia: task.completionDeliveredVia,
+  };
+}
 
 export function taskManifestRecord(task: TaskHandle): ManifestTask | undefined {
   if (!task.agentName || !task.paneId) return undefined;
   return {
     handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId,
-    route: task.route, model: task.model, state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
-    sessionPath: task.sessionPath, estimatedCost: task.estimatedCost, costKnown: task.costKnown,
-    paneRetention: task.paneRetention, paneClosedAt: task.paneClosedAt, clearedAt: task.clearedAt,
+    route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit, target: task.target,
+    model: task.model, thinking: task.thinking, state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
+    cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn, ownedPaths: task.ownedPaths,
+    allowConcurrent: task.allowConcurrent, owner: task.owner, sessionPath: task.sessionPath, usageOffset: task.usageOffset,
+    estimatedCost: task.estimatedCost, costKnown: task.costKnown, paneRetention: task.paneRetention,
+    paneClosedAt: task.paneClosedAt, clearedAt: task.clearedAt, transitions: task.transitions,
+    notifiedStates: task.notifiedStates, completionNotifiedAt: task.completionNotifiedAt,
+    completionDeliveredVia: task.completionDeliveredVia,
   };
 }
 
