@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, matchesKey, type Component, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, truncateToWidth, type Component, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
 import { parseJson, runHerdr } from "./herdr.ts";
 
 export interface RoutedWidgetTarget { handle: string; paneId?: string; paneClosedAt?: number }
@@ -62,7 +62,7 @@ export class RoutedTaskWidget implements Component {
     }
   }
 
-  render(_width: number): string[] { return this.renderLines(this.selectedHandle); }
+  render(width: number): string[] { return this.renderLines(this.selectedHandle).map((line) => truncateToWidth(line, width)); }
   invalidate(): void {}
   requestRender(): void { this.tui.requestRender(); }
 

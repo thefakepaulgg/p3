@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { focusManifestPane, RoutedTaskWidget } from "./navigator.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
 
@@ -41,6 +42,11 @@ test("Down from the main editor focuses the inline routed-agent widget even when
   ui.widget.handleInput("\x1b[A");
   ui.widget.handleInput("\x1b[A");
   expect(ui.focused()).toBe(ui.editor);
+});
+
+test("rendered lines stay within the viewport width", () => {
+  const ui = setupWidget();
+  expect(ui.widget.render(8).every((line) => visibleWidth(line) <= 8)).toBe(true);
 });
 
 test("Down remains owned by another focused view such as /tree", () => {
