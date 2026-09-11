@@ -55,7 +55,10 @@ export class RoutedTaskWidget implements Component {
     }
     if (matchesKey(data, "enter")) {
       const target = targets[selected];
-      if (target?.paneId) void this.focusPane(target.paneId).catch((error) => this.warn(error instanceof Error ? error.message : String(error)));
+      if (target?.paneId) {
+        this.leave();
+        void this.focusPane(target.paneId).catch((error) => this.warn(error instanceof Error ? error.message : String(error)));
+      }
     }
   }
 

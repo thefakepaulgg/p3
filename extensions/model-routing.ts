@@ -188,15 +188,13 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     const count = [...taskHandles.values()].filter(isActiveTask).length;
     if (count === parentMetadataCount) return;
     parentMetadataCount = count;
-    const displayArgs = count > 0
-      ? ["--display-agent", `pi · ${count} routed active`]
-      : ["--clear-display-agent"];
+    const routedArgs = count > 0
+      ? ["--token", `routed=${count} routed active`]
+      : ["--clear-token", "routed"];
     void runHerdr(pi, [
       "pane", "report-metadata", paneId,
       "--source", "pi-routing:delegation",
-      "--agent", "pi",
-      "--applies-to-source", "herdr:pi",
-      ...displayArgs,
+      ...routedArgs,
     ], 5000).catch(() => undefined);
   };
 

@@ -57,6 +57,7 @@ test("Enter received by the terminal listener focuses the selected routed pane",
   expect(ui.widget.handleTerminalInput("\r", "")).toEqual({ consume: true });
   await Promise.resolve();
   expect(ui.focusedPanes).toEqual(["w1:p3"]);
+  expect(ui.focused()).toBe(ui.editor);
 });
 
 test("focus uses pane focus so Herdr updates the attached client view", async () => {

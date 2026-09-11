@@ -209,6 +209,14 @@ const envOptions = (args: string[]) => Object.fromEntries(repeatedOptions(args, 
   return separator < 0 ? [entry, ""] : [entry.slice(0, separator), entry.slice(separator + 1)];
 }));
 
+const metadataTokens = (args: string[]) => ({
+  ...Object.fromEntries(repeatedOptions(args, "--token").map((entry) => {
+    const separator = entry.indexOf("=");
+    return [entry.slice(0, separator), entry.slice(separator + 1)];
+  })),
+  ...Object.fromEntries(repeatedOptions(args, "--clear-token").map((key) => [key, null])),
+});
+
 export function herdrSocketRequestForArgs(args: string[]): HerdrSocketRequest {
   const command = args.slice(0, 2).join(" ");
   const target = args[2];
@@ -230,6 +238,7 @@ export function herdrSocketRequestForArgs(args: string[]): HerdrSocketRequest {
         applies_to_source: option(args, "--applies-to-source"),
         display_agent: option(args, "--display-agent"),
         clear_display_agent: args.includes("--clear-display-agent"),
+        tokens: metadataTokens(args),
       },
     };
     case "agent get": return { method: "agent.get", params: { target } };
