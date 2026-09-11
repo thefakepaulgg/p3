@@ -404,7 +404,7 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
     expect(launched.content[0].text).toContain("pane w1:p2");
     expect(launched.content[0].text).toContain("Do not poll");
     await control.execute("2", { action: "focus", handle: launched.details.handle });
-    expect(calls.some(args => args.join(" ") === "agent focus w1:p2")).toBe(true);
+    expect(calls.some(args => args.join(" ") === "pane focus w1:p2")).toBe(true);
     await expect(control.execute("3", { action: "clear", handle: launched.details.handle })).rejects.toThrow("Active tasks cannot be cleared");
     await control.execute("4", { action: "stop", handle: launched.details.handle });
     await control.execute("5", { action: "close", handle: launched.details.handle });
@@ -535,7 +535,7 @@ test("/routed opens a retained pane and clear survives reload", async () => {
     expect(complete("focus rt-")[0].value).toBe("focus rt-stored");
     expect(complete("clear missing")).toBeNull();
     await commands.get("routed").handler("", ctx);
-    expect(calls.some((args) => args.join(" ") === "agent focus w1:p9")).toBe(true);
+    expect(calls.some((args) => args.join(" ") === "pane focus w1:p9")).toBe(true);
     expect(notices.at(-1)?.text).toBe("Opened Stored agent");
 
     await commands.get("routed").handler("clear", ctx);

@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { matchesKey, type Component, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, type Component, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
 import { parseJson, runHerdr } from "./herdr.ts";
 
 export interface RoutedWidgetTarget { handle: string; paneId?: string; paneClosedAt?: number }
@@ -20,7 +20,13 @@ export class RoutedTaskWidget implements Component {
   ) {}
 
   handleTerminalInput(data: string, editorText: string): { consume: true } | undefined {
+    if (isKeyRelease(data)) return;
     const focused = this.focusedComponent();
+    const isNavigationKey = matchesKey(data, "up") || matchesKey(data, "down") || matchesKey(data, "enter") || matchesKey(data, "escape");
+    if (focused === this && isNavigationKey) {
+      this.handleInput(data);
+      return { consume: true };
+    }
     if (!matchesKey(data, "down") || editorText.length > 0 || !isEditorComponent(focused)) return;
     const first = this.availableTargets()[0];
     if (!first) return;
@@ -77,5 +83,5 @@ export async function focusManifestPane(pi: ExtensionAPI, paneId: string): Promi
   const raw = await runHerdr(pi, ["pane", "list", ...(workspaceId ? ["--workspace", workspaceId] : [])], 5000);
   const panes = parseJson(raw, "herdr pane list")?.result?.panes ?? [];
   if (!panes.some((pane: any) => pane.pane_id === paneId)) throw new Error(`Routed pane ${paneId} no longer exists`);
-  await runHerdr(pi, ["agent", "focus", paneId], 5000);
+  await runHerdr(pi, ["pane", "focus", paneId], 5000);
 }

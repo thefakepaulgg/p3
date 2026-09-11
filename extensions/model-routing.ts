@@ -69,6 +69,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   let terminalInputUnsubscribe: (() => void) | undefined;
   let routedWidget: RoutedTaskWidget | undefined;
   let manifestSignature = "";
+  let parentMetadataCount: number | undefined;
 
   const routeSummary = (name: RouteName) => {
     const route = routes[name];
@@ -181,6 +182,24 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     } catch { /* the UI may already be gone */ }
   };
 
+  const refreshParentMetadata = () => {
+    const paneId = process.env.HERDR_PANE_ID;
+    if (!ownsManifest || !paneId) return;
+    const count = [...taskHandles.values()].filter(isActiveTask).length;
+    if (count === parentMetadataCount) return;
+    parentMetadataCount = count;
+    const displayArgs = count > 0
+      ? ["--display-agent", `pi · ${count} routed active`]
+      : ["--clear-display-agent"];
+    void runHerdr(pi, [
+      "pane", "report-metadata", paneId,
+      "--source", "pi-routing:delegation",
+      "--agent", "pi",
+      "--applies-to-source", "herdr:pi",
+      ...displayArgs,
+    ], 5000).catch(() => undefined);
+  };
+
   const updateStatus = (ctx: ExtensionContext) => {
     const route = selectedRoute ?? detectRoute(ctx);
     ctx.ui.setStatus("model-route", route ? ctx.ui.theme.fg("muted", `route:${route}`) : undefined);
@@ -219,6 +238,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (previous !== task.state) emitTaskLifecycle(pi.events, task);
     syncManifest();
     refreshWidget();
+    refreshParentMetadata();
   };
 
   const trackTask = (task: TaskHandle) => {
@@ -227,6 +247,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     emitTaskLifecycle(pi.events, task);
     syncManifest();
     refreshWidget();
+    refreshParentMetadata();
   };
 
   /**
@@ -694,6 +715,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     syncManifest();
     updateStatus(ctx);
     refreshWidget();
+    refreshParentMetadata();
     if (ctx.mode === "tui" && manifestPath) {
       terminalInputUnsubscribe = ctx.ui.onTerminalInput((data) => routedWidget?.handleTerminalInput(data, ctx.ui.getEditorText()));
       manifestTimer = setInterval(() => {

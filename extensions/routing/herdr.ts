@@ -218,8 +218,20 @@ export function herdrSocketRequestForArgs(args: string[]): HerdrSocketRequest {
     case "tab close": return { method: "tab.close", params: { tab_id: target } };
     case "pane list": return { method: "pane.list", params: { workspace_id: option(args, "--workspace") } };
     case "pane layout": return { method: "pane.layout", params: { pane_id: option(args, "--pane") ?? target } };
+    case "pane focus": return { method: "pane.focus", params: { pane_id: target } };
     case "pane split": return { method: "pane.split", params: { target_pane_id: option(args, "--pane"), direction: option(args, "--direction"), cwd: option(args, "--cwd"), focus: !args.includes("--no-focus"), env: envOptions(args) } };
     case "pane close": return { method: "pane.close", params: { pane_id: target } };
+    case "pane report-metadata": return {
+      method: "pane.report_metadata",
+      params: {
+        pane_id: target,
+        source: option(args, "--source"),
+        agent: option(args, "--agent"),
+        applies_to_source: option(args, "--applies-to-source"),
+        display_agent: option(args, "--display-agent"),
+        clear_display_agent: args.includes("--clear-display-agent"),
+      },
+    };
     case "agent get": return { method: "agent.get", params: { target } };
     case "agent focus": return { method: "agent.focus", params: { target } };
     case "agent read": return { method: "agent.read", params: { target, source: (option(args, "--source") ?? "recent-unwrapped").replaceAll("-", "_"), lines: Number(option(args, "--lines") ?? 80), format: "text", strip_ansi: true }, textResult: (response) => String(response?.result?.read?.text ?? "") };

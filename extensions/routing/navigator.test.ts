@@ -50,13 +50,26 @@ test("Down remains owned by another focused view such as /tree", () => {
   expect(ui.focused()).toBe(ui.tree);
 });
 
-test("Enter focuses the selected routed pane", async () => {
+test("Enter received by the terminal listener focuses the selected routed pane", async () => {
   const ui = setupWidget();
   ui.widget.handleTerminalInput("\x1b[B", "");
-  ui.widget.handleInput("\x1b[B");
-  ui.widget.handleInput("\r");
+  expect(ui.widget.handleTerminalInput("\x1b[B", "")).toEqual({ consume: true });
+  expect(ui.widget.handleTerminalInput("\r", "")).toEqual({ consume: true });
   await Promise.resolve();
   expect(ui.focusedPanes).toEqual(["w1:p3"]);
+});
+
+test("focus uses pane focus so Herdr updates the attached client view", async () => {
+  const calls: string[][] = [];
+  setHerdrTestTransportForTests(async (_pi, args) => {
+    calls.push(args);
+    return JSON.stringify({ result: { panes: [{ pane_id: "w1:p2" }] } });
+  });
+  await focusManifestPane({} as any, "w1:p2");
+  expect(calls).toEqual([
+    ["pane", "list", "--workspace", process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID!],
+    ["pane", "focus", "w1:p2"],
+  ]);
 });
 
 test("focus validates that the target pane still exists", async () => {
