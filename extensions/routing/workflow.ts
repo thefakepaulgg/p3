@@ -1,5 +1,4 @@
 import { resolve } from "node:path";
-import type { RouteName } from "./policy.ts";
 import type { TaskHandle } from "./state.ts";
 
 export type TaskPhase = "plan" | "implement" | "review" | "other";
@@ -7,10 +6,10 @@ export type TaskPhase = "plan" | "implement" | "review" | "other";
 const activeStates = new Set(["queued", "running", "blocked"]);
 
 export class ExplicitRouteRetryGuard {
-  private readonly failures = new Map<string, { route: RouteName; at: number }>();
+  private readonly failures = new Map<string, { route: string; at: number }>();
   constructor(private readonly ttlMs = 10 * 60_000) {}
 
-  record(key: string, route: RouteName, now = Date.now()): void {
+  record(key: string, route: string, now = Date.now()): void {
     this.failures.set(key, { route, at: now });
   }
 
@@ -24,7 +23,7 @@ export class ExplicitRouteRetryGuard {
   clear(key: string): void { this.failures.delete(key); }
 }
 
-export function inferPhase(task: string, route: RouteName, explicit?: TaskPhase): TaskPhase {
+export function inferPhase(task: string, _route: string, explicit?: TaskPhase): TaskPhase {
   if (explicit) return explicit;
   if (/\b(plan|planning|architecture|design)\b/i.test(task)) return "plan";
   if (/\b(review|audit|second opinion)\b/i.test(task)) return "review";

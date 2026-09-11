@@ -14,7 +14,7 @@ export interface TaskOwner {
 
 export interface TaskHandle {
   handle: string;
-  route: RouteName;
+  route: string;
   fallbackFrom?: RouteName;
   routeExplicit: boolean;
   target: string;

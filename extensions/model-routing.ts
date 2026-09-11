@@ -20,9 +20,7 @@ const RouteParams = Type.Object({
 const RoutedTaskParams = Type.Object({
   task: Type.String({ minLength: 1, description: "Self-contained assignment for the routed worker" }),
   description: Type.String({ minLength: 3, maxLength: 80, description: "Short task label" }),
-  route: Type.Optional(StringEnum(Object.keys(routes) as RouteName[], {
-    description: "Model-route override. Omit for policy selection.",
-  })),
+  route: Type.Optional(Type.String({ minLength: 1, description: "Model override. Accepts a configured route name, provider/model, or an unambiguous model ID. Omit for policy selection." })),
   cwd: Type.Optional(Type.String({ description: "Absolute working directory. Defaults to the current session directory." })),
   phase: Type.Optional(StringEnum(["plan", "implement", "review", "other"] as const, {
     description: "Workflow phase. Inferred when omitted; explicit phases improve dependency enforcement.",
@@ -275,10 +273,31 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     return !!model && ctx.modelRegistry.hasConfiguredAuth(model);
   };
 
-  const resolveRoute = (ctx: ExtensionContext, requested: RouteName, explicit: boolean) => {
-    const plan = planFallback(requested, explicit, (name) => availableRoute(ctx, name));
-    if ("error" in plan) throw new Error(plan.error);
-    return plan;
+  const resolveRoute = (ctx: ExtensionContext, requested: string, explicit: boolean) => {
+    if (!explicit || Object.prototype.hasOwnProperty.call(routes, requested)) {
+      const plan = planFallback(requested as RouteName, explicit, (name) => availableRoute(ctx, name));
+      if ("error" in plan) throw new Error(plan.error);
+      return { ...plan, config: routes[plan.route] };
+    }
+
+    const slash = requested.indexOf("/");
+    const candidates = slash > 0
+      ? [ctx.modelRegistry.find(requested.slice(0, slash), requested.slice(slash + 1))].filter(Boolean)
+      : ctx.modelRegistry.getAll().filter((model) => model.id === requested);
+    if (candidates.length === 0) throw new Error(`Model unavailable: ${requested}`);
+    if (candidates.length > 1) throw new Error(`Model ID ${requested} is ambiguous; specify provider/model`);
+    const model = candidates[0]!;
+    if (!ctx.modelRegistry.hasConfiguredAuth(model)) throw new Error(`No credentials available for ${model.provider}/${model.id}`);
+    return {
+      route: requested,
+      config: {
+        label: model.name,
+        provider: model.provider,
+        model: model.id,
+        thinking: model.reasoning ? "medium" as const : "off" as const,
+        purpose: "User-selected model",
+      },
+    };
   };
 
   const watchHerdrTask = (task: TaskHandle, baselineResult = "") => startHerdrWatcher({
@@ -697,7 +716,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       if (!lastDecision && candidate.customType === "delegation-route") lastDecision = candidate.data as typeof lastDecision;
       if (candidate.customType === "routed-task") {
         const data = candidate.data as TaskHandle | undefined;
-        if (data?.handle && data.agentName && data.paneId && (data.route === "sol" || data.route === "luna") && !seenTasks.has(data.handle)) {
+        if (data?.handle && data.agentName && data.paneId && typeof data.route === "string" && data.route && !seenTasks.has(data.handle)) {
           seenTasks.add(data.handle);
           taskHandles.set(data.handle, { ...data, transitions: data.transitions ?? 0, notifiedStates: data.notifiedStates ?? [] });
         }
@@ -705,7 +724,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }
     if (ownsManifest) {
       for (const task of routingManifest?.tasks ?? []) {
-        if (!seenTasks.has(task.handle) && !taskHandles.has(task.handle) && (task.route === "sol" || task.route === "luna")) {
+        if (!seenTasks.has(task.handle) && !taskHandles.has(task.handle) && typeof task.route === "string" && task.route) {
           taskHandles.set(task.handle, restoreTaskHandle(task));
         }
       }

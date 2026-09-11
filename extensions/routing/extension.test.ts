@@ -75,8 +75,45 @@ test("registers the simplified public surface", () => {
   const properties = tools.find((tool) => tool.name === "routed_task").parameters.properties;
   expect(properties.surface).toBeUndefined();
   expect(properties.isolation).toBeUndefined();
-  expect(properties.route.enum).toEqual(["sol", "luna"]);
+  expect(properties.route.type).toBe("string");
+  expect(properties.route.enum).toBeUndefined();
   expect(commands).toEqual(["routed", "route"]);
+});
+
+test("launches an explicitly requested model outside the programmed routes", async () => {
+  const restoreEnv = herdrEnv();
+  const tools: any[] = [];
+  const lifecycle = new Map<string, Function>();
+  const calls: string[][] = [];
+  const model = { provider: "openai-codex", id: "gpt-6-astra", name: "Astra", reasoning: true };
+  const fake: any = {
+    registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
+    exec: async (_command: string, args: string[]) => {
+      calls.push(args);
+      const key = args.slice(0, 2).join(" ");
+      if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
+      if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "working" } } }), stderr: "" };
+      return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
+    },
+  };
+  const ctx: any = {
+    hasUI: true, cwd: "/repo", sessionManager: sessionManager(),
+    modelRegistry: { getAll: () => [model], find: () => undefined, hasConfiguredAuth: () => true },
+    ui: { setStatus: () => {}, setWidget: () => {}, theme: { fg: (_: string, text: string) => text } },
+  };
+  try {
+    routing(fake);
+    const launch = tools.find((tool) => tool.name === "routed_task");
+    const launched = await launch.execute("1", { task: "Inspect the change", description: "Inspect change", route: "gpt-6-astra" }, undefined, undefined, ctx);
+    expect(launched.details.model).toBe("openai-codex/gpt-6-astra");
+    expect(launched.details.thinking).toBe("medium");
+    expect(calls.find((args) => args.slice(0, 2).join(" ") === "agent start")).toContain("openai-codex/gpt-6-astra");
+    await lifecycle.get("session_shutdown")?.();
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("registers routed-agent navigation input in TUI mode", async () => {

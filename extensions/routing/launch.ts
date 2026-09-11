@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
-import { classifyDelegation, classifyModelRoute, routes, type RouteName, type RoutingDecision } from "./policy.ts";
+import { classifyDelegation, classifyModelRoute, type Route, type RouteName, type RoutingDecision } from "./policy.ts";
 import { normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
 import { launchHerdrAgent, type HerdrLaunch } from "./herdr.ts";
 import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkflowLaunch, type TaskPhase } from "./workflow.ts";
@@ -8,7 +8,7 @@ import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkf
 export interface RoutedTaskLaunchParams {
   task: string;
   description: string;
-  route?: RouteName;
+  route?: string;
   cwd?: string;
   phase?: TaskPhase;
   depends_on?: string[];
@@ -18,7 +18,7 @@ export interface RoutedTaskLaunchParams {
   owner?: TaskOwner;
 }
 
-export interface LaunchRoutePlan { route: RouteName; fallbackFrom?: RouteName }
+export interface LaunchRoutePlan { route: string; config: Route; fallbackFrom?: RouteName }
 export interface RoutedTaskLaunchResult { text: string; details: Record<string, unknown>; task?: TaskHandle }
 
 export interface LaunchDependencies {
@@ -27,7 +27,7 @@ export interface LaunchDependencies {
   workflowLaunches: Map<string, Promise<RoutedTaskLaunchResult>>;
   routeRetryGuard: ExplicitRouteRetryGuard;
   recordDecision: (task: string, decision: RoutingDecision) => void;
-  resolveRoute: (ctx: ExtensionContext, requested: RouteName, explicit: boolean) => LaunchRoutePlan;
+  resolveRoute: (ctx: ExtensionContext, requested: string, explicit: boolean) => LaunchRoutePlan;
   trackTask: (task: TaskHandle) => void;
   watchHerdrTask: (task: TaskHandle) => void;
   manifestPath?: string;
@@ -46,7 +46,7 @@ export function validateRoutedTaskLaunchParams(input: RoutedTaskLaunchParams): v
   if (input.description.length > 80) throw new Error("description exceeds the 80 character limit");
   if ((input as any).surface !== undefined) throw new Error("surface is no longer supported; routed tasks always run in Herdr");
   if ((input as any).isolation !== undefined) throw new Error("isolation is no longer supported; pass an existing worktree as cwd");
-  if (input.route !== undefined && (typeof input.route !== "string" || !Object.prototype.hasOwnProperty.call(routes, input.route))) throw new Error(`unknown route ${String(input.route)}`);
+  if (input.route !== undefined && (typeof input.route !== "string" || !input.route.trim())) throw new Error("route must be a non-empty model or route name");
   if (input.cwd !== undefined && (typeof input.cwd !== "string" || input.cwd.length > MAX_PATH_LENGTH)) throw new Error("cwd is invalid or exceeds its limit");
   if (input.phase !== undefined && !["plan", "implement", "review", "other"].includes(input.phase)) throw new Error(`unknown workflow phase ${String(input.phase)}`);
   for (const [name, value] of [["depends_on", input.depends_on], ["owned_paths", input.owned_paths]] as const) {
@@ -65,7 +65,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const description = params.description.trim();
   const decision = classifyDelegation(`${description}\n${task}`);
   deps.recordDecision(task, decision);
-  const requestedRoute = params.route ?? classifyModelRoute(task, decision);
+  const requestedRoute = params.route?.trim() ?? classifyModelRoute(task, decision);
   const cwd = resolve(params.cwd ?? ctx.cwd);
   const phase = inferPhase(`${description}\n${task}`, requestedRoute, params.phase);
   const dependsOn = params.depends_on ?? [];
@@ -83,8 +83,8 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const active = [...deps.taskHandles.values()].filter((item) => ["queued", "running", "blocked"].includes(item.state)).length;
   if (active >= 4) throw new Error("Herdr routed-task concurrency limit reached (4 active tasks)");
   const routeName = routePlan.route;
-  const route = routes[routeName];
-  const launched: HerdrLaunch = await launchHerdrAgent(deps.pi, task, description, routeName, cwd, undefined, deps.manifestPath);
+  const route = routePlan.config;
+  const launched: HerdrLaunch = await launchHerdrAgent(deps.pi, task, description, routeName, route, cwd, undefined, deps.manifestPath);
   const handle = newHandle();
   const tracked: TaskHandle = {
     handle, route: routeName, fallbackFrom: routePlan.fallbackFrom, routeExplicit: params.route !== undefined,

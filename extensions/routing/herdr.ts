@@ -3,12 +3,11 @@ import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { RouteName } from "./policy.ts";
-import { routes } from "./policy.ts";
+import type { Route } from "./policy.ts";
 import { buildCompletionMessage, COMPLETION_KIND, isActiveTask, type TaskHandle } from "./state.ts";
 import { readIncrementalUsage } from "./usage.ts";
 
-export interface HerdrLaunch { agent: string; paneId: string; tabId: string; route: RouteName }
+export interface HerdrLaunch { agent: string; paneId: string; tabId: string; route: string }
 
 export const ROUTED_TAB_MAX_PANES = 4;
 const ROUTED_TAB_LABEL = "Routed agents";
@@ -402,12 +401,11 @@ async function waitForHerdrAgentReady(pi: ExtensionAPI, agentName: string, timeo
   throw new Error(`agent_start_timeout: ${agentName} did not become prompt-ready within ${timeout}ms (${lastState})`);
 }
 
-export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: RouteName, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string): Promise<HerdrLaunch> {
+export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string): Promise<HerdrLaunch> {
   const allocation = await allocateRoutedAgentPane(pi, cwd, manifestPath);
   const { paneId, tabId } = allocation;
   const slug = description.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "task";
   const agent = `r-${slug}-${Date.now().toString(36).slice(-5)}`.slice(0, 32);
-  const route = routes[routeName];
   let started = false;
   try {
     const startArgs = ["agent", "start", agent, "--kind", "pi", "--pane", paneId, "--timeout", "30000", "--", "--model", `${route.provider}/${route.model}`, "--thinking", route.thinking, "--name", description];
