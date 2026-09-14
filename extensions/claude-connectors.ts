@@ -2,8 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StringEnum, type ImageContent, type TextContent } from "@earendil-works/pi-ai";
 import { formatSize, type ExtensionAPI, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -38,6 +37,37 @@ interface CatalogConnector {
 interface CatalogResponse {
   data: CatalogConnector[];
 }
+
+type McpRuntime = {
+  Client: typeof import("@modelcontextprotocol/sdk/client/index.js").Client;
+  StreamableHTTPClientTransport: typeof import("@modelcontextprotocol/sdk/client/streamableHttp.js").StreamableHTTPClientTransport;
+};
+
+export function createMcpRuntimeLoader(
+  importRuntime: () => Promise<McpRuntime> = async () => {
+    const [clientModule, transportModule] = await Promise.all([
+      import("@modelcontextprotocol/sdk/client/index.js"),
+      import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
+    ]);
+    return {
+      Client: clientModule.Client,
+      StreamableHTTPClientTransport: transportModule.StreamableHTTPClientTransport,
+    };
+  },
+): () => Promise<McpRuntime> {
+  let runtimePromise: Promise<McpRuntime> | undefined;
+  return () => {
+    if (!runtimePromise) {
+      runtimePromise = importRuntime().catch((error) => {
+        runtimePromise = undefined;
+        throw error;
+      });
+    }
+    return runtimePromise;
+  };
+}
+
+const loadMcpRuntime = createMcpRuntimeLoader();
 
 const Params = Type.Object({
   action: StringEnum(["list_connectors", "list_tools", "describe_tool", "call"] as const),
@@ -156,7 +186,18 @@ async function persistLargeTextResult(content: Array<TextContent | ImageContent>
   };
 }
 
-export default function claudeConnectorsExtension(pi: ExtensionAPI) {
+interface ClaudeConnectorsDependencies {
+  readCredentials: () => Promise<ClaudeCredentials>;
+  loadMcpRuntime: () => Promise<McpRuntime>;
+}
+
+export function createClaudeConnectorsExtension(
+  overrides: Partial<ClaudeConnectorsDependencies> = {},
+): (pi: ExtensionAPI) => void {
+  const credentialReader = overrides.readCredentials ?? readCredentials;
+  const runtimeLoader = overrides.loadMcpRuntime ?? loadMcpRuntime;
+
+  return function claudeConnectorsExtension(pi: ExtensionAPI) {
   const clientSessionId = randomUUID();
   let cachedCatalog: CatalogConnector[] | undefined;
   let cachedCatalogExpiry = 0;
@@ -185,6 +226,7 @@ export default function claudeConnectorsExtension(pi: ExtensionAPI) {
   };
 
   const withClient = async <T>(connector: CatalogConnector, credentials: ClaudeCredentials, signal: AbortSignal | undefined, run: (client: Client) => Promise<T>) => {
+    const { Client, StreamableHTTPClientTransport } = await runtimeLoader();
     const endpoint = new URL(`/v1/mcp/${encodeURIComponent(connector.id)}`, MCP_PROXY_ORIGIN);
     const transport = new StreamableHTTPClientTransport(endpoint, {
       requestInit: {
@@ -219,7 +261,7 @@ export default function claudeConnectorsExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       let credentials: ClaudeCredentials | undefined;
       try {
-        credentials = await readCredentials();
+        credentials = await credentialReader();
 
         if (params.action === "list_connectors") {
           const connectors = await getCatalog(credentials, true);
@@ -295,4 +337,7 @@ export default function claudeConnectorsExtension(pi: ExtensionAPI) {
       }
     },
   });
+  };
 }
+
+export default createClaudeConnectorsExtension();

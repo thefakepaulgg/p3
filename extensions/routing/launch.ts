@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { resolve } from "node:path";
 import { classifyDelegation, classifyModelRoute, type Route, type RouteName, type RoutingDecision } from "./policy.ts";
 import { normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
-import { launchHerdrAgent, type HerdrLaunch } from "./herdr.ts";
+import { launchHerdrAgent, type HerdrLaunch, type RoutedWorkerCapability } from "./herdr.ts";
 import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkflowLaunch, type TaskPhase } from "./workflow.ts";
 
 export interface RoutedTaskLaunchParams {
@@ -15,6 +15,7 @@ export interface RoutedTaskLaunchParams {
   owned_paths?: string[];
   allow_concurrent?: boolean;
   pane_retention?: "keep" | "close";
+  capabilities?: RoutedWorkerCapability[];
   owner?: TaskOwner;
 }
 
@@ -54,6 +55,7 @@ export function validateRoutedTaskLaunchParams(input: RoutedTaskLaunchParams): v
   }
   if (input.allow_concurrent !== undefined && typeof input.allow_concurrent !== "boolean") throw new Error("allow_concurrent must be boolean");
   if (input.pane_retention !== undefined && input.pane_retention !== "keep" && input.pane_retention !== "close") throw new Error("pane_retention must be keep or close");
+  if (input.capabilities !== undefined && (!Array.isArray(input.capabilities) || input.capabilities.some((capability) => capability !== "memory"))) throw new Error("capabilities must contain only memory");
 }
 
 const workflowOwnerKey = (owner?: TaskOwner): string | undefined => owner ? `workflow:${owner.runId}:${owner.stepId}:${owner.attemptId}` : undefined;
@@ -84,7 +86,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   if (active >= 4) throw new Error("Herdr routed-task concurrency limit reached (4 active tasks)");
   const routeName = routePlan.route;
   const route = routePlan.config;
-  const launched: HerdrLaunch = await launchHerdrAgent(deps.pi, task, description, routeName, route, cwd, undefined, deps.manifestPath);
+  const launched: HerdrLaunch = await launchHerdrAgent(deps.pi, task, description, routeName, route, cwd, undefined, deps.manifestPath, params.capabilities);
   const handle = newHandle();
   const tracked: TaskHandle = {
     handle, route: routeName, fallbackFrom: routePlan.fallbackFrom, routeExplicit: params.route !== undefined,
@@ -98,7 +100,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const fallbackNote = routePlan.fallbackFrom ? ` Policy fallback: ${routePlan.fallbackFrom} was unavailable, so ${routeName} was selected.` : "";
   return {
     text: `Launched Herdr ${phase} task ${handle}: agent ${launched.agent}, pane ${launched.paneId}, using ${route.provider}/${route.model} (${route.thinking}). The model is fixed. Do not poll; completion will wake the primary.${fallbackNote}`,
-    details: { handle, phase, dependsOn, ownedPaths, allowConcurrent, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
+    details: { handle, phase, dependsOn, ownedPaths, allowConcurrent, capabilities: params.capabilities, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
     task: tracked,
   };
 }

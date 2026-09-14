@@ -24,6 +24,7 @@ steps:
     name: Only
     route: luna
     phase: other
+    capabilities: [memory]
     prompt: "Do {{inputs.goal}}"
 `);
   const tools: any[] = []; const commands = new Map<string, any>(); const lifecycle = new Map<string, Function>(); const listeners = new Map<string, Set<Function>>(); const entries: any[] = []; const launches: any[] = [];
@@ -44,7 +45,9 @@ steps:
     await lifecycle.get("session_start")?.({ reason: "startup" }, ctx);
     await commands.get("workflow").handler("start one goal", ctx);
     expect(launches[0].route).toBe("luna");
+    expect(launches[0].capabilities).toEqual(["memory"]);
     expect(launches[0].owner.kind).toBe("workflow");
+    expect(entries[0].data.definition.steps[0].capabilities).toEqual(["memory"]);
     const owner = launches[0].owner;
     emit("routing:task:completed", { state: "completed", handle: "rt-one", owner });
     await new Promise((resolve) => setTimeout(resolve, 10));
