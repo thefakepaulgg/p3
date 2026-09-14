@@ -227,7 +227,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
     const deliver = options.deliver ?? ((message: string) => deliverWithHelper(helperPath, message, env, helperTimeoutMs));
     const receive = options.receive ?? ((routeId: string) => receiveWithHelper(helperPath, routeId, env, Math.max(helperTimeoutMs, 20_000)));
     const replyPollIntervalMs = options.replyPollIntervalMs ?? 3_000;
-    const routeId = randomBytes(8).toString("hex");
+    let routeId = randomBytes(8).toString("hex");
     const claim = options.claimPrimary ?? claimPrimary;
     const release = options.releasePrimary ?? releasePrimary;
 
@@ -452,6 +452,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
 
     pi.on("session_start", (_event, ctx) => {
       state = loadState(statePath);
+      routeId = randomBytes(8).toString("hex");
       eligible = isEligiblePrimary(ctx, env);
       ownsPrimary = eligible && claim(instance);
       eligible = eligible && ownsPrimary;
