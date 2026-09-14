@@ -144,6 +144,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }
     const renderLines = (selectedHandle?: string) => {
       const current = widgetData();
+      if (!current.lines.length) return [];
       const theme = ctx.ui.theme;
       const markerColor = { "○": "muted", "●": "accent", "◆": "warning", "✓": "success", "×": "error", "−": "dim", "?": "warning", "↩": "accent" } as const;
       const title = typeof theme.bold === "function" ? theme.bold(current.lines[0]) : current.lines[0];

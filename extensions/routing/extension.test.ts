@@ -5,7 +5,7 @@ import { join } from "node:path";
 import routing from "../model-routing.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
 import { manifestPathForPane, readRoutingManifest, ROUTING_MANIFEST_VERSION, writeRoutingManifest } from "./manifest.ts";
-import { NOTIFICATION_LIMIT } from "./state.ts";
+import { NOTIFICATION_LIMIT, WIDGET_RECENT_WINDOW_MS } from "./state.ts";
 
 setHerdrTestTransportForTests(async (pi: any, args, timeout) => {
   const result = await pi.exec("herdr", args, { timeout });
@@ -351,6 +351,47 @@ test("Herdr completion delivers exactly one bounded custom message as a steer tu
     await lifecycle.get("session_shutdown")?.();
     expect(widgets.at(-1)).toEqual({ key: "routed-tasks", content: undefined });
   } finally {
+    restoreEnv();
+  }
+});
+
+test("a stale TUI widget renders nothing after its routed tasks expire", async () => {
+  const restoreEnv = herdrEnv();
+  const originalNow = Date.now;
+  const tools: any[] = [];
+  const lifecycle = new Map<string, Function>();
+  const messages: any[] = [];
+  let staleWidget: any;
+  let now = originalNow();
+  Date.now = () => now;
+  const fake: any = {
+    registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {},
+    sendMessage: (message: any, options: any) => messages.push({ message, options }),
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
+    exec: completedHerdrExec(sessionWith("Completed")),
+  };
+  const editor = { render: () => [], invalidate: () => {}, getText: () => "", setText: () => {}, handleInput: () => {} };
+  const tui: any = { getFocusedComponent: () => editor, setFocus: () => {}, requestRender: () => {} };
+  const ctx: any = {
+    hasUI: true, mode: "tui", cwd: "/repo", sessionManager: sessionManager(),
+    modelRegistry: { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true },
+    ui: {
+      setStatus: () => {}, theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+      setWidget: (_key: string, content: any) => { if (typeof content === "function") staleWidget = content(tui); },
+      notify: () => {},
+    },
+  };
+  try {
+    routing(fake);
+    const launch = tools.find((tool) => tool.name === "routed_task");
+    await launch.execute("1", { task: "Inspect", description: "Expiring task", route: "luna" }, undefined, undefined, ctx);
+    for (let tick = 0; tick < 10 && !messages.length; tick += 1) await new Promise((done) => setTimeout(done, 40));
+    expect(staleWidget).toBeDefined();
+    now += WIDGET_RECENT_WINDOW_MS + 1;
+    expect(staleWidget.render(120)).toEqual([]);
+    await lifecycle.get("session_shutdown")?.();
+  } finally {
+    Date.now = originalNow;
     restoreEnv();
   }
 });
