@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -39,6 +39,7 @@ interface NotificationIntent {
 
 interface NotificationState {
   enabled: boolean;
+  repliesEnabled: boolean;
   testPassedAt?: string;
   lastSentAt?: string;
   lastKind?: NotificationKind | "test";
@@ -61,11 +62,13 @@ export interface TelegramNotifyExtensionOptions {
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
   deliver?: (message: string) => Promise<void>;
+  receive?: (routeId: string) => Promise<string[]>;
+  replyPollIntervalMs?: number;
   claimPrimary?: (instance: object) => boolean;
   releasePrimary?: (instance: object) => void;
 }
 
-const defaultState = (): NotificationState => ({ enabled: false });
+const defaultState = (): NotificationState => ({ enabled: false, repliesEnabled: false });
 
 function normalizeText(value: string, maxLength = 500): string {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -85,6 +88,7 @@ function loadState(path: string): NotificationState {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<NotificationState>;
     return {
       enabled: parsed.enabled === true,
+      repliesEnabled: parsed.repliesEnabled === true,
       ...(typeof parsed.testPassedAt === "string" && { testPassedAt: parsed.testPassedAt }),
       ...(typeof parsed.lastSentAt === "string" && { lastSentAt: parsed.lastSentAt }),
       ...((parsed.lastKind === "completed" || parsed.lastKind === "blocked" || parsed.lastKind === "test") && { lastKind: parsed.lastKind }),
@@ -123,25 +127,27 @@ export function isEligiblePrimary(ctx: Pick<ExtensionContext, "mode" | "hasUI">,
   return true;
 }
 
-export function deliverWithHelper(
+function runHelper(
   helperPath: string,
-  message: string,
+  args: string[],
+  input: string,
   env: NodeJS.ProcessEnv,
-  timeoutMs = 12_000,
-): Promise<void> {
+  timeoutMs: number,
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(helperPath, [], {
+    const child = spawn(helperPath, args, {
       env,
       detached: true,
-      stdio: ["pipe", "ignore", "ignore"],
+      stdio: ["pipe", "pipe", "ignore"],
     });
+    let output = "";
     let settled = false;
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       if (error) reject(error);
-      else resolve();
+      else resolve(output);
     };
     const timeout = setTimeout(() => {
       try {
@@ -152,14 +158,38 @@ export function deliverWithHelper(
       }
       finish(new Error("notification helper timed out"));
     }, timeoutMs);
+    child.stdout.on("data", (chunk) => { output += String(chunk); });
     child.once("error", () => finish(new Error("notification helper could not start")));
     child.once("close", (code) => {
       if (code === 0) finish();
       else finish(new Error(`notification helper exited with code ${code ?? "unknown"}`));
     });
     child.stdin.once("error", () => finish(new Error("notification helper input failed")));
-    child.stdin.end(message);
+    child.stdin.end(input);
   });
+}
+
+export async function deliverWithHelper(
+  helperPath: string,
+  message: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs = 12_000,
+): Promise<void> {
+  await runHelper(helperPath, ["send"], message, env, timeoutMs);
+}
+
+export async function receiveWithHelper(
+  helperPath: string,
+  routeId: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs = 12_000,
+): Promise<string[]> {
+  const output = await runHelper(helperPath, ["receive", routeId], "", env, timeoutMs);
+  const parsed: unknown = JSON.parse(output || "[]");
+  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
+    throw new Error("notification helper returned invalid replies");
+  }
+  return parsed;
 }
 
 function fingerprint(intent: NotificationIntent): string {
@@ -172,7 +202,7 @@ function fingerprint(intent: NotificationIntent): string {
     .digest("hex");
 }
 
-function formatMessage(intent: NotificationIntent, ctx: ExtensionContext): string {
+function formatMessage(intent: NotificationIntent, ctx: ExtensionContext, routeId?: string): string {
   const project = basename(ctx.cwd) || ctx.cwd;
   const sessionName = ctx.sessionManager.getSessionName();
   const lines = [
@@ -184,6 +214,7 @@ function formatMessage(intent: NotificationIntent, ctx: ExtensionContext): strin
   }
   lines.push(`Project: ${normalizeText(project, 120)}`, `Host: ${normalizeText(hostname(), 120)}`);
   if (sessionName) lines.push(`Session: ${normalizeText(sessionName, 120)}`);
+  if (routeId) lines.push("Reply to this message to respond.", `[pi:${routeId}]`);
   return lines.join("\n");
 }
 
@@ -196,6 +227,9 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
     const helperTimeoutMs = options.helperTimeoutMs ?? 12_000;
     const now = options.now ?? (() => new Date());
     const deliver = options.deliver ?? ((message: string) => deliverWithHelper(helperPath, message, env, helperTimeoutMs));
+    const receive = options.receive ?? ((routeId: string) => receiveWithHelper(helperPath, routeId, env, Math.max(helperTimeoutMs, 20_000)));
+    const replyPollIntervalMs = options.replyPollIntervalMs ?? 3_000;
+    let routeId = randomBytes(8).toString("hex");
     const claim = options.claimPrimary ?? claimPrimary;
     const release = options.releasePrimary ?? releasePrimary;
 
@@ -207,9 +241,13 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
     let assistantEndedAfterIntent = false;
     let lastAssistantStopReason: StopReason | undefined;
     let warnedDeliveryFailure = false;
+    let replyTimer: ReturnType<typeof setTimeout> | undefined;
+    let replyContext: ExtensionContext | undefined;
+    let replyGeneration = 0;
 
     const persist = () => saveState(statePath, state);
     const isEnabled = () => eligible && state.enabled;
+    const areRepliesEnabled = () => isEnabled() && state.repliesEnabled;
 
     const updateStatus = (ctx: ExtensionContext) => {
       const value = !eligible
@@ -240,7 +278,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
         return { duplicate: true };
       }
 
-      await deliver(formatMessage(intent, ctx));
+      await deliver(formatMessage(intent, ctx, state.repliesEnabled ? routeId : undefined));
       state.lastSentAt = now().toISOString();
       state.lastKind = intent.kind;
       state.lastFingerprint = digest;
@@ -248,6 +286,50 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
       persist();
       updateStatus(ctx);
       return { duplicate: false };
+    };
+
+    const scheduleReplyPoll = (delayMs: number, generation: number) => {
+      replyTimer = setTimeout(() => pollReplies(generation), delayMs);
+      replyTimer.unref?.();
+    };
+
+    const pollReplies = async (generation: number) => {
+      const ctx = replyContext;
+      if (!ctx || generation !== replyGeneration || !areRepliesEnabled()) return;
+      try {
+        const replies = await receive(routeId);
+        if (state.lastError) {
+          state.lastError = undefined;
+          persist();
+          updateStatus(ctx);
+        }
+        for (const reply of replies) {
+          if (generation !== replyGeneration || !replyContext || !areRepliesEnabled()) return;
+          pi.sendUserMessage(reply, { deliverAs: "steer" });
+        }
+      } catch (error) {
+        if (generation === replyGeneration && replyContext) recordFailure(ctx, error);
+      } finally {
+        if (generation === replyGeneration && replyContext && areRepliesEnabled()) {
+          const jitterMs = randomBytes(2).readUInt16BE() % 500;
+          scheduleReplyPoll(replyPollIntervalMs + jitterMs, generation);
+        }
+      }
+    };
+
+    const startReplyPolling = (ctx: ExtensionContext) => {
+      replyContext = ctx;
+      if (!replyTimer && areRepliesEnabled()) {
+        replyGeneration += 1;
+        scheduleReplyPoll(0, replyGeneration);
+      }
+    };
+
+    const stopReplyPolling = () => {
+      replyGeneration += 1;
+      replyContext = undefined;
+      if (replyTimer) clearTimeout(replyTimer);
+      replyTimer = undefined;
     };
 
     const ensureToolRegistered = () => {
@@ -307,7 +389,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
     pi.registerCommand("notify", {
       description: "Test, enable, disable, or inspect Telegram notifications",
       getArgumentCompletions: (prefix) => {
-        const items = ["status", "test", "on", "off"]
+        const items = ["status", "test", "on", "off", "replies-on", "replies-off"]
           .filter((value) => value.startsWith(prefix))
           .map((value) => ({ value, label: value }));
         return items.length ? items : null;
@@ -330,6 +412,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
             state.lastKind = "test";
             persist();
             ensureToolRegistered();
+            if (state.repliesEnabled) startReplyPolling(ctx);
             updateStatus(ctx);
             ctx.ui.notify("Telegram test delivered; notifications are now enabled.", "info");
           } catch (error) {
@@ -347,18 +430,35 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
           state.enabled = true;
           persist();
           ensureToolRegistered();
+          if (state.repliesEnabled) startReplyPolling(ctx);
         } else if (action === "off") {
           state.enabled = false;
           pendingCompletion = undefined;
+          stopReplyPolling();
+          persist();
+        } else if (action === "replies-on") {
+          if (!state.enabled) {
+            ctx.ui.notify("Enable Telegram notifications before enabling replies.", "warning");
+            return;
+          }
+          state.repliesEnabled = true;
+          routeId = randomBytes(8).toString("hex");
+          persist();
+          startReplyPolling(ctx);
+        } else if (action === "replies-off") {
+          state.repliesEnabled = false;
+          routeId = randomBytes(8).toString("hex");
+          stopReplyPolling();
           persist();
         } else if (action !== "status") {
-          ctx.ui.notify("Usage: /notify [status|test|on|off]", "error");
+          ctx.ui.notify("Usage: /notify [status|test|on|off|replies-on|replies-off]", "error");
           return;
         }
 
         updateStatus(ctx);
         const summary = [
           state.enabled ? "enabled" : "disabled",
+          `replies=${state.repliesEnabled ? "on" : "off"}`,
           `tested=${state.testPassedAt ?? "never"}`,
           `last=${state.lastSentAt ?? "never"}`,
           `kind=${state.lastKind ?? "none"}`,
@@ -370,12 +470,16 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
 
     pi.on("session_start", (_event, ctx) => {
       state = loadState(statePath);
+      routeId = randomBytes(8).toString("hex");
       eligible = isEligiblePrimary(ctx, env);
       ownsPrimary = eligible && claim(instance);
       eligible = eligible && ownsPrimary;
       pendingCompletion = undefined;
       warnedDeliveryFailure = false;
-      if (state.enabled) ensureToolRegistered();
+      if (state.enabled) {
+        ensureToolRegistered();
+        if (state.repliesEnabled) startReplyPolling(ctx);
+      }
       updateStatus(ctx);
     });
 
@@ -423,6 +527,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
 
     pi.on("session_shutdown", (_event, ctx) => {
       pendingCompletion = undefined;
+      stopReplyPolling();
       ctx.ui.setStatus(STATUS_KEY, undefined);
       if (ownsPrimary) release(instance);
       ownsPrimary = false;

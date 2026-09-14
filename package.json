@@ -9,7 +9,8 @@
   "files": [
     "extensions",
     "themes",
-    "workflows"
+    "workflows",
+    "scripts/pi-telegram-notify"
   ],
   "pi": {
     "extensions": [
