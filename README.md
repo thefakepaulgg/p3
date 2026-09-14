@@ -21,7 +21,13 @@ pi -e git:github.com/therealpaulgg/p3
 - Catppuccin, Dracula, Synthwave, and Matrix themes
 - The `rpiv` workflow
 
-The Telegram extension expects an executable at `~/.local/bin/pi-telegram-notify` that accepts the notification body on stdin. It remains disabled when that helper is unavailable.
+The Telegram extension uses `~/.local/bin/pi-telegram-notify` to send notifications and poll for replies. Install the included helper with:
+
+```sh
+install -m 700 scripts/pi-telegram-notify ~/.local/bin/pi-telegram-notify
+```
+
+Reply to a notification in Telegram to send that reply back to the Pi session that produced it. The extension remains disabled when the helper is unavailable.
 
 ## Development
 

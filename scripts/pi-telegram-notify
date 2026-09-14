@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+profile="personal"
+bws_env="${HOME}/.local/bin/bws-env"
+state_dir="${HOME}/.local/state/pi/telegram-replies"
+
+fail() {
+  printf 'Pi Telegram notification failed for the %s profile: %s\n' "$profile" "$1" >&2
+  exit 1
+}
+
+load_credentials() {
+  [[ -x "$bws_env" ]] || fail "bws-env is unavailable"
+  unset TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+  if ! exports="$($bws_env TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID 2>/dev/null)"; then
+    fail "credentials are unavailable"
+  fi
+  [[ -n "$exports" ]] || fail "credentials are unavailable"
+  eval "$exports"
+  unset exports
+  export -n TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+  unset BWS_ACCESS_TOKEN BW_SESSION
+
+  [[ "${TELEGRAM_BOT_TOKEN:-}" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || fail "bot token is invalid"
+  [[ "${TELEGRAM_CHAT_ID:-}" =~ ^-?[0-9]+$ ]] || fail "chat ID is invalid"
+}
+
+telegram_request() {
+  local method="$1"
+  local body="${2:-}"
+  printf '%s' "$body" \
+    | curl --config /dev/fd/3 \
+        --noproxy '*' \
+        --fail \
+        --silent \
+        --show-error \
+        --connect-timeout 3 \
+        --max-time 10 \
+        --header 'Content-Type: application/x-www-form-urlencoded' \
+        --data-binary @- \
+        3< <(printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$TELEGRAM_BOT_TOKEN" "$method")
+}
+
+send_message() {
+  local message body
+  message="$(cat)"
+  [[ -n "$message" ]] || fail "message is empty"
+  if (( ${#message} > 3500 )); then
+    fail "message exceeds 3500 characters"
+  fi
+  load_credentials
+  body="$(printf '%s' "$message" \
+    | jq -Rsr --arg chat_id "$TELEGRAM_CHAT_ID" \
+        '"chat_id=\($chat_id | @uri)&text=\(. | @uri)"')"
+  telegram_request sendMessage "$body" >/dev/null || fail "Telegram request was unsuccessful"
+}
+
+drain_inbox() {
+  local route_id="$1"
+  local inbox="${state_dir}/inbox-${route_id}.jsonl"
+  if [[ -f "$inbox" ]]; then
+    jq -s '.' "$inbox"
+    rm -f "$inbox"
+  else
+    printf '[]\n'
+  fi
+}
+
+release_poll_lock() {
+  if [[ -n "${poll_lock:-}" && "$(cat "$poll_lock" 2>/dev/null || true)" == "$$" ]]; then
+    rm -f "$poll_lock"
+  fi
+}
+
+receive_replies() {
+  local route_id="$1"
+  [[ "$route_id" =~ ^[0-9a-f]{16}$ ]] || fail "reply route is invalid"
+  mkdir -p "$state_dir"
+
+  poll_lock="${state_dir}/poll.lock"
+  if ! /usr/bin/shlock -f "$poll_lock" -p "$$"; then
+    printf '[]\n'
+    return
+  fi
+  trap release_poll_lock EXIT
+
+  load_credentials
+  local offset=0
+  [[ -f "${state_dir}/offset" ]] && offset="$(cat "${state_dir}/offset")"
+  [[ "$offset" =~ ^[0-9]+$ ]] || offset=0
+
+  local body response
+  body="$(jq -nr --arg chat_id "$TELEGRAM_CHAT_ID" --argjson offset "$offset" \
+    '"offset=\($offset)&limit=100&timeout=0&allowed_updates=\(["message"] | tojson | @uri)"')"
+  response="$(telegram_request getUpdates "$body")" || fail "Telegram request was unsuccessful"
+  [[ "$(jq -r '.ok' <<<"$response")" == "true" ]] || fail "Telegram response was unsuccessful"
+
+  local events="${state_dir}/events.tmp.$$"
+  if ! jq -c --arg chat_id "$TELEGRAM_CHAT_ID" '
+    .result[]
+    | select((.message.chat.id | tostring) == $chat_id)
+    | select(.message.text != null and .message.reply_to_message.text != null)
+    | (.message.reply_to_message.text | capture("\\[pi:(?<route>[0-9a-f]{16})\\]")) as $match
+    | { route: $match.route, text: .message.text }
+  ' <<<"$response" >"$events"; then
+    rm -f "$events"
+    fail "Telegram replies could not be parsed"
+  fi
+  while IFS= read -r event; do
+    local target
+    target="$(jq -r '.route' <<<"$event")"
+    jq -c '.text' <<<"$event" >>"${state_dir}/inbox-${target}.jsonl"
+  done <"$events"
+  rm -f "$events"
+
+  local next_offset
+  next_offset="$(jq -r --argjson current "$offset" '[.result[].update_id + 1, $current] | max' <<<"$response")"
+  printf '%s\n' "$next_offset" >"${state_dir}/offset.tmp.$$"
+  mv "${state_dir}/offset.tmp.$$" "${state_dir}/offset"
+
+  drain_inbox "$route_id"
+}
+
+case "${1:-send}" in
+  send) send_message ;;
+  receive) [[ $# -eq 2 ]] || fail "reply route is required"; receive_replies "$2" ;;
+  *) fail "usage: pi-telegram-notify [send|receive ROUTE]" ;;
+esac

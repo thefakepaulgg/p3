@@ -38,6 +38,7 @@ function setup(options: {
   const fakePi: any = {
     registerTool: (tool: any) => tools.push(tool),
     registerCommand: (name: string, command: any) => commands.push({ name, command }),
+    sendUserMessage: () => {},
     on: (event: string, handler: Function) => handlers.set(event, handler),
   };
 
@@ -46,6 +47,7 @@ function setup(options: {
     helperPath: join(temp, "unused-helper"),
     env: options.env ?? {},
     deliver: async (message) => { deliveries.push(message); },
+    receive: async () => [],
     claimPrimary: options.claimPrimary ?? (() => true),
     releasePrimary: options.releasePrimary ?? (() => {}),
   })(fakePi);
