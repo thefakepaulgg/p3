@@ -39,6 +39,7 @@ interface NotificationIntent {
 
 interface NotificationState {
   enabled: boolean;
+  repliesEnabled: boolean;
   testPassedAt?: string;
   lastSentAt?: string;
   lastKind?: NotificationKind | "test";
@@ -67,7 +68,7 @@ export interface TelegramNotifyExtensionOptions {
   releasePrimary?: (instance: object) => void;
 }
 
-const defaultState = (): NotificationState => ({ enabled: false });
+const defaultState = (): NotificationState => ({ enabled: false, repliesEnabled: false });
 
 function normalizeText(value: string, maxLength = 500): string {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -87,6 +88,7 @@ function loadState(path: string): NotificationState {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<NotificationState>;
     return {
       enabled: parsed.enabled === true,
+      repliesEnabled: parsed.repliesEnabled === true,
       ...(typeof parsed.testPassedAt === "string" && { testPassedAt: parsed.testPassedAt }),
       ...(typeof parsed.lastSentAt === "string" && { lastSentAt: parsed.lastSentAt }),
       ...((parsed.lastKind === "completed" || parsed.lastKind === "blocked" || parsed.lastKind === "test") && { lastKind: parsed.lastKind }),
@@ -200,7 +202,7 @@ function fingerprint(intent: NotificationIntent): string {
     .digest("hex");
 }
 
-function formatMessage(intent: NotificationIntent, ctx: ExtensionContext, routeId: string): string {
+function formatMessage(intent: NotificationIntent, ctx: ExtensionContext, routeId?: string): string {
   const project = basename(ctx.cwd) || ctx.cwd;
   const sessionName = ctx.sessionManager.getSessionName();
   const lines = [
@@ -212,7 +214,7 @@ function formatMessage(intent: NotificationIntent, ctx: ExtensionContext, routeI
   }
   lines.push(`Project: ${normalizeText(project, 120)}`, `Host: ${normalizeText(hostname(), 120)}`);
   if (sessionName) lines.push(`Session: ${normalizeText(sessionName, 120)}`);
-  lines.push("Reply to this message to respond.", `[pi:${routeId}]`);
+  if (routeId) lines.push("Reply to this message to respond.", `[pi:${routeId}]`);
   return lines.join("\n");
 }
 
@@ -245,6 +247,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
 
     const persist = () => saveState(statePath, state);
     const isEnabled = () => eligible && state.enabled;
+    const areRepliesEnabled = () => isEnabled() && state.repliesEnabled;
 
     const updateStatus = (ctx: ExtensionContext) => {
       const value = !eligible
@@ -275,7 +278,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
         return { duplicate: true };
       }
 
-      await deliver(formatMessage(intent, ctx, routeId));
+      await deliver(formatMessage(intent, ctx, state.repliesEnabled ? routeId : undefined));
       state.lastSentAt = now().toISOString();
       state.lastKind = intent.kind;
       state.lastFingerprint = digest;
@@ -292,7 +295,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
 
     const pollReplies = async (generation: number) => {
       const ctx = replyContext;
-      if (!ctx || generation !== replyGeneration || !isEnabled()) return;
+      if (!ctx || generation !== replyGeneration || !areRepliesEnabled()) return;
       try {
         const replies = await receive(routeId);
         if (state.lastError) {
@@ -301,13 +304,13 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
           updateStatus(ctx);
         }
         for (const reply of replies) {
-          if (generation !== replyGeneration || !replyContext || !isEnabled()) return;
+          if (generation !== replyGeneration || !replyContext || !areRepliesEnabled()) return;
           pi.sendUserMessage(reply, { deliverAs: "steer" });
         }
       } catch (error) {
         if (generation === replyGeneration && replyContext) recordFailure(ctx, error);
       } finally {
-        if (generation === replyGeneration && replyContext && isEnabled()) {
+        if (generation === replyGeneration && replyContext && areRepliesEnabled()) {
           const jitterMs = randomBytes(2).readUInt16BE() % 500;
           scheduleReplyPoll(replyPollIntervalMs + jitterMs, generation);
         }
@@ -316,7 +319,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
 
     const startReplyPolling = (ctx: ExtensionContext) => {
       replyContext = ctx;
-      if (!replyTimer && isEnabled()) {
+      if (!replyTimer && areRepliesEnabled()) {
         replyGeneration += 1;
         scheduleReplyPoll(0, replyGeneration);
       }
@@ -386,7 +389,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
     pi.registerCommand("notify", {
       description: "Test, enable, disable, or inspect Telegram notifications",
       getArgumentCompletions: (prefix) => {
-        const items = ["status", "test", "on", "off"]
+        const items = ["status", "test", "on", "off", "replies-on", "replies-off"]
           .filter((value) => value.startsWith(prefix))
           .map((value) => ({ value, label: value }));
         return items.length ? items : null;
@@ -409,7 +412,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
             state.lastKind = "test";
             persist();
             ensureToolRegistered();
-            startReplyPolling(ctx);
+            if (state.repliesEnabled) startReplyPolling(ctx);
             updateStatus(ctx);
             ctx.ui.notify("Telegram test delivered; notifications are now enabled.", "info");
           } catch (error) {
@@ -427,20 +430,35 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
           state.enabled = true;
           persist();
           ensureToolRegistered();
-          startReplyPolling(ctx);
+          if (state.repliesEnabled) startReplyPolling(ctx);
         } else if (action === "off") {
           state.enabled = false;
           pendingCompletion = undefined;
           stopReplyPolling();
           persist();
+        } else if (action === "replies-on") {
+          if (!state.enabled) {
+            ctx.ui.notify("Enable Telegram notifications before enabling replies.", "warning");
+            return;
+          }
+          state.repliesEnabled = true;
+          routeId = randomBytes(8).toString("hex");
+          persist();
+          startReplyPolling(ctx);
+        } else if (action === "replies-off") {
+          state.repliesEnabled = false;
+          routeId = randomBytes(8).toString("hex");
+          stopReplyPolling();
+          persist();
         } else if (action !== "status") {
-          ctx.ui.notify("Usage: /notify [status|test|on|off]", "error");
+          ctx.ui.notify("Usage: /notify [status|test|on|off|replies-on|replies-off]", "error");
           return;
         }
 
         updateStatus(ctx);
         const summary = [
           state.enabled ? "enabled" : "disabled",
+          `replies=${state.repliesEnabled ? "on" : "off"}`,
           `tested=${state.testPassedAt ?? "never"}`,
           `last=${state.lastSentAt ?? "never"}`,
           `kind=${state.lastKind ?? "none"}`,
@@ -460,7 +478,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
       warnedDeliveryFailure = false;
       if (state.enabled) {
         ensureToolRegistered();
-        startReplyPolling(ctx);
+        if (state.repliesEnabled) startReplyPolling(ctx);
       }
       updateStatus(ctx);
     });

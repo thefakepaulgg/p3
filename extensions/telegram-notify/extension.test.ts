@@ -122,6 +122,40 @@ test("disabled sessions register no model-facing tool until a test succeeds", as
   expect(harness.notifications.at(-1)?.message).toContain("now enabled");
 });
 
+test("replies default off and can be toggled independently", async () => {
+  const harness = setup();
+  await start(harness);
+  const command = harness.commands.find(({ name }) => name === "notify").command;
+  const tool = harness.tools.find(({ name }) => name === "notify_user");
+
+  await command.handler("status", harness.ctx);
+  expect(harness.notifications.at(-1)?.message).toContain("replies=off");
+
+  await tool.execute("call-1", {
+    kind: "blocked",
+    summary: "First blocker",
+    assistance_needed: "Reply once",
+  }, new AbortController().signal, () => {}, harness.ctx);
+  expect(harness.deliveries.at(-1)).not.toContain("[pi:");
+
+  await command.handler("replies-on", harness.ctx);
+  await tool.execute("call-2", {
+    kind: "blocked",
+    summary: "Second blocker",
+    assistance_needed: "Reply twice",
+  }, new AbortController().signal, () => {}, harness.ctx);
+  expect(harness.deliveries.at(-1)).toContain("Reply to this message to respond.");
+  expect(harness.deliveries.at(-1)).toMatch(/\[pi:[0-9a-f]{16}\]/);
+
+  await command.handler("replies-off", harness.ctx);
+  await tool.execute("call-3", {
+    kind: "blocked",
+    summary: "Third blocker",
+    assistance_needed: "Reply three times",
+  }, new AbortController().signal, () => {}, harness.ctx);
+  expect(harness.deliveries.at(-1)).not.toContain("[pi:");
+});
+
 test("completion sends only after a normal final response and agent_settled", async () => {
   const harness = setup();
   await start(harness);
