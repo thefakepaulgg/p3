@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { routes, type RouteName } from "../routing/policy.ts";
+import type { RoutedWorkerCapability } from "../routing/herdr.ts";
 import type { TaskPhase } from "../routing/workflow.ts";
 
 
@@ -35,6 +36,7 @@ export interface WorkflowStep {
   name: string;
   route: RouteName;
   phase: TaskPhase;
+  capabilities: RoutedWorkerCapability[];
   needs: string[];
   prompt: string;
   context: WorkflowContextRef[];
@@ -76,6 +78,7 @@ export interface WorkflowLoadResult {
 const routesSet = new Set<string>(Object.keys(routes));
 const phases = new Set<TaskPhase>(["plan", "implement", "review", "other"]);
 const gates = new Set(["routed-task-completed", "output-nonempty"]);
+const capabilities = new Set<RoutedWorkerCapability>(["memory"]);
 
 const fail = (message: string): never => { throw new Error(message); };
 const object = (value: unknown, label: string): Record<string, unknown> => {
@@ -162,6 +165,8 @@ function parseStep(value: unknown, index: number, _defaults: WorkflowDefaults): 
   if (!routesSet.has(route)) fail(`steps[${index}].route ${route} is unknown`);
   const phase = text(raw.phase, `steps[${index}].phase`, 32) as TaskPhase;
   if (!phases.has(phase)) fail(`steps[${index}].phase ${phase} is unknown`);
+  const stepCapabilities = list(raw.capabilities, `steps[${index}].capabilities`, capabilities.size) as RoutedWorkerCapability[];
+  for (const capability of stepCapabilities) if (!capabilities.has(capability)) fail(`steps[${index}].capabilities ${capability} is unknown`);
   const needs = list(raw.needs, `steps[${index}].needs`, MAX_STEPS);
   const prompt = text(raw.prompt, `steps[${index}].prompt`, MAX_PROMPT_LENGTH);
   const context = [...new Set([...parseContext(raw.context, `steps[${index}].context`), ...promptRefs(prompt)])];
@@ -186,7 +191,7 @@ function parseStep(value: unknown, index: number, _defaults: WorkflowDefaults): 
   if (trackGitValue !== undefined && typeof trackGitValue !== "boolean") fail(`steps[${index}].sideEffects.trackGit must be boolean`);
   const trackGit = trackGitValue === undefined ? false : trackGitValue as boolean;
   return {
-    id: stepId, name: stepName, route, phase, needs: [...new Set(needs)], prompt, context, approvalAfter, ...(approvalMessage === undefined ? {} : { approvalMessage }),
+    id: stepId, name: stepName, route, phase, capabilities: [...new Set(stepCapabilities)], needs: [...new Set(needs)], prompt, context, approvalAfter, ...(approvalMessage === undefined ? {} : { approvalMessage }),
     completionRequire: [...new Set(completionRequire)], ownershipPaths: list(ownership.paths, `steps[${index}].ownership.paths`, 32), trackGit,
   };
 }

@@ -44,11 +44,13 @@ test("versioned routing RPC preserves launch/status/result/stop parity and owner
     version: ROUTING_RPC_VERSION,
     task: "Implement the bounded workflow step",
     description: "Workflow step",
+    capabilities: ["memory"],
     owner: { kind: "workflow", runId: "r".repeat(200), stepId: "step-1", attemptId: "attempt-1" },
   });
   expect(launched.success).toBe(true);
   const launchCall = calls.find(([kind]) => kind === "launch")![1] as any;
   expect(launchCall.owner).toEqual({ kind: "workflow", runId: "r".repeat(128), stepId: "step-1", attemptId: "attempt-1" });
+  expect(launchCall.params.capabilities).toEqual(["memory"]);
 
   expect((await request(events, ROUTING_RPC_CHANNELS.status, { handle: "rt-1" })).data).toEqual({ handle: "rt-1", state: "running", result: undefined });
   expect((await request(events, ROUTING_RPC_CHANNELS.result, { handle: "rt-1" })).data.result).toBe("full routed result");
@@ -65,8 +67,10 @@ test("routing RPC validates launch parameters before invoking the handler", asyn
   });
   const invalidSurface = await request(events, ROUTING_RPC_CHANNELS.launch, { task: "x", description: "step", surface: "bogus" });
   const invalidIsolation = await request(events, ROUTING_RPC_CHANNELS.launch, { task: "x", description: "step", isolation: "worktree" });
+  const invalidCapability = await request(events, ROUTING_RPC_CHANNELS.launch, { task: "x", description: "step", capabilities: ["shell"] });
   expect(invalidSurface.success).toBe(false);
   expect(invalidIsolation.success).toBe(false);
+  expect(invalidCapability).toEqual({ success: false, error: "capabilities must contain only memory" });
   expect(launches).toBe(0);
   registration.unsubscribe();
 });

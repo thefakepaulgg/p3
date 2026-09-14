@@ -36,6 +36,14 @@ test("normalizes, hashes, and snapshots a generic workflow", () => {
   expect(hashWorkflow(loaded)).not.toBe(first);
 });
 
+test("normalizes memory capabilities and rejects unsupported values", () => {
+  const withMemory = parseWorkflowYaml(yaml().replace("    phase: implement", "    phase: implement\n    capabilities: [memory]"));
+  expect(withMemory.steps[0].capabilities).toEqual([]);
+  expect(withMemory.steps[1].capabilities).toEqual(["memory"]);
+  expect(() => parseWorkflowYaml(yaml().replace("    phase: implement", "    phase: implement\n    capabilities: [shell]"))).toThrow("steps[1].capabilities shell is unknown");
+  expect(() => parseWorkflowYaml(yaml().replace("    phase: implement", "    phase: implement\n    capabilities: memory"))).toThrow("steps[1].capabilities must be an array");
+});
+
 test("reports malformed YAML and invalid graph/context references", () => {
   expect(validateWorkflowText("not: [valid", "/tmp/bad.yaml")).toHaveLength(1);
   expect(() => parseWorkflowYaml(yaml().replace("needs: [research]", "needs: [missing]"))).toThrow("unknown step");

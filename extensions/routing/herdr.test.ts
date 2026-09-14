@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
-import { join } from "node:path";
-import { herdrSocketRequestForArgs, launchHerdrAgent, parseJson, readHerdrResult, requestHerdrSocket, resolveHerdrSocketPath, ROUTED_TAB_MAX_PANES, setHerdrTestTransportForTests, shouldCloseCompletedPane, watchHerdrTask } from "./herdr.ts";
+import { fileURLToPath } from "node:url";
+import { buildRoutedWorkerPiArgs, herdrSocketRequestForArgs, launchHerdrAgent, parseJson, readHerdrResult, requestHerdrSocket, resolveHerdrSocketPath, ROUTED_TAB_MAX_PANES, setHerdrTestTransportForTests, shouldCloseCompletedPane, watchHerdrTask } from "./herdr.ts";
+import { routes, type Route } from "./policy.ts";
 import { COMPLETION_KIND, NOTIFICATION_LIMIT, type TaskHandle } from "./state.ts";
 
 // Existing orchestration tests use deterministic in-memory transport responses. Dedicated
@@ -26,6 +27,53 @@ describe("completed pane retention", () => {
 describe("Herdr response parsing", () => {
   test("parses success envelope", () => expect(parseJson('{"result":{"agent":{"agent_status":"idle"}}}', "test").result.agent.agent_status).toBe("idle"));
   test("rejects invalid JSON", () => expect(() => parseJson("not json", "test")).toThrow("invalid JSON"));
+});
+
+describe("routed worker Pi arguments", () => {
+  const agentDir = "/tmp/pi-agent";
+  const route = (provider: string, model: string, thinking: Route["thinking"] = "medium") => ({ provider, model, thinking } as Route);
+  const withAgentDir = (check: () => void) => {
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try { check(); }
+    finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+    }
+  };
+
+  test("builds the exact default worker arguments without root model routing", () => withAgentDir(() => {
+    const args = buildRoutedWorkerPiArgs("Default task", route("openai-codex", "gpt-6-astra"));
+    expect(args).toEqual([
+      "--no-extensions", "-e", `${agentDir}/extensions/herdr-agent-state.ts`,
+      "--model", "openai-codex/gpt-6-astra", "--thinking", "medium", "--name", "Default task",
+    ]);
+    expect(args).not.toContain(fileURLToPath(new URL("../model-routing.ts", import.meta.url)));
+  }));
+
+  test("builds the exact memory worker arguments", () => withAgentDir(() => {
+    expect(buildRoutedWorkerPiArgs("Memory task", route("openai-codex", "gpt-6-astra"), ["memory"])).toEqual([
+      "--no-extensions", "-e", `${agentDir}/extensions/herdr-agent-state.ts`,
+      "-e", `${agentDir}/npm/node_modules/pi-hermes-memory/src/index.ts`,
+      "--model", "openai-codex/gpt-6-astra", "--thinking", "medium", "--name", "Memory task",
+    ]);
+  }));
+
+  test("builds the exact Fable worker arguments", () => withAgentDir(() => {
+    expect(buildRoutedWorkerPiArgs("Fable task", route("anthropic", "claude-fable-5-1"))).toEqual([
+      "--no-extensions", "-e", `${agentDir}/extensions/herdr-agent-state.ts`,
+      "-e", fileURLToPath(new URL("../model-style.ts", import.meta.url)),
+      "--model", "anthropic/claude-fable-5-1", "--thinking", "medium", "--name", "Fable task",
+    ]);
+  }));
+
+  test("builds the exact Ollama Cloud worker arguments", () => withAgentDir(() => {
+    expect(buildRoutedWorkerPiArgs("Cloud task", route("ollama-cloud", "qwen3"))).toEqual([
+      "--no-extensions", "-e", `${agentDir}/extensions/herdr-agent-state.ts`,
+      "-e", `${agentDir}/npm/node_modules/pi-ollama-cloud/index.ts`,
+      "--model", "ollama-cloud/qwen3", "--thinking", "medium", "--name", "Cloud task",
+    ]);
+  }));
 });
 
 describe("Herdr Unix socket transport", () => {
@@ -261,6 +309,8 @@ const readyAgent = () => ok({ agent: { agent_status: "idle", interactive_ready: 
 describe("routed agent tab isolation", () => {
   test("first routed agent creates a dedicated unfocused tab instead of splitting the root tab", async () => {
     const restore = isolatedHerdrEnv();
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = "/tmp/pi-agent";
     const calls: string[][] = [];
     const pi: any = { exec: async (_command: string, args: string[]) => {
       calls.push(args);
@@ -271,10 +321,17 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      const launched = await launchHerdrAgent(pi, "Inspect only", "Isolated task", "luna", "/repo");
+      const launched = await launchHerdrAgent(pi, "Inspect only", "Isolated task", "luna", routes.luna, "/repo");
       expect(launched.tabId).toBe("w1:t2");
       expect(launched.paneId).toBe("w1:p2");
       expect(calls.some((args) => args.slice(0, 2).join(" ") === "pane split")).toBe(false);
+      const start = calls.find((args) => args.slice(0, 2).join(" ") === "agent start")!;
+      expect(start).toEqual([
+        "agent", "start", launched.agent, "--kind", "pi", "--pane", "w1:p2", "--timeout", "30000", "--",
+        "--no-extensions", "-e", "/tmp/pi-agent/extensions/herdr-agent-state.ts",
+        "--model", `${routes.luna.provider}/${routes.luna.model}`, "--thinking", routes.luna.thinking, "--name", "Isolated task",
+      ]);
+      expect(start).not.toContain(fileURLToPath(new URL("../model-routing.ts", import.meta.url)));
       const create = calls.find((args) => args.slice(0, 2).join(" ") === "tab create")!;
       expect(create).toContain("Routed agents · t1");
       expect(create).toContain("PI_ROUTED_ROOT_WORKSPACE_ID=w1");
@@ -284,7 +341,11 @@ describe("routed agent tab isolation", () => {
       expect(prompt).toContain("--wait");
       expect(prompt).toContain("working");
       expect(prompt).toContain("7000");
-    } finally { restore(); }
+    } finally {
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      restore();
+    }
   });
 
   test("waits for socket-started agents to become prompt-ready", async () => {
@@ -306,7 +367,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      await launchHerdrAgent(pi, "Inspect only", "Delayed startup", "luna", "/repo");
+      await launchHerdrAgent(pi, "Inspect only", "Delayed startup", "luna", routes.luna, "/repo");
       expect(getCalls).toBe(2);
       const getIndex = calls.findIndex((args) => args.slice(0, 2).join(" ") === "agent get");
       const promptIndex = calls.findIndex((args) => args.slice(0, 2).join(" ") === "agent prompt");
@@ -328,7 +389,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      await launchHerdrAgent(pi, "Inspect only", "Missing start agent", "luna", "/repo");
+      await launchHerdrAgent(pi, "Inspect only", "Missing start agent", "luna", routes.luna, "/repo");
       expect(calls.some((args) => args.slice(0, 2).join(" ") === "agent get")).toBe(true);
     } finally { restore(); }
   });
@@ -349,7 +410,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      await launchHerdrAgent(pi, "Inspect only", "Late registration", "luna", "/repo");
+      await launchHerdrAgent(pi, "Inspect only", "Late registration", "luna", routes.luna, "/repo");
       expect(getCalls).toBe(2);
     } finally { restore(); }
   });
@@ -367,7 +428,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      await expect(launchHerdrAgent(pi, "Inspect only", "Never ready", "luna", "/repo", 25)).rejects.toThrow("agent_start_timeout");
+      await expect(launchHerdrAgent(pi, "Inspect only", "Never ready", "luna", routes.luna, "/repo", 25)).rejects.toThrow("agent_start_timeout");
       expect(calls.some((args) => args.join(" ") === "tab close w1:t2")).toBe(false);
       expect(calls.some((args) => args.slice(0, 2).join(" ") === "agent prompt")).toBe(false);
     } finally { restore(); }
@@ -390,7 +451,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      const launched = await launchHerdrAgent(pi, "Inspect only", "Second task", "luna", "/repo");
+      const launched = await launchHerdrAgent(pi, "Inspect only", "Second task", "luna", routes.luna, "/repo");
       expect(launched.tabId).toBe("w1:t2");
       expect(launched.paneId).toBe("w1:p4");
       const split = calls.find((args) => args.slice(0, 2).join(" ") === "pane split")!;
@@ -412,7 +473,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      const launched = await launchHerdrAgent(pi, "Inspect only", "Overflow task", "luna", "/repo");
+      const launched = await launchHerdrAgent(pi, "Inspect only", "Overflow task", "luna", routes.luna, "/repo");
       expect(launched.tabId).toBe("w1:t3");
       const create = calls.find((args) => args.slice(0, 2).join(" ") === "tab create")!;
       expect(create).toContain("Routed agents · t1 · 2");
@@ -433,7 +494,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      await launchHerdrAgent(pi, "Inspect only", "Recover task", "luna", "/repo");
+      await launchHerdrAgent(pi, "Inspect only", "Recover task", "luna", routes.luna, "/repo");
       expect(calls.filter((args) => args.slice(0, 2).join(" ") === "agent prompt")).toHaveLength(1);
       expect(calls.some((args) => args.join(" ").includes("agent send-keys") && args.includes("enter"))).toBe(true);
       expect(calls.some((args) => args.slice(0, 2).join(" ") === "agent wait" && args.includes("working"))).toBe(true);
@@ -453,7 +514,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      await expect(launchHerdrAgent(pi, "Inspect only", "Retain task", "luna", "/repo")).rejects.toThrow("pane w1:p2 was retained");
+      await expect(launchHerdrAgent(pi, "Inspect only", "Retain task", "luna", routes.luna, "/repo")).rejects.toThrow("pane w1:p2 was retained");
       expect(calls.some((args) => args.join(" ") === "tab close w1:t2")).toBe(false);
       expect(calls.some((args) => args.join(" ") === "pane close w1:p2")).toBe(false);
     } finally { restore(); }
@@ -471,7 +532,7 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      await expect(launchHerdrAgent(pi, "Inspect only", "Broken task", "luna", "/repo")).rejects.toThrow("start_failed");
+      await expect(launchHerdrAgent(pi, "Inspect only", "Broken task", "luna", routes.luna, "/repo")).rejects.toThrow("start_failed");
       expect(calls.some((args) => args.join(" ") === "tab close w1:t2")).toBe(true);
       expect(calls.some((args) => args.join(" ") === "pane close w1:p2")).toBe(false);
     } finally { restore(); }

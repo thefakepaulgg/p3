@@ -6,13 +6,14 @@ import workflowEngine from "../workflow-engine.ts";
 import { createRun, workflowReducer } from "./scheduler.ts";
 import { parseWorkflowYaml } from "./schema.ts";
 
-test("resume reconciles a live routed task without launching a duplicate", async () => {
+test("resume reconciles a pre-capabilities routed task without launching a duplicate", async () => {
   const root = mkdtempSync(join(tmpdir(), "workflow-resume-")); const oldHome = process.env.HOME; process.env.HOME = root;
   try {
     const workflowDir = join(root, ".pi", "workflows"); mkdirSync(workflowDir, { recursive: true });
     await Bun.write(join(workflowDir, "one.yaml"), `version: pi-workflow/v1\nid: one\nname: One\ndescription: one\ninputs: { goal: { type: string, required: true } }\nsteps: [{ id: only, name: Only, route: luna, phase: other, prompt: "{{inputs.goal}}" }]\n`);
     const definition = parseWorkflowYaml(await Bun.file(join(workflowDir, "one.yaml")).text());
     let run = createRun(definition, { goal: "x" }, "session-1");
+    delete (run.definition.steps[0] as Partial<typeof run.definition.steps[0]>).capabilities;
     run = workflowReducer(run, { type: "step-launched", stepId: "only", attempt: { attemptId: "a1", handle: "rt-live", status: "running", startedAt: 1 } });
     const listeners = new Map<string, Set<Function>>(); let launches = 0; let statuses = 0;
     const on = (name: string, handler: Function) => { const set = listeners.get(name) ?? new Set(); set.add(handler); listeners.set(name, set); return () => set.delete(handler); };

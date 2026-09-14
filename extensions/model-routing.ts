@@ -37,6 +37,9 @@ const RoutedTaskParams = Type.Object({
   pane_retention: Type.Optional(StringEnum(["keep", "close"] as const, {
     description: "Herdr-only completed-pane policy. keep (default) preserves the pane for later inspection; close removes it after caching the result and delivering the single completion message.",
   })),
+  capabilities: Type.Optional(Type.Array(StringEnum(["memory"] as const), {
+    description: "Explicit worker capabilities. Request memory to enable Hermes Memory tools.",
+  })),
 });
 
 const RoutedTaskControlParams = Type.Object({

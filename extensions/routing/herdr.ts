@@ -1,11 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Route } from "./policy.ts";
 import { buildCompletionMessage, COMPLETION_KIND, isActiveTask, type TaskHandle } from "./state.ts";
 import { readIncrementalUsage } from "./usage.ts";
+
+export type RoutedWorkerCapability = "memory";
 
 export interface HerdrLaunch { agent: string; paneId: string; tabId: string; route: string }
 
@@ -364,6 +367,25 @@ export function watchHerdrTask(options: {
 
 const HERDR_AGENT_READY_TIMEOUT_MS = 30_000;
 
+export function buildRoutedWorkerPiArgs(description: string, route: Route, capabilities: RoutedWorkerCapability[] = []): string[] {
+  const agentDir = resolve(process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent"));
+  const args = [
+    "--no-extensions",
+    "-e", join(agentDir, "extensions", "herdr-agent-state.ts"),
+  ];
+  const model = `${route.provider}/${route.model}`;
+  if (model === "anthropic/claude-fable-5-1") {
+    args.push("-e", fileURLToPath(new URL("../model-style.ts", import.meta.url)));
+  }
+  if (route.provider === "ollama-cloud") {
+    args.push("-e", join(agentDir, "npm", "node_modules", "pi-ollama-cloud", "index.ts"));
+  }
+  if (capabilities.includes("memory")) {
+    args.push("-e", join(agentDir, "npm", "node_modules", "pi-hermes-memory", "src", "index.ts"));
+  }
+  return [...args, "--model", model, "--thinking", route.thinking, "--name", description];
+}
+
 const isHerdrAgentReady = (agent: any): boolean => {
   if (!agent || agent.launch_pending === true) return false;
   if (agent.interactive_ready === true) return true;
@@ -401,14 +423,14 @@ async function waitForHerdrAgentReady(pi: ExtensionAPI, agentName: string, timeo
   throw new Error(`agent_start_timeout: ${agentName} did not become prompt-ready within ${timeout}ms (${lastState})`);
 }
 
-export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string): Promise<HerdrLaunch> {
+export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string, capabilities: RoutedWorkerCapability[] = []): Promise<HerdrLaunch> {
   const allocation = await allocateRoutedAgentPane(pi, cwd, manifestPath);
   const { paneId, tabId } = allocation;
   const slug = description.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "task";
   const agent = `r-${slug}-${Date.now().toString(36).slice(-5)}`.slice(0, 32);
   let started = false;
   try {
-    const startArgs = ["agent", "start", agent, "--kind", "pi", "--pane", paneId, "--timeout", "30000", "--", "--model", `${route.provider}/${route.model}`, "--thinking", route.thinking, "--name", description];
+    const startArgs = ["agent", "start", agent, "--kind", "pi", "--pane", paneId, "--timeout", "30000", "--", ...buildRoutedWorkerPiArgs(description, route, capabilities)];
     let lastStartError: unknown;
     for (const delay of [150, 350, 750, 1500]) {
       await sleep(delay, new AbortController().signal);
