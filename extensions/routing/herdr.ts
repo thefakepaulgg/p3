@@ -372,6 +372,7 @@ export function buildRoutedWorkerPiArgs(description: string, route: Route, capab
   const args = [
     "--no-extensions",
     "-e", join(agentDir, "extensions", "herdr-agent-state.ts"),
+    "-e", fileURLToPath(new URL("./parent-navigation.ts", import.meta.url)),
   ];
   const model = `${route.provider}/${route.model}`;
   if (model === "anthropic/claude-fable-5-1") {

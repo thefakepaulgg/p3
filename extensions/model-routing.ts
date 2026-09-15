@@ -2,7 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { classifyDelegation, classifyModelRoute, planFallback, routes, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./routing/policy.ts";
-import { boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
+import { boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, resetCompletionDelivery, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
 import { parseJson, readHerdrResult, runHerdr, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
 import { ExplicitRouteRetryGuard } from "./routing/workflow.ts";
 import { launchRoutedTask, type RoutedTaskLaunchParams } from "./routing/launch.ts";
@@ -476,6 +476,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         } catch { /* steering still proceeds */ }
         watchers.get(task.handle)?.abort();
         await runHerdr(pi, ["agent", "prompt", task.agentName!, params.message.trim()], 10000);
+        resetCompletionDelivery(task);
         updateTask(task, { state: "running" });
         watchHerdrTask(task, baseline);
         return { content: [{ type: "text", text: `Steered Herdr task ${task.handle}` }], details: { task } };
