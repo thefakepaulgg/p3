@@ -52,7 +52,7 @@ export interface TaskHandle {
   transitions: number;
   /** Delivered notification kinds. Content-independent so dedup survives result changes. */
   notifiedStates: string[];
-  /** Set once the single completion message has been delivered or consumed manually. */
+  /** Set once the current run's completion message has been delivered or consumed manually. */
   completionNotifiedAt?: number;
   completionDeliveredVia?: CompletionDelivery;
   blockedEpisodes?: number;
@@ -124,13 +124,20 @@ const completionAlreadyClaimed = (kinds: string[]) =>
 export const canDeliverCompletion = (task: Pick<TaskHandle, "completionNotifiedAt" | "notifiedStates">) =>
   !task.completionNotifiedAt && !completionAlreadyClaimed(task.notifiedStates ?? []);
 
-/** Claim the single completion-delivery slot. Returns false when it was already claimed. */
+/** Claim the current run's completion-delivery slot. Returns false when it was already claimed. */
 export function markCompletionDelivered(task: TaskHandle, via: CompletionDelivery, now = Date.now()): boolean {
   if (!canDeliverCompletion(task)) return false;
   task.completionNotifiedAt = now;
   task.completionDeliveredVia = via;
   task.notifiedStates = [...(task.notifiedStates ?? []), COMPLETION_KIND].slice(-NOTIFIED_KIND_LIMIT);
   return true;
+}
+
+/** Open a new completion-delivery slot when a completed task is steered to continue. */
+export function resetCompletionDelivery(task: TaskHandle): void {
+  task.completionNotifiedAt = undefined;
+  task.completionDeliveredVia = undefined;
+  task.notifiedStates = (task.notifiedStates ?? []).filter((kind) => notificationKind(kind) !== COMPLETION_KIND);
 }
 
 /** Claim a non-completion notification kind. Returns false when that kind was already delivered. */

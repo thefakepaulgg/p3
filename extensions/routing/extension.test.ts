@@ -358,6 +358,52 @@ test("Herdr completion delivers exactly one bounded custom message as a steer tu
   }
 });
 
+test("steering a completed task delivers the next completion", async () => {
+  const restoreEnv = herdrEnv();
+  const tools: any[] = [];
+  const lifecycle = new Map<string, Function>();
+  const messages: any[] = [];
+  const sessionPath = sessionWith("I am blocked pending a decision.");
+  let promptCount = 0;
+  const fake: any = {
+    registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {},
+    sendMessage: (message: any, options: any) => messages.push({ message, options }),
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
+    exec: async (_command: string, args: string[]) => {
+      const key = args.slice(0, 2).join(" ");
+      if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
+      if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
+      if (key === "agent start") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "working" } } }), stderr: "" };
+      if (key === "agent prompt") {
+        promptCount += 1;
+        if (promptCount === 2) writeFileSync(sessionPath, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Completed after receiving the decision." }] } })}\n`);
+        return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
+      }
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "idle", agent_session: { value: sessionPath } } } }), stderr: "" };
+      return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
+    },
+  };
+  try {
+    routing(fake);
+    const launch = tools.find((tool) => tool.name === "routed_task");
+    const control = tools.find((tool) => tool.name === "routed_task_control");
+    const ctx = uiCtx();
+    const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
+    for (let tick = 0; tick < 10 && messages.length < 1; tick += 1) await new Promise((done) => setTimeout(done, 40));
+    expect(messages.filter((entry) => entry.message.customType === "routed-task-completion")).toHaveLength(1);
+
+    await control.execute("2", { action: "steer", handle: launched.details.handle, message: "Use the user's decision and continue." }, undefined, undefined, ctx);
+    for (let tick = 0; tick < 10 && messages.length < 2; tick += 1) await new Promise((done) => setTimeout(done, 40));
+
+    const completions = messages.filter((entry) => entry.message.customType === "routed-task-completion");
+    expect(completions).toHaveLength(2);
+    expect(completions[1].message.content).toContain("Completed after receiving the decision.");
+    await lifecycle.get("session_shutdown")?.();
+  } finally {
+    restoreEnv();
+  }
+});
+
 test("a stale TUI widget renders nothing after its routed tasks expire", async () => {
   const restoreEnv = herdrEnv();
   const originalNow = Date.now;
