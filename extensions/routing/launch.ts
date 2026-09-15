@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
-import { classifyDelegation, classifyModelRoute, type Route, type RouteName, type RoutingDecision } from "./policy.ts";
+import { classifyDelegation, classifyModelRoute, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./policy.ts";
 import { normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
 import { launchHerdrAgent, type HerdrLaunch, type RoutedWorkerCapability } from "./herdr.ts";
 import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkflowLaunch, type TaskPhase } from "./workflow.ts";
@@ -9,6 +9,7 @@ export interface RoutedTaskLaunchParams {
   task: string;
   description: string;
   route?: string;
+  effort?: ThinkingLevel;
   cwd?: string;
   phase?: TaskPhase;
   depends_on?: string[];
@@ -28,7 +29,7 @@ export interface LaunchDependencies {
   workflowLaunches: Map<string, Promise<RoutedTaskLaunchResult>>;
   routeRetryGuard: ExplicitRouteRetryGuard;
   recordDecision: (task: string, decision: RoutingDecision) => void;
-  resolveRoute: (ctx: ExtensionContext, requested: string, explicit: boolean) => LaunchRoutePlan;
+  resolveRoute: (ctx: ExtensionContext, requested: string, explicit: boolean, effort?: ThinkingLevel) => LaunchRoutePlan;
   trackTask: (task: TaskHandle) => void;
   watchHerdrTask: (task: TaskHandle) => void;
   manifestPath?: string;
@@ -48,6 +49,7 @@ export function validateRoutedTaskLaunchParams(input: RoutedTaskLaunchParams): v
   if ((input as any).surface !== undefined) throw new Error("surface is no longer supported; routed tasks always run in Herdr");
   if ((input as any).isolation !== undefined) throw new Error("isolation is no longer supported; pass an existing worktree as cwd");
   if (input.route !== undefined && (typeof input.route !== "string" || !input.route.trim())) throw new Error("route must be a non-empty model or route name");
+  if (input.effort !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(input.effort)) throw new Error(`unknown effort level ${String(input.effort)}`);
   if (input.cwd !== undefined && (typeof input.cwd !== "string" || input.cwd.length > MAX_PATH_LENGTH)) throw new Error("cwd is invalid or exceeds its limit");
   if (input.phase !== undefined && !["plan", "implement", "review", "other"].includes(input.phase)) throw new Error(`unknown workflow phase ${String(input.phase)}`);
   for (const [name, value] of [["depends_on", input.depends_on], ["owned_paths", input.owned_paths]] as const) {
@@ -78,7 +80,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const retryKey = `${cwd}\n${description}\n${task}`;
   deps.routeRetryGuard.assertAllowed(retryKey, params.route !== undefined);
   let routePlan: LaunchRoutePlan;
-  try { routePlan = deps.resolveRoute(ctx, requestedRoute, params.route !== undefined); }
+  try { routePlan = deps.resolveRoute(ctx, requestedRoute, params.route !== undefined, params.effort); }
   catch (error) { if (params.route !== undefined) deps.routeRetryGuard.record(retryKey, requestedRoute); throw error; }
   deps.routeRetryGuard.clear(retryKey);
 

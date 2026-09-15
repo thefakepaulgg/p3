@@ -1,7 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { classifyDelegation, classifyModelRoute, planFallback, routes, type Route, type RouteName, type RoutingDecision } from "./routing/policy.ts";
+import { classifyDelegation, classifyModelRoute, planFallback, routes, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./routing/policy.ts";
 import { boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
 import { parseJson, readHerdrResult, runHerdr, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
 import { ExplicitRouteRetryGuard } from "./routing/workflow.ts";
@@ -21,6 +21,9 @@ const RoutedTaskParams = Type.Object({
   task: Type.String({ minLength: 1, description: "Self-contained assignment for the routed worker" }),
   description: Type.String({ minLength: 3, maxLength: 80, description: "Short task label" }),
   route: Type.Optional(Type.String({ minLength: 1, description: "Model override. Accepts a configured route name, provider/model, or an unambiguous model ID. Omit for policy selection." })),
+  effort: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, {
+    description: "Reasoning effort override for the selected model. Omit for the route default.",
+  })),
   cwd: Type.Optional(Type.String({ description: "Absolute working directory. Defaults to the current session directory." })),
   phase: Type.Optional(StringEnum(["plan", "implement", "review", "other"] as const, {
     description: "Workflow phase. Inferred when omitted; explicit phases improve dependency enforcement.",
@@ -277,11 +280,12 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     return !!model && ctx.modelRegistry.hasConfiguredAuth(model);
   };
 
-  const resolveRoute = (ctx: ExtensionContext, requested: string, explicit: boolean) => {
+  const resolveRoute = (ctx: ExtensionContext, requested: string, explicit: boolean, effort?: ThinkingLevel) => {
     if (!explicit || Object.prototype.hasOwnProperty.call(routes, requested)) {
       const plan = planFallback(requested as RouteName, explicit, (name) => availableRoute(ctx, name));
       if ("error" in plan) throw new Error(plan.error);
-      return { ...plan, config: routes[plan.route] };
+      const config = routes[plan.route];
+      return { ...plan, config: effort ? { ...config, thinking: effort } : config };
     }
 
     const slash = requested.indexOf("/");
@@ -298,7 +302,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         label: model.name,
         provider: model.provider,
         model: model.id,
-        thinking: model.reasoning ? "medium" as const : "off" as const,
+        thinking: effort ?? (model.reasoning ? "medium" as const : "off" as const),
         purpose: "User-selected model",
       },
     };
@@ -325,7 +329,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     description: "Launch one sticky-model task in a visible Herdr agent with workflow guards. The model stays fixed. Explicit choices never silently fall back. This is fire-and-forget: after launch, do independent work or end the turn; completion automatically wakes the primary exactly once with a bounded routed-task message. Do not poll status/result, sleep, tail logs, or steer merely to ask whether it finished. Retrieve the full cached result with routed_task_control action=result.",
     promptSnippet: "Launch a guarded sticky-model task in Herdr",
     promptGuidelines: [
-      "Routed agents use bounded dedicated tabs in the root workspace; never create agent splits in the user-owned root tab. Dependent phases must be sequential: plan, primary evaluation, implement with depends_on, then review with depends_on. Do not use routed_task for simple work cheaper to do directly.",
+      "Use routed_task and routed_task_control for all agent orchestration; never manage agents through the herdr CLI directly. Routed agents use bounded dedicated tabs in the root workspace; never create agent splits in the user-owned root tab.",
+      "Normally omit route and effort so policy classifies the task and applies the route default. Set them only when the task or user specifically warrants a custom subagent. Explicit choices never silently fall back.",
+      "Dependent phases must be sequential: plan, primary evaluation, implement with depends_on, then review with depends_on. Do not use routed_task for simple work cheaper to do directly.",
       "After launching, either continue genuinely independent work or end the turn. Automatic completion delivery will wake the primary. Never poll routed_task_control, sleep, tail logs, or send impatience steering messages while a task is merely running.",
     ],
     parameters: RoutedTaskParams,

@@ -77,6 +77,7 @@ test("registers the simplified public surface", () => {
   expect(properties.isolation).toBeUndefined();
   expect(properties.route.type).toBe("string");
   expect(properties.route.enum).toBeUndefined();
+  expect(properties.effort.enum).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   expect(properties.capabilities.type).toBe("array");
   expect(properties.capabilities.items).toEqual({ type: "string", enum: ["memory"] });
   expect(commands).toEqual(["routed", "route"]);
@@ -91,6 +92,7 @@ test("public routed_task rejects unsupported capabilities before launch", async 
   routing(fake);
   const launch = tools.find((tool) => tool.name === "routed_task");
   await expect(launch.execute("1", { task: "Inspect", description: "Inspect task", capabilities: ["shell"] }, undefined, undefined, uiCtx())).rejects.toThrow("capabilities must contain only memory");
+  await expect(launch.execute("2", { task: "Inspect", description: "Inspect task", effort: "extreme" }, undefined, undefined, uiCtx())).rejects.toThrow("unknown effort level extreme");
 });
 
 test("launches an explicitly requested model outside the programmed routes", async () => {
@@ -119,12 +121,13 @@ test("launches an explicitly requested model outside the programmed routes", asy
   try {
     routing(fake);
     const launch = tools.find((tool) => tool.name === "routed_task");
-    const launched = await launch.execute("1", { task: "Inspect the change", description: "Inspect change", route: "gpt-6-astra", capabilities: ["memory"] }, undefined, undefined, ctx);
+    const launched = await launch.execute("1", { task: "Inspect the change", description: "Inspect change", route: "gpt-6-astra", effort: "xhigh", capabilities: ["memory"] }, undefined, undefined, ctx);
     expect(launched.details.model).toBe("openai-codex/gpt-6-astra");
-    expect(launched.details.thinking).toBe("medium");
+    expect(launched.details.thinking).toBe("xhigh");
     expect(launched.details.capabilities).toEqual(["memory"]);
     const startArgs = calls.find((args) => args.slice(0, 2).join(" ") === "agent start")!;
     expect(startArgs).toContain("openai-codex/gpt-6-astra");
+    expect(startArgs).toContain("xhigh");
     expect(startArgs.some((arg) => arg.endsWith("/pi-hermes-memory/src/index.ts"))).toBe(true);
     await lifecycle.get("session_shutdown")?.();
   } finally {
