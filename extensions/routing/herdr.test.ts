@@ -31,6 +31,7 @@ describe("Herdr response parsing", () => {
 
 describe("routed worker Pi arguments", () => {
   const agentDir = "/tmp/pi-agent";
+  const parentNavigation = fileURLToPath(new URL("./parent-navigation.ts", import.meta.url));
   const route = (provider: string, model: string, thinking: Route["thinking"] = "medium") => ({ provider, model, thinking } as Route);
   const withAgentDir = (check: () => void) => {
     const previous = process.env.PI_CODING_AGENT_DIR;
@@ -46,6 +47,7 @@ describe("routed worker Pi arguments", () => {
     const args = buildRoutedWorkerPiArgs("Default task", route("openai-codex", "gpt-6-astra"));
     expect(args).toEqual([
       "--no-extensions", "-e", `${agentDir}/extensions/herdr-agent-state.ts`,
+      "-e", parentNavigation,
       "--model", "openai-codex/gpt-6-astra", "--thinking", "medium", "--name", "Default task",
     ]);
     expect(args).not.toContain(fileURLToPath(new URL("../model-routing.ts", import.meta.url)));
@@ -54,6 +56,7 @@ describe("routed worker Pi arguments", () => {
   test("builds the exact memory worker arguments", () => withAgentDir(() => {
     expect(buildRoutedWorkerPiArgs("Memory task", route("openai-codex", "gpt-6-astra"), ["memory"])).toEqual([
       "--no-extensions", "-e", `${agentDir}/extensions/herdr-agent-state.ts`,
+      "-e", parentNavigation,
       "-e", `${agentDir}/npm/node_modules/pi-hermes-memory/src/index.ts`,
       "--model", "openai-codex/gpt-6-astra", "--thinking", "medium", "--name", "Memory task",
     ]);
@@ -62,6 +65,7 @@ describe("routed worker Pi arguments", () => {
   test("builds the exact Fable worker arguments", () => withAgentDir(() => {
     expect(buildRoutedWorkerPiArgs("Fable task", route("anthropic", "claude-fable-5-1"))).toEqual([
       "--no-extensions", "-e", `${agentDir}/extensions/herdr-agent-state.ts`,
+      "-e", parentNavigation,
       "-e", fileURLToPath(new URL("../model-style.ts", import.meta.url)),
       "--model", "anthropic/claude-fable-5-1", "--thinking", "medium", "--name", "Fable task",
     ]);
@@ -70,6 +74,7 @@ describe("routed worker Pi arguments", () => {
   test("builds the exact Ollama Cloud worker arguments", () => withAgentDir(() => {
     expect(buildRoutedWorkerPiArgs("Cloud task", route("ollama-cloud", "qwen3"))).toEqual([
       "--no-extensions", "-e", `${agentDir}/extensions/herdr-agent-state.ts`,
+      "-e", parentNavigation,
       "-e", `${agentDir}/npm/node_modules/pi-ollama-cloud/index.ts`,
       "--model", "ollama-cloud/qwen3", "--thinking", "medium", "--name", "Cloud task",
     ]);
@@ -329,6 +334,7 @@ describe("routed agent tab isolation", () => {
       expect(start).toEqual([
         "agent", "start", launched.agent, "--kind", "pi", "--pane", "w1:p2", "--timeout", "30000", "--",
         "--no-extensions", "-e", "/tmp/pi-agent/extensions/herdr-agent-state.ts",
+        "-e", fileURLToPath(new URL("./parent-navigation.ts", import.meta.url)),
         "--model", `${routes.luna.provider}/${routes.luna.model}`, "--thinking", routes.luna.thinking, "--name", "Isolated task",
       ]);
       expect(start).not.toContain(fileURLToPath(new URL("../model-routing.ts", import.meta.url)));
