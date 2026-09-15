@@ -41,7 +41,7 @@ const RoutedTaskParams = Type.Object({
     description: "Herdr-only completed-pane policy. keep (default) preserves the pane for later inspection; close removes it after caching the result and delivering the single completion message.",
   })),
   capabilities: Type.Optional(Type.Array(StringEnum(["memory"] as const), {
-    description: "Explicit worker capabilities. Request memory to enable Hermes Memory tools.",
+    description: "Declared task capabilities. Routed workers inherit configured extensions.",
   })),
 });
 

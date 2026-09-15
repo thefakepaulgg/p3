@@ -128,7 +128,8 @@ test("launches an explicitly requested model outside the programmed routes", asy
     const startArgs = calls.find((args) => args.slice(0, 2).join(" ") === "agent start")!;
     expect(startArgs).toContain("openai-codex/gpt-6-astra");
     expect(startArgs).toContain("xhigh");
-    expect(startArgs.some((arg) => arg.endsWith("/pi-hermes-memory/src/index.ts"))).toBe(true);
+    expect(startArgs).not.toContain("--no-extensions");
+    expect(startArgs).toContain("routed_task,routed_task_control,model_route,workflow_control");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
