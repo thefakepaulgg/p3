@@ -1,8 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Route } from "./policy.ts";
 import { buildCompletionMessage, COMPLETION_KIND, isActiveTask, type TaskHandle } from "./state.ts";
@@ -367,24 +366,13 @@ export function watchHerdrTask(options: {
 
 const HERDR_AGENT_READY_TIMEOUT_MS = 30_000;
 
-export function buildRoutedWorkerPiArgs(description: string, route: Route, capabilities: RoutedWorkerCapability[] = []): string[] {
-  const agentDir = resolve(process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent"));
-  const args = [
-    "--no-extensions",
-    "-e", join(agentDir, "extensions", "herdr-agent-state.ts"),
-    "-e", fileURLToPath(new URL("./parent-navigation.ts", import.meta.url)),
+export function buildRoutedWorkerPiArgs(description: string, route: Route, _capabilities: RoutedWorkerCapability[] = []): string[] {
+  return [
+    "--exclude-tools", "routed_task,routed_task_control,model_route,workflow_control",
+    "--model", `${route.provider}/${route.model}`,
+    "--thinking", route.thinking,
+    "--name", description,
   ];
-  const model = `${route.provider}/${route.model}`;
-  if (model === "anthropic/claude-fable-5-1") {
-    args.push("-e", fileURLToPath(new URL("../model-style.ts", import.meta.url)));
-  }
-  if (route.provider === "ollama-cloud") {
-    args.push("-e", join(agentDir, "npm", "node_modules", "pi-ollama-cloud", "index.ts"));
-  }
-  if (capabilities.includes("memory")) {
-    args.push("-e", join(agentDir, "npm", "node_modules", "pi-hermes-memory", "src", "index.ts"));
-  }
-  return [...args, "--model", model, "--thinking", route.thinking, "--name", description];
 }
 
 const isHerdrAgentReady = (agent: any): boolean => {
