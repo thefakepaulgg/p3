@@ -714,7 +714,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     const inheritedManifest = process.env.PI_ROUTING_MANIFEST?.trim();
     ownsManifest = !inheritedManifest && process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
     manifestPath = inheritedManifest || (ownsManifest ? manifestPathForPane(ctx.sessionManager.getSessionDir(), process.env.HERDR_PANE_ID!) : undefined);
+    taskHandles.clear();
     routingManifest = readRoutingManifest(manifestPath);
+    if (ownsManifest && routingManifest?.parentSessionId !== ctx.sessionManager.getSessionId()) routingManifest = undefined;
     if (inheritedManifest && routingManifest) {
       const stableParentPath = manifestPathForPane(ctx.sessionManager.getSessionDir(), routingManifest.parentPaneId);
       const stableManifest = readRoutingManifest(stableParentPath);
