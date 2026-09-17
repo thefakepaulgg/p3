@@ -212,12 +212,12 @@ test("child panes render a parent row below the editor", async () => {
   }
 });
 
-test("restores routed tasks from stable pane context after a fresh Pi start", async () => {
+test("restores routed tasks when reopening the same Pi session", async () => {
   const restoreEnv = herdrEnv();
   temp = mkdtempSync(join(tmpdir(), "routing-restart-"));
   const path = manifestPathForPane(temp, "w1:p1");
   writeRoutingManifest(path, {
-    version: ROUTING_MANIFEST_VERSION, parentSessionId: "previous", parentPaneId: "w1:p1", updatedAt: 1,
+    version: ROUTING_MANIFEST_VERSION, parentSessionId: "session-1", parentPaneId: "w1:p1", updatedAt: 1,
     tasks: [{ handle: "rt-old", label: "Retained worker", agentName: "worker", paneId: "w1:p2", route: "sol", model: "openai-codex/gpt-5.6-sol", state: "completed", startedAt: 1, endedAt: 2 }],
   });
   const tools: any[] = [];
@@ -236,6 +236,39 @@ test("restores routed tasks from stable pane context after a fresh Pi start", as
     expect(list.content[0].text).toContain("rt-old [completed]");
     await lifecycle.get("session_shutdown")?.();
     expect(readRoutingManifest(path)?.tasks[0]?.handle).toBe("rt-old");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("does not restore routed agents or cost in a new Pi session", async () => {
+  const restoreEnv = herdrEnv();
+  temp = mkdtempSync(join(tmpdir(), "routing-new-session-"));
+  const path = manifestPathForPane(temp, "w1:p1");
+  writeRoutingManifest(path, {
+    version: ROUTING_MANIFEST_VERSION, parentSessionId: "previous-session", parentPaneId: "w1:p1",
+    sessionTotal: 73.83, sessionTotalKnown: true, updatedAt: 1,
+    tasks: [{ handle: "rt-old", label: "Prior worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-5.6-luna", state: "completed", startedAt: Date.now() - 60_000, endedAt: Date.now() - 30_000, estimatedCost: 0.09, costKnown: true }],
+  });
+  const tools: any[] = [];
+  const lifecycle = new Map<string, Function>();
+  const fake: any = {
+    registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
+    exec: async () => ({ code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" }),
+  };
+  const widgets: Array<{ key: string; content: string[] | undefined }> = [];
+  const ctx = uiCtx(widgets);
+  ctx.sessionManager = { ...sessionManager(), getSessionDir: () => temp };
+  try {
+    routing(fake);
+    await lifecycle.get("session_start")?.({}, ctx);
+    const list = await tools.find((tool) => tool.name === "routed_task_control").execute("1", { action: "list" }, undefined, undefined, ctx);
+    expect(list.content[0].text).toBe("No routed tasks");
+    expect(widgets.at(-1)).toEqual({ key: "routed-tasks", content: undefined });
+    expect(readRoutingManifest(path)?.parentSessionId).toBe("session-1");
+    expect(readRoutingManifest(path)?.tasks).toEqual([]);
+    await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
   }
