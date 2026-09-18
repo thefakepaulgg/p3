@@ -17,9 +17,11 @@ pi -e git:github.com/therealpaulgg/p3
 ## Included resources
 
 - Advisor, model-routing, task-list, tutor-mode, and workflow extensions
-- Telegram notification extension
+- Direct claude.ai connector access and Telegram notification extensions
 - Catppuccin, Dracula, Synthwave, and Matrix themes
 - The `rpiv` workflow
+
+The connector extension calls Anthropic's connector catalog and MCP proxy directly. It defaults to its own OAuth credential; run `/connectors-login` to authorize it, `/connectors-status` to inspect both available credential sources, and `/connectors-logout` to remove the direct credential. Use `/connectors-mode direct` or `/connectors-mode claude-code` to choose between the extension's credential and Claude Code's existing credential file. Both modes call the proxy directly; neither launches Claude Code. Direct credentials are stored at `~/.config/pi-claude-connectors/credentials.json` with mode `0600` and refreshed under a cross-process lock. This uses Anthropic's first-party OAuth client and undocumented connector endpoints, so it can change or be revoked without notice.
 
 The Telegram extension uses `~/.local/bin/pi-telegram-notify` to send notifications and poll for replies. Install the included helper with:
 

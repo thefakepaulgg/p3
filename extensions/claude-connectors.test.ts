@@ -30,7 +30,10 @@ const setup = (runtimeLoader: () => Promise<any>) => {
   createClaudeConnectorsExtension({
     readCredentials: async () => credentials,
     loadMcpRuntime: runtimeLoader,
-  })({ registerTool: (tool: any) => tools.push(tool) } as any);
+  })({
+    registerCommand: () => undefined,
+    registerTool: (tool: any) => tools.push(tool),
+  } as any);
   return tools[0];
 };
 

@@ -1,26 +1,29 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StringEnum, type ImageContent, type TextContent } from "@earendil-works/pi-ai";
 import { formatSize, type ExtensionAPI, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  completeConnectorLogin,
+  connectorAuthMode,
+  connectorAuthStatusText,
+  logoutConnectors,
+  selectedConnectorCredentials,
+  setConnectorAuthMode,
+  startConnectorLogin,
+  type ConnectorAuthMode,
+  type ConnectorCredentials,
+} from "./claude-connectors-auth.ts";
 
 const CATALOG_URL = "https://api.anthropic.com/v1/mcp_servers?limit=1000";
 const MCP_PROXY_ORIGIN = "https://mcp-proxy.anthropic.com";
 const MCP_SERVERS_BETA = "mcp-servers-2025-12-04";
-const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
 const MAX_INLINE_RESULT_TOKENS = 25_000;
 const ESTIMATED_CHARS_PER_TOKEN = 4;
 const RESULT_PREVIEW_BYTES = 2 * 1024;
-
-interface ClaudeCredentials {
-  accessToken: string;
-  refreshToken?: string;
-  expiresAt: number;
-  scopes: string[];
-}
 
 interface CatalogTool {
   name: string;
@@ -76,16 +79,7 @@ const Params = Type.Object({
   arguments: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Arguments matching describe_tool's inputSchema" })),
 });
 
-async function readCredentials(): Promise<ClaudeCredentials> {
-  const raw = JSON.parse(await readFile(CREDENTIALS_PATH, "utf8")) as { claudeAiOauth?: ClaudeCredentials };
-  const credentials = raw.claudeAiOauth;
-  if (!credentials?.accessToken) throw new Error("Claude Code is not signed in with a claude.ai account");
-  if (!credentials.scopes?.includes("user:mcp_servers")) throw new Error("Claude Code login does not include the user:mcp_servers scope");
-  if (credentials.expiresAt <= Date.now()) throw new Error("Claude Code's claude.ai login has expired; sign in or refresh it in Claude Code, then retry");
-  return credentials;
-}
-
-function safeError(error: unknown, credentials?: ClaudeCredentials): string {
+function safeError(error: unknown, credentials?: ConnectorCredentials): string {
   let message = error instanceof Error ? error.message : String(error);
   for (const secret of [credentials?.accessToken, credentials?.refreshToken]) {
     if (secret) message = message.replaceAll(secret, "<redacted>");
@@ -187,22 +181,73 @@ async function persistLargeTextResult(content: Array<TextContent | ImageContent>
 }
 
 interface ClaudeConnectorsDependencies {
-  readCredentials: () => Promise<ClaudeCredentials>;
+  readCredentials: () => Promise<ConnectorCredentials>;
   loadMcpRuntime: () => Promise<McpRuntime>;
 }
 
 export function createClaudeConnectorsExtension(
   overrides: Partial<ClaudeConnectorsDependencies> = {},
 ): (pi: ExtensionAPI) => void {
-  const credentialReader = overrides.readCredentials ?? readCredentials;
+  const credentialReader = overrides.readCredentials ?? selectedConnectorCredentials;
   const runtimeLoader = overrides.loadMcpRuntime ?? loadMcpRuntime;
 
   return function claudeConnectorsExtension(pi: ExtensionAPI) {
   const clientSessionId = randomUUID();
+
+  pi.registerCommand("connectors-login", {
+    description: "Authorize direct access to connectors attached to your Claude account",
+    handler: async (_args, ctx) => {
+      const login = startConnectorLogin();
+      const pasted = await ctx.ui.input(
+        `Open this URL in your browser:\n\n${login.url}\n\nThen paste the CODE#STATE value:`,
+        "CODE#STATE",
+      );
+      if (!pasted?.trim()) {
+        ctx.ui.notify("Connector login cancelled", "warning");
+        return;
+      }
+      try {
+        await completeConnectorLogin(login, pasted);
+        ctx.ui.notify("Claude connectors authorized directly for Pi", "info");
+      } catch (error) {
+        ctx.ui.notify(`Connector login failed: ${safeError(error)}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("connectors-mode", {
+    description: "Select direct or Claude Code credential-file auth for connector proxy calls",
+    handler: async (args, ctx) => {
+      const requested = args.trim();
+      if (!requested) {
+        ctx.ui.notify(`Connector auth mode: ${await connectorAuthMode()}`, "info");
+        return;
+      }
+      if (requested !== "direct" && requested !== "claude-code") {
+        ctx.ui.notify("Usage: /connectors-mode direct|claude-code", "error");
+        return;
+      }
+      await setConnectorAuthMode(requested as ConnectorAuthMode);
+      ctx.ui.notify(`Connector auth mode set to ${requested}`, "info");
+    },
+  });
+
+  pi.registerCommand("connectors-status", {
+    description: "Show connector auth mode and credential status",
+    handler: async (_args, ctx) => ctx.ui.notify(await connectorAuthStatusText(), "info"),
+  });
+
+  pi.registerCommand("connectors-logout", {
+    description: "Delete Pi's direct Claude connector credentials",
+    handler: async (_args, ctx) => {
+      await logoutConnectors();
+      ctx.ui.notify("Direct Claude connector credentials removed", "info");
+    },
+  });
   let cachedCatalog: CatalogConnector[] | undefined;
   let cachedCatalogExpiry = 0;
 
-  const getCatalog = async (credentials: ClaudeCredentials, refresh = false) => {
+  const getCatalog = async (credentials: ConnectorCredentials, refresh = false) => {
     if (!refresh && cachedCatalog && cachedCatalogExpiry > Date.now()) return cachedCatalog;
     const response = await fetch(CATALOG_URL, {
       headers: {
@@ -218,14 +263,14 @@ export function createClaudeConnectorsExtension(
     return cachedCatalog;
   };
 
-  const findConnector = async (name: string, credentials: ClaudeCredentials) => {
+  const findConnector = async (name: string, credentials: ConnectorCredentials) => {
     const catalog = await getCatalog(credentials);
     const connector = catalog.find((candidate) => candidate.display_name === name);
     if (!connector) throw new Error(`Connected Claude connector not found: ${name}`);
     return connector;
   };
 
-  const withClient = async <T>(connector: CatalogConnector, credentials: ClaudeCredentials, signal: AbortSignal | undefined, run: (client: Client) => Promise<T>) => {
+  const withClient = async <T>(connector: CatalogConnector, credentials: ConnectorCredentials, signal: AbortSignal | undefined, run: (client: Client) => Promise<T>) => {
     const { Client, StreamableHTTPClientTransport } = await runtimeLoader();
     const endpoint = new URL(`/v1/mcp/${encodeURIComponent(connector.id)}`, MCP_PROXY_ORIGIN);
     const transport = new StreamableHTTPClientTransport(endpoint, {
@@ -259,7 +304,7 @@ export function createClaudeConnectorsExtension(
     promptGuidelines: ["Use claude_connectors for services available only through the user's claude.ai connectors; list and describe tools before calling them."],
     parameters: Params,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      let credentials: ClaudeCredentials | undefined;
+      let credentials: ConnectorCredentials | undefined;
       try {
         credentials = await credentialReader();
 
