@@ -16,6 +16,7 @@
     "extensions": [
       "./extensions/advisor.ts",
       "./extensions/claude-connectors.ts",
+      "./extensions/github-pr-watch.ts",
       "./extensions/model-routing.ts",
       "./extensions/model-style.ts",
       "./extensions/tasks.ts",
