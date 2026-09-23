@@ -144,6 +144,7 @@ export default function tutorModeExtension(pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: "Tutor mode is off. Use /tutor on first." }],
           isError: true,
+          details: {},
         };
       }
 
@@ -151,7 +152,7 @@ export default function tutorModeExtension(pi: ExtensionAPI): void {
       const path = progressFile(ctx.cwd);
       if (params.action === "read") {
         const content = await readFile(path, "utf8");
-        return { content: [{ type: "text", text: content }] };
+        return { content: [{ type: "text", text: content }], details: {} };
       }
 
       const content = params.content?.trim();
@@ -159,10 +160,11 @@ export default function tutorModeExtension(pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: "content is required for append" }],
           isError: true,
+          details: {},
         };
       }
       await appendFile(path, `${content}\n\n`, "utf8");
-      return { content: [{ type: "text", text: `Appended learning evidence to ${PROGRESS_PATH}` }] };
+      return { content: [{ type: "text", text: `Appended learning evidence to ${PROGRESS_PATH}` }], details: {} };
     },
   });
 
@@ -178,6 +180,7 @@ export default function tutorModeExtension(pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: "Tutor mode is off. Use the normal build tools." }],
           isError: true,
+          details: {},
         };
       }
 
@@ -185,6 +188,7 @@ export default function tutorModeExtension(pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: "Scheme and destination must not begin with '-'." }],
           isError: true,
+          details: {},
         };
       }
 
