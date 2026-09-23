@@ -9,7 +9,7 @@ const task = (patch: Partial<TaskHandle> = {}): TaskHandle => ({
 });
 
 const validate = (patch: Partial<Parameters<typeof validateWorkflowLaunch>[0]> = {}, tasks: TaskHandle[] = []) =>
-  validateWorkflowLaunch({ cwd: "/repo", phase: "implement", dependsOn: [], ownedPaths: [], allowConcurrent: false, tasks, ...patch });
+  validateWorkflowLaunch({ cwd: "/repo", dependsOn: [], ownedPaths: [], tasks, ...patch });
 
 describe("explicit route retry protection", () => {
   test("rejects dropping a recently failed explicit route", () => {
@@ -32,14 +32,14 @@ describe("phase inference", () => {
 });
 
 describe("workflow guards", () => {
-  test("blocks implementation while planning is active", () => expect(() => validate({}, [task()])).toThrow("implement cannot start while plan task rt-existing is running"));
-  test("blocks review while implementation is active", () => expect(() => validate({ phase: "review" }, [task({ phase: "implement", route: "luna" })])).toThrow("review cannot start while implement task"));
-  test("requires explicit dependency on completed plan", () => expect(() => validate({}, [task({ state: "completed" })])).toThrow('depends_on: ["rt-existing"]'));
-  test("accepts implementation after completed declared plan", () => expect(() => validate({ dependsOn: ["rt-existing"] }, [task({ state: "completed" })])).not.toThrow());
-  test("rejects incomplete dependency", () => expect(() => validate({ dependsOn: ["rt-existing"] }, [task()])).toThrow("requires successful completion"));
-  test("serializes same-tree writers by default", () => expect(() => validate({}, [task({ phase: "implement", route: "luna" })])).toThrow("already active"));
-  test("allows opted-in disjoint same-tree writers", () => expect(() => validate({ allowConcurrent: true, ownedPaths: ["/repo/src/b"] }, [task({ phase: "implement", route: "luna", allowConcurrent: true, ownedPaths: ["/repo/src/a"] })])).not.toThrow());
-  test("rejects overlapping owned paths", () => expect(() => validate({ allowConcurrent: true, ownedPaths: ["/repo/src/a/file.ts"] }, [task({ phase: "implement", route: "luna", allowConcurrent: true, ownedPaths: ["/repo/src/a"] })])).toThrow("already active"));
-  test("permits work in a different working tree", () => expect(() => validate({}, [task({ cwd: "/other", phase: "implement", route: "luna" })])).not.toThrow());
+  test("allows parallel work in the same tree", () => expect(() => validate({}, [task(), task({ handle: "rt-writer", phase: "implement" })])).not.toThrow());
+  test("does not require a dependency on an earlier plan", () => expect(() => validate({}, [task({ state: "completed" })])).not.toThrow());
+  test("accepts a completed declared dependency", () => expect(() => validate({ dependsOn: ["rt-existing"] }, [task({ state: "completed" })])).not.toThrow());
+  test("rejects an incomplete dependency", () => expect(() => validate({ dependsOn: ["rt-existing"] }, [task()])).toThrow("requires successful completion"));
+  test("rejects an unknown dependency", () => expect(() => validate({ dependsOn: ["rt-missing"] })).toThrow("Unknown dependency"));
+  test("allows disjoint owned paths", () => expect(() => validate({ ownedPaths: ["/repo/src/b"] }, [task({ ownedPaths: ["/repo/src/a"] })])).not.toThrow());
+  test("rejects overlapping owned paths", () => expect(() => validate({ ownedPaths: ["/repo/src/a/file.ts"] }, [task({ ownedPaths: ["/repo/src/a"] })])).toThrow("overlapping paths"));
+  test("ignores overlap when only one side declares paths", () => expect(() => validate({ ownedPaths: ["/repo/src/a"] }, [task()])).not.toThrow());
+  test("ignores finished tasks and other trees", () => expect(() => validate({ ownedPaths: ["/repo/src/a"] }, [task({ state: "completed", ownedPaths: ["/repo/src/a"] }), task({ cwd: "/other", ownedPaths: ["/repo/src/a"] })])).not.toThrow());
   test("normalizes relative ownership paths", () => expect(normalizeOwnedPaths("/repo", ["src/b", "src/a", "src/a"])).toEqual(["/repo/src/a", "/repo/src/b"]));
 });

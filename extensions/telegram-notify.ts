@@ -248,6 +248,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
     let replyTimer: ReturnType<typeof setTimeout> | undefined;
     let replyContext: ExtensionContext | undefined;
     let replyGeneration = 0;
+    let sessionContext: ExtensionContext | undefined;
 
     const persist = () => saveState(statePath, state);
     const isEnabled = () => eligible && state.enabled;
@@ -473,7 +474,21 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
       },
     });
 
+    // Lets other extensions (e.g. background subagent alerts) send through the primary's channel.
+    pi.events.on("telegram:notify", (raw) => {
+      const ctx = sessionContext;
+      const data = raw as { kind?: string; summary?: string; assistanceNeeded?: string } | undefined;
+      if (!ctx || !isEnabled() || (data?.kind !== "blocked" && data?.kind !== "completed") || !data.summary) return;
+      const intent: NotificationIntent = {
+        kind: data.kind,
+        summary: sanitizeText(data.summary),
+        ...(data.assistanceNeeded && { assistanceNeeded: sanitizeText(data.assistanceNeeded) }),
+      };
+      void send(intent, ctx).catch((error) => recordFailure(ctx, error));
+    });
+
     pi.on("session_start", (_event, ctx) => {
+      sessionContext = ctx;
       state = loadState(statePath);
       routeId = randomBytes(8).toString("hex");
       eligible = isEligiblePrimary(ctx, env);
@@ -531,6 +546,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
     });
 
     pi.on("session_shutdown", (_event, ctx) => {
+      sessionContext = undefined;
       pendingCompletion = undefined;
       stopReplyPolling();
       ctx.ui.setStatus(STATUS_KEY, undefined);

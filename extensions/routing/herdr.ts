@@ -322,7 +322,8 @@ export function watchHerdrTask(options: {
         if (!shouldWatch()) return;
         const status = agent?.agent_status as string | undefined;
         const sessionPath = agent?.agent_session?.value as string | undefined;
-        const result = readHerdrResult(sessionPath);
+        // Background tasks never complete, so skip re-reading their ever-growing session log.
+        const result = task.background ? "" : readHerdrResult(sessionPath);
         const usage = readIncrementalUsage(sessionPath, {
           sessionPath: task.sessionPath,
           offset: task.usageOffset ?? 0,

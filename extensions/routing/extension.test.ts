@@ -289,7 +289,7 @@ test("blocks direct Agent launches that bypass guarded routing", async () => {
   expect(await toolCall?.({ toolName: "read", input: {} })).toBeUndefined();
 });
 
-test("every routed task uses Herdr and workflow phase guards remain active", async () => {
+test("every subagent uses Herdr and only overlapping owned paths conflict", async () => {
   const tools: any[] = [];
   const lifecycle = new Map<string, Function>();
   let pane = 0;
@@ -315,7 +315,10 @@ test("every routed task uses Herdr and workflow phase guards remain active", asy
     const planned = await launch.execute("1", { task: "Create the implementation plan", description: "Plan change", route: "sol" }, undefined, undefined, ctx);
     expect(planned.details.agent).toMatch(/^r-/);
     expect(planned.details.phase).toBe("plan");
-    await expect(launch.execute("2", { task: "Implement the planned change", description: "Implement change", route: "luna" }, undefined, undefined, ctx)).rejects.toThrow("implement cannot start while plan task");
+    const implemented = await launch.execute("2", { task: "Implement the planned change", description: "Implement change", route: "luna" }, undefined, undefined, ctx);
+    expect(implemented.details.phase).toBe("implement");
+    await expect(launch.execute("3", { task: "Edit the parser", description: "Parser A", route: "luna", owned_paths: ["src/parser"] }, undefined, undefined, ctx)).resolves.toBeDefined();
+    await expect(launch.execute("4", { task: "Edit the parser tests", description: "Parser B", route: "luna", owned_paths: ["src/parser/tests"] }, undefined, undefined, ctx)).rejects.toThrow("overlapping paths");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();

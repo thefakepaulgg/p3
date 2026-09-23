@@ -25,7 +25,6 @@ export interface TaskHandle {
   phase?: TaskPhase;
   dependsOn?: string[];
   ownedPaths?: string[];
-  allowConcurrent?: boolean;
   /** Optional workflow correlation; persisted in telemetry but never used for routing policy. */
   owner?: TaskOwner;
   /** Long-lived subagent that never completes on idle and never notifies the primary. */
@@ -95,7 +94,7 @@ export function taskMetadata(task: TaskHandle): Record<string, unknown> {
     handle: task.handle, route: task.route, fallbackFrom: task.fallbackFrom,
     routeExplicit: task.routeExplicit, target: task.target, model: task.model, thinking: task.thinking,
     label: truncate(task.label, 80), cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn?.slice(0, 32),
-    ownedPaths: task.ownedPaths?.slice(0, 20), allowConcurrent: task.allowConcurrent, owner: boundedOwner(task.owner), background: task.background,
+    ownedPaths: task.ownedPaths?.slice(0, 20), owner: boundedOwner(task.owner), background: task.background,
     state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
     agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, paneRetention: task.paneRetention,
     paneClosedAt: task.paneClosedAt, toolUses: task.toolUses, tokens: task.tokens, resultChars: task.resultChars,
@@ -240,7 +239,7 @@ export function telemetryRecord(task: TaskHandle): Record<string, unknown> {
     handle: task.handle, route: task.route, fallbackFrom: task.fallbackFrom,
     routeExplicit: task.routeExplicit, target: task.target, model: task.model, thinking: task.thinking,
     label: task.label.slice(0, 80), cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn,
-    ownedPaths: task.ownedPaths?.slice(0, 20), allowConcurrent: task.allowConcurrent, owner: boundedOwner(task.owner), background: task.background,
+    ownedPaths: task.ownedPaths?.slice(0, 20), owner: boundedOwner(task.owner), background: task.background,
     state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
     agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, paneRetention: task.paneRetention, paneClosedAt: task.paneClosedAt, clearedAt: task.clearedAt, toolUses: task.toolUses,
     tokens: task.tokens, resultChars: task.resultChars, sessionPath: task.sessionPath, usageOffset: task.usageOffset, estimatedCost: task.estimatedCost, costKnown: task.costKnown, error: task.error?.slice(0, 240),

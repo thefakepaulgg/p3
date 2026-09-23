@@ -39,48 +39,25 @@ function pathsOverlap(left: string[], right: string[]): boolean {
   return left.some((a) => right.some((b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)));
 }
 
+/**
+ * Launch guards. depends_on handles must exist and have completed. Same-tree parallel work is
+ * allowed; the only conflict is two active tasks whose declared owned_paths overlap.
+ */
 export function validateWorkflowLaunch(options: {
   cwd: string;
-  phase: TaskPhase;
   dependsOn: string[];
   ownedPaths: string[];
-  allowConcurrent: boolean;
   tasks: Iterable<TaskHandle>;
 }): void {
   const tasks = [...options.tasks];
-  const dependencies = options.dependsOn.map((handle) => {
+  for (const handle of options.dependsOn) {
     const task = tasks.find((candidate) => candidate.handle === handle);
     if (!task) throw new Error(`Unknown dependency: ${handle}`);
     if (task.state !== "completed") throw new Error(`Dependency ${handle} is ${task.state}; dependent work requires successful completion`);
-    return task;
-  });
-
-  const sameTree = tasks.filter((task) => task.cwd === options.cwd);
-  const active = sameTree.filter((task) => activeStates.has(task.state));
-  const conflictingPhase = active.find((task) =>
-    (options.phase === "implement" && (task.phase === "plan" || task.phase === "review")) ||
-    (options.phase === "review" && task.phase === "implement") ||
-    (options.phase === "plan" && task.phase === "implement"));
-  if (conflictingPhase) {
-    throw new Error(`${options.phase} cannot start while ${conflictingPhase.phase} task ${conflictingPhase.handle} is ${conflictingPhase.state} in the same working tree`);
   }
 
-  const requiredPredecessor = options.phase === "implement"
-    ? sameTree.filter((task) => task.phase === "plan").sort((a, b) => b.startedAt - a.startedAt)[0]
-    : options.phase === "review"
-      ? sameTree.filter((task) => task.phase === "implement").sort((a, b) => b.startedAt - a.startedAt)[0]
-      : undefined;
-  if (requiredPredecessor && !dependencies.some((task) => task.handle === requiredPredecessor.handle)) {
-    throw new Error(`${options.phase} must declare depends_on: ["${requiredPredecessor.handle}"] before following the ${requiredPredecessor.phase} phase in this working tree`);
-  }
-
-  if (options.phase !== "implement") return;
-  const activeWriter = active.find((task) => task.phase === "implement");
-  if (!activeWriter) return;
-  const safelyDisjoint = options.allowConcurrent && activeWriter.allowConcurrent === true &&
-    options.ownedPaths.length > 0 && (activeWriter.ownedPaths?.length ?? 0) > 0 &&
-    !pathsOverlap(options.ownedPaths, activeWriter.ownedPaths!);
-  if (!safelyDisjoint) {
-    throw new Error(`Write task ${activeWriter.handle} is already active in this working tree; serialize the work or explicitly allow concurrency with disjoint owned_paths on both tasks`);
-  }
+  if (!options.ownedPaths.length) return;
+  const conflict = tasks.find((task) => task.cwd === options.cwd && activeStates.has(task.state) &&
+    (task.ownedPaths?.length ?? 0) > 0 && pathsOverlap(options.ownedPaths, task.ownedPaths!));
+  if (conflict) throw new Error(`Active task ${conflict.handle} already owns overlapping paths in this working tree; wait for it or declare disjoint owned_paths`);
 }
