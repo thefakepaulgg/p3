@@ -260,9 +260,9 @@ test("supports session-scoped off and persistent model controls", async () => {
   const blocked = await state.tools[0].execute("call-1", request, undefined, undefined, state.ctx);
   expect(blocked.content[0].text).toContain("disabled");
   expect(state.notifications.at(-1)).toContain("disabled");
-  expect(JSON.parse(readFileSync(path, "utf8")).model).toBe("anthropic/claude-opus-5");
+  expect(JSON.parse(readFileSync(path, "utf8")).model).toBe("anthropic/claude-fable-5-1");
 
   const nextSession = setup(path);
   nextSession.handlers.get("session_start")?.({}, nextSession.ctx);
-  expect(nextSession.statuses.at(-1)).toBe("advisor:claude-opus-5");
+  expect(nextSession.statuses.at(-1)).toBe("advisor:claude-fable-5-1");
 });
