@@ -236,6 +236,16 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
     persist();
   };
 
+  /** The steward exists only to serve subscriptions; retire it once none remain. */
+  const retireIdleSteward = async () => {
+    if (!stewardHandle || subscriptions.length) return;
+    const handle = stewardHandle;
+    stewardHandle = undefined;
+    persist();
+    await routingRpc("routing:rpc:stop", { handle, close_pane: true }, 15_000).catch(() => undefined);
+    if (activeContext?.hasUI) activeContext.ui.notify(`${STEWARD_LABEL} stopped: no pull request subscriptions remain`, "info");
+  };
+
   const updateStatus = () => {
     if (!activeContext?.hasUI) return;
     activeContext.ui.setStatus(
@@ -335,6 +345,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
 
         subscriptions = retained;
         if (changed) persist();
+        await retireIdleSteward();
         updateStatus();
         lastError = "";
       } catch (error) {
@@ -414,6 +425,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
       };
       persist();
       updateStatus();
+      await retireIdleSteward();
       return {
         content: [{ type: "text", text: `Unsubscribed from ${params.repository}#${params.number}` }],
         details: { repository: params.repository, number: params.number, subscribed: false },
