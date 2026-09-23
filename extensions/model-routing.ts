@@ -558,13 +558,17 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       ctx.ui.notify(boundNotification(result.text), "info");
     } else if (action === "close") ctx.ui.notify(await closeRoutedPane(task), "info");
     else if (action === "clear") ctx.ui.notify(clearRoutedTask(task), "info");
+    else if (action === "stop") {
+      if (!isActiveTask(task)) throw new Error(`${task.label} is already ${task.state}`);
+      ctx.ui.notify(await stopRoutedTask(task, true), "info");
+    }
     else throw new Error(`Unknown subagents action: ${action}`);
   };
 
   pi.registerCommand("subagents", {
-    description: "Open, inspect, close, or clear a subagent",
+    description: "Open, inspect, stop, close, or clear a subagent",
     getArgumentCompletions: (prefix) => {
-      const actions = ["focus", "result", "close", "clear"];
+      const actions = ["focus", "result", "stop", "close", "clear"];
       const separator = prefix.indexOf(" ");
       if (separator < 0) {
         const matches = actions.filter((action) => action.startsWith(prefix.toLowerCase()));
@@ -595,11 +599,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         let action: string | undefined;
         if (trimmed) {
           const [verb, ...queryParts] = trimmed.split(/\s+/);
-          const aliases: Record<string, string> = { open: "focus", focus: "focus", show: "result", view: "result", result: "result", close: "close", clear: "clear", remove: "clear" };
+          const aliases: Record<string, string> = { open: "focus", focus: "focus", show: "result", view: "result", result: "result", close: "close", clear: "clear", remove: "clear", stop: "stop", kill: "stop" };
           action = aliases[verb.toLowerCase()];
-          if (!action) throw new Error("Usage: /subagents [focus|result|close] <handle or task name>, or /subagents clear [<handle or task name>]");
+          if (!action) throw new Error("Usage: /subagents [focus|result|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
           if (!queryParts.length) {
-            if (action !== "clear") throw new Error("Usage: /subagents [focus|result|close] <handle or task name>, or /subagents clear [<handle or task name>]");
+            if (action !== "clear") throw new Error("Usage: /subagents [focus|result|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
             const finished = listedTasks().filter((item) => !isActiveTask(item));
             if (!finished.length) { ctx.ui.notify("No finished subagents to clear", "info"); return; }
             const retainedPanes = finished.filter((item) => item.paneId && !item.paneClosedAt).length;
@@ -625,6 +629,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
           const actions: Array<{ label: string; action: string }> = [];
           if (task.paneId && !task.paneClosedAt) actions.push({ label: "Open pane", action: "focus" });
           actions.push({ label: "Show result", action: "result" });
+          if (isActiveTask(task)) actions.push({ label: "Stop and close pane", action: "stop" });
           if (!isActiveTask(task) && task.paneId && !task.paneClosedAt) actions.push({ label: "Close pane", action: "close" });
           if (!isActiveTask(task)) actions.push({ label: "Clear from list", action: "clear" });
           const selectedAction = await ctx.ui.select(task.label, actions.map((item) => item.label));
