@@ -23,7 +23,7 @@ export class ExplicitRouteRetryGuard {
   clear(key: string): void { this.failures.delete(key); }
 }
 
-export function inferPhase(task: string, _route: string, explicit?: TaskPhase): TaskPhase {
+export function inferPhase(task: string, explicit?: TaskPhase): TaskPhase {
   if (explicit) return explicit;
   if (/\b(plan|planning|architecture|design)\b/i.test(task)) return "plan";
   if (/\b(review|audit|second opinion)\b/i.test(task)) return "review";

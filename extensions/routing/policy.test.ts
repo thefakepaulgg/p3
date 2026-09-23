@@ -9,7 +9,9 @@ describe("Sol/Luna routing policy", () => {
     ["Make an ambiguous high-risk production decision", "sol"],
     ["Find where UserService is defined and list callers", "luna"],
     ["Rename the field and verify via the build", "luna"],
-    ["Add tests mirroring the existing EvaluationServiceTests", "luna"],
+    ["Add tests mirroring the existing EvaluationServiceTests", "sol"],
+    ["Animate graph layout transitions; record evidence under docs/evidence and verify with the build", "sol"],
+    ["Re-run the checks and list any failing callers", "luna"],
     ["Do this ordinary routed task", "sol"],
   ];
 
@@ -23,6 +25,8 @@ describe("Sol/Luna routing policy", () => {
     expect(classifyDelegation("Make an ambiguous high-risk production decision").delegate).toBe(false);
     expect(classifyDelegation("Execute this accepted plan through parallel agents").delegate).toBe(true);
   });
+
+  test("explicit implement phase never routes to Luna", () => expect(classifyDelegation("Find and list callers", "implement").target).toBe("sol"));
 
   test("exposes only routed Sol and Luna models", () => expect(Object.keys(routes)).toEqual(["sol", "luna"]));
 });
