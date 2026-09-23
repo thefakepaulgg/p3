@@ -20,7 +20,7 @@ const RouteParams = Type.Object({
 const RoutedTaskParams = Type.Object({
   task: Type.String({ minLength: 1, description: "Self-contained assignment for the subagent" }),
   description: Type.String({ minLength: 3, maxLength: 80, description: "Short task label" }),
-  route: Type.Optional(Type.String({ minLength: 1, description: "Model override. Omit it: policy picks Sol (gpt-6-sol, medium) for planning, implementation, and judgment, and Luna (gpt-6-luna, high) only for clearly mechanical review/discovery. Set it only when the user named a model for this specific task." })),
+  route: Type.Optional(Type.String({ minLength: 1, description: "Model override. Omit it: policy picks Sol (gpt-6-sol, medium) for general planning, implementation, and judgment; Opus (claude-opus-5-5, medium) for deep bugs and UI work; and Luna (gpt-6-luna, high) only for clearly mechanical review/discovery. Set it only when the user named a model for this specific task." })),
   effort: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, {
     description: "Reasoning effort override. Omit for the route default unless the user asked for an effort level for this specific task.",
   })),
@@ -344,7 +344,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     promptSnippet: "Launch a guarded sticky-model task in Herdr",
     promptGuidelines: [
       "Use subagent and subagent_control for all agent orchestration; never manage agents through the herdr CLI directly. Subagents use bounded dedicated tabs in the root workspace; never create agent splits in the user-owned root tab.",
-      "Omit route and effort. Policy already sends planning, implementation, and judgment work to Sol and only clearly mechanical review/discovery to Luna; setting phase accurately is how to influence it. Set route or effort only when the user names a model or effort for the task being launched. Explicit choices never silently fall back.",
+      "Omit route and effort. Policy already sends general planning, implementation, and judgment to Sol, deep bugs and UI work to Opus, and only clearly mechanical review/discovery to Luna; an accurate phase and a clear brief are how to influence it. Set route or effort only when the user names a model or effort for the task being launched. Explicit choices never silently fall back.",
       "A user's model or effort request applies only to the launches it names. Do not carry it forward to later subagents, and do not set route from memory notes or earlier launches. When relaunching a stopped or failed subagent, pass route/effort only if the original launch was explicitly user-directed.",
       "Parallel subagents may share a working tree; split the work so they do not edit the same files, and declare owned_paths when overlap matters. Use depends_on when a task must wait for another to finish. Do not use subagent for simple work cheaper to do directly.",
       "After launching, either continue genuinely independent work or end the turn. Automatic completion delivery will wake the primary. Never poll subagent_control, sleep, tail logs, or send impatience steering messages while a task is merely running.",

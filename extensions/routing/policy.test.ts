@@ -10,8 +10,10 @@ describe("Sol/Luna routing policy", () => {
     ["Find where UserService is defined and list callers", "luna"],
     ["Rename the field and verify via the build", "luna"],
     ["Add tests mirroring the existing EvaluationServiceTests", "sol"],
-    ["Animate graph layout transitions; record evidence under docs/evidence and verify with the build", "sol"],
+    ["Animate graph layout transitions; record evidence under docs/evidence and verify with the build", "opus"],
     ["Re-run the checks and list any failing callers", "luna"],
+    ["Diagnose the intermittent crash when the map loads", "opus"],
+    ["Polish the SwiftUI layout of the People screen", "opus"],
     ["Do this ordinary routed task", "sol"],
   ];
 
@@ -28,7 +30,7 @@ describe("Sol/Luna routing policy", () => {
 
   test("explicit implement phase never routes to Luna", () => expect(classifyDelegation("Find and list callers", "implement").target).toBe("sol"));
 
-  test("exposes only routed Sol and Luna models", () => expect(Object.keys(routes)).toEqual(["sol", "luna"]));
+  test("exposes only routed Sol, Luna, and Opus models", () => expect(Object.keys(routes)).toEqual(["sol", "luna", "opus"]));
 });
 
 describe("fallback policy", () => {

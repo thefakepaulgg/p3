@@ -1,10 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { RoutingDecision } from "./policy.ts";
+import type { RouteName, RoutingDecision } from "./policy.ts";
 import type { TaskPhase } from "./workflow.ts";
 
-const LUNA_MIN_CONFIDENCE = 0.8;
 const MAX_BRIEF_CHARS = 6_000;
 
 /**
@@ -19,13 +18,14 @@ export function typesafeApiKey(): string | undefined {
   try { return readFileSync(file, "utf8").trim() || undefined; } catch { return undefined; }
 }
 
+const MIN_CONFIDENCE: Record<RouteName, number> = { sol: 0.6, opus: 0.7, luna: 0.8 };
+
 /**
- * Ask Jev whether a Sol-by-default launch can go to Luna. Only review/other work is asked;
- * planning, implementation, and difficult work keep the local Sol decision without a request.
- * Any failure or low confidence returns the local decision.
+ * Ask Jev to pick Sol, Opus, or Luna for a launch without an explicit route. Luna is never
+ * accepted for planning or implementation. Low confidence or any failure keeps the local decision.
  */
 export async function classifyWithJev(brief: string, phase: TaskPhase, local: RoutingDecision, apiKey = typesafeApiKey()): Promise<RoutingDecision> {
-  if (!apiKey || phase === "plan" || phase === "implement" || local.confidence === "high") return local;
+  if (!apiKey) return local;
   try {
     const { TypeSafeClient, choice } = await import("@typesafe-ai/sdk");
     const client = new TypeSafeClient({ apiKey, timeout: 5_000, retry: { maxRetries: 0 }, logLevel: "off" });
@@ -33,16 +33,16 @@ export async function classifyWithJev(brief: string, phase: TaskPhase, local: Ro
       state: { phase, brief: brief.slice(0, MAX_BRIEF_CHARS) },
       questions: {
         model: choice("Which model should run this delegated coding-agent task?", {
-          sol: "Strong model. Any implementation, code changes, design, debugging, judgment calls, or work whose result is not mechanically checkable.",
+          sol: "Default strong model. General implementation, refactors, backend and infrastructure work, planning, design decisions, and judgment calls.",
+          opus: "Premium model: more intelligent and faster than sol, but more expensive. Deep or elusive bugs (crashes, races, hangs, regressions, root-cause analysis) and UI work (visual design, layout, animation, SwiftUI/web front-end).",
           luna: "Cheap model. Clearly mechanical, read-only or lightweight work with an objectively checkable result: locating code, listing references, re-running checks, simple re-reviews against explicit criteria.",
         }),
       },
     });
-    const answer = answers.model;
-    if (answer.choice === "luna" && answer.confidence >= LUNA_MIN_CONFIDENCE) {
-      return { target: "luna", delegate: true, confidence: "high", rationale: `Jev classified this as mechanical work (confidence ${answer.confidence.toFixed(2)}).` };
-    }
-    return { target: "sol", delegate: true, confidence: "medium", rationale: `Jev did not confidently classify this as mechanical (${answer.choice}, ${answer.confidence.toFixed(2)}); using Sol.` };
+    const { choice: target, confidence } = answers.model;
+    if (target === "luna" && (phase === "plan" || phase === "implement")) return local;
+    if (confidence < MIN_CONFIDENCE[target]) return local;
+    return { target, delegate: true, confidence: confidence >= 0.8 ? "high" : "medium", rationale: `Jev selected ${target} (confidence ${confidence.toFixed(2)}).` };
   } catch {
     return local;
   }

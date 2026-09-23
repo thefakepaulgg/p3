@@ -8,8 +8,4 @@ describe("Jev routing", () => {
     expect(await classifyWithJev("List callers of UserService", "other", local, undefined)).toBe(local);
   });
 
-  test("never asks Jev about implementation", async () => {
-    const local = classifyDelegation("Fix the parser", "implement");
-    expect(await classifyWithJev("Fix the parser", "implement", local, "unused-key")).toBe(local);
-  });
 });
