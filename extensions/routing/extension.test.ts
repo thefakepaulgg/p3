@@ -71,8 +71,8 @@ test("registers the simplified public surface", () => {
     events: { on: () => () => {}, emit: () => {} }, exec: async () => ({ code: 0, stdout: "{}", stderr: "" }),
   };
   routing(fake);
-  expect(tools.map((tool) => tool.name)).toEqual(["routed_task", "routed_task_control", "model_route"]);
-  const properties = tools.find((tool) => tool.name === "routed_task").parameters.properties;
+  expect(tools.map((tool) => tool.name)).toEqual(["subagent", "subagent_control", "model_route"]);
+  const properties = tools.find((tool) => tool.name === "subagent").parameters.properties;
   expect(properties.surface).toBeUndefined();
   expect(properties.isolation).toBeUndefined();
   expect(properties.route.type).toBe("string");
@@ -80,17 +80,17 @@ test("registers the simplified public surface", () => {
   expect(properties.effort.enum).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   expect(properties.capabilities.type).toBe("array");
   expect(properties.capabilities.items).toEqual({ type: "string", enum: ["memory"] });
-  expect(commands).toEqual(["routed", "route"]);
+  expect(commands).toEqual(["subagents", "route"]);
 });
 
-test("public routed_task rejects unsupported capabilities before launch", async () => {
+test("public subagent rejects unsupported capabilities before launch", async () => {
   const tools: any[] = [];
   const fake: any = {
     registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, on: () => {}, appendEntry: () => {}, sendMessage: () => {},
     events: { on: () => () => {}, emit: () => {} }, exec: async () => { throw new Error("Herdr must not be called"); },
   };
   routing(fake);
-  const launch = tools.find((tool) => tool.name === "routed_task");
+  const launch = tools.find((tool) => tool.name === "subagent");
   await expect(launch.execute("1", { task: "Inspect", description: "Inspect task", capabilities: ["shell"] }, undefined, undefined, uiCtx())).rejects.toThrow("capabilities must contain only memory");
   await expect(launch.execute("2", { task: "Inspect", description: "Inspect task", effort: "extreme" }, undefined, undefined, uiCtx())).rejects.toThrow("unknown effort level extreme");
 });
@@ -120,7 +120,7 @@ test("launches an explicitly requested model outside the programmed routes", asy
   };
   try {
     routing(fake);
-    const launch = tools.find((tool) => tool.name === "routed_task");
+    const launch = tools.find((tool) => tool.name === "subagent");
     const launched = await launch.execute("1", { task: "Inspect the change", description: "Inspect change", route: "gpt-6-astra", effort: "xhigh", capabilities: ["memory"] }, undefined, undefined, ctx);
     expect(launched.details.model).toBe("openai-codex/gpt-6-astra");
     expect(launched.details.thinking).toBe("xhigh");
@@ -129,7 +129,7 @@ test("launches an explicitly requested model outside the programmed routes", asy
     expect(startArgs).toContain("openai-codex/gpt-6-astra");
     expect(startArgs).toContain("xhigh");
     expect(startArgs).not.toContain("--no-extensions");
-    expect(startArgs).toContain("routed_task,routed_task_control,model_route,workflow_control");
+    expect(startArgs).toContain("subagent,subagent_control,model_route,workflow_control");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -170,11 +170,11 @@ test("child panes render a parent row below the editor", async () => {
   const path = join(temp, "manifest.json");
   writeRoutingManifest(path, {
     version: ROUTING_MANIFEST_VERSION, parentSessionId: "parent", parentPaneId: "w1:p1", updatedAt: 1,
-    tasks: [{ handle: "rt-1", label: "Legacy worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-5.6-luna", state: "running", startedAt: 1 }],
+    tasks: [{ handle: "rt-1", label: "Legacy worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-6-luna", state: "running", startedAt: 1 }],
   });
   writeRoutingManifest(manifestPathForPane(temp, "w1:p1"), {
     version: ROUTING_MANIFEST_VERSION, parentSessionId: "parent", parentPaneId: "w1:p1", updatedAt: 2,
-    tasks: [{ handle: "rt-1", label: "Stable worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-5.6-luna", state: "running", startedAt: 1 }],
+    tasks: [{ handle: "rt-1", label: "Stable worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-6-luna", state: "running", startedAt: 1 }],
   });
   process.env.PI_ROUTING_MANIFEST = path;
   process.env.HERDR_PANE_ID = "w1:p2";
@@ -218,7 +218,7 @@ test("restores routed tasks when reopening the same Pi session", async () => {
   const path = manifestPathForPane(temp, "w1:p1");
   writeRoutingManifest(path, {
     version: ROUTING_MANIFEST_VERSION, parentSessionId: "session-1", parentPaneId: "w1:p1", updatedAt: 1,
-    tasks: [{ handle: "rt-old", label: "Retained worker", agentName: "worker", paneId: "w1:p2", route: "sol", model: "openai-codex/gpt-5.6-sol", state: "completed", startedAt: 1, endedAt: 2 }],
+    tasks: [{ handle: "rt-old", label: "Retained worker", agentName: "worker", paneId: "w1:p2", route: "sol", model: "openai-codex/gpt-6-sol", state: "completed", startedAt: 1, endedAt: 2 }],
   });
   const tools: any[] = [];
   const lifecycle = new Map<string, Function>();
@@ -232,7 +232,7 @@ test("restores routed tasks when reopening the same Pi session", async () => {
   try {
     routing(fake);
     await lifecycle.get("session_start")?.({}, ctx);
-    const list = await tools.find((tool) => tool.name === "routed_task_control").execute("1", { action: "list" }, undefined, undefined, ctx);
+    const list = await tools.find((tool) => tool.name === "subagent_control").execute("1", { action: "list" }, undefined, undefined, ctx);
     expect(list.content[0].text).toContain("rt-old [completed]");
     await lifecycle.get("session_shutdown")?.();
     expect(readRoutingManifest(path)?.tasks[0]?.handle).toBe("rt-old");
@@ -248,7 +248,7 @@ test("does not restore routed agents or cost in a new Pi session", async () => {
   writeRoutingManifest(path, {
     version: ROUTING_MANIFEST_VERSION, parentSessionId: "previous-session", parentPaneId: "w1:p1",
     sessionTotal: 73.83, sessionTotalKnown: true, updatedAt: 1,
-    tasks: [{ handle: "rt-old", label: "Prior worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-5.6-luna", state: "completed", startedAt: Date.now() - 60_000, endedAt: Date.now() - 30_000, estimatedCost: 0.09, costKnown: true }],
+    tasks: [{ handle: "rt-old", label: "Prior worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-6-luna", state: "completed", startedAt: Date.now() - 60_000, endedAt: Date.now() - 30_000, estimatedCost: 0.09, costKnown: true }],
   });
   const tools: any[] = [];
   const lifecycle = new Map<string, Function>();
@@ -263,7 +263,7 @@ test("does not restore routed agents or cost in a new Pi session", async () => {
   try {
     routing(fake);
     await lifecycle.get("session_start")?.({}, ctx);
-    const list = await tools.find((tool) => tool.name === "routed_task_control").execute("1", { action: "list" }, undefined, undefined, ctx);
+    const list = await tools.find((tool) => tool.name === "subagent_control").execute("1", { action: "list" }, undefined, undefined, ctx);
     expect(list.content[0].text).toBe("No routed tasks");
     expect(widgets.at(-1)).toEqual({ key: "routed-tasks", content: undefined });
     expect(readRoutingManifest(path)?.parentSessionId).toBe("session-1");
@@ -284,7 +284,7 @@ test("blocks direct Agent launches that bypass guarded routing", async () => {
   routing(fake);
   expect(await toolCall?.({ toolName: "Agent", input: {} })).toEqual({
     block: true,
-    reason: "Direct Agent launch bypasses Herdr routing and dependency guards. Use routed_task.",
+    reason: "Direct Agent launch bypasses Herdr routing and dependency guards. Use subagent.",
   });
   expect(await toolCall?.({ toolName: "read", input: {} })).toBeUndefined();
 });
@@ -310,7 +310,7 @@ test("every routed task uses Herdr and workflow phase guards remain active", asy
   };
   try {
     routing(fake);
-    const launch = tools.find(tool => tool.name === "routed_task");
+    const launch = tools.find(tool => tool.name === "subagent");
     const ctx: any = { hasUI: true, cwd: "/repo", modelRegistry: { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true }, ui: { setStatus: () => {}, theme: { fg: (_: string, text: string) => text } } };
     const planned = await launch.execute("1", { task: "Create the implementation plan", description: "Plan change", route: "sol" }, undefined, undefined, ctx);
     expect(planned.details.agent).toMatch(/^r-/);
@@ -340,20 +340,20 @@ test("Herdr completion delivers exactly one bounded custom message as a steer tu
   };
   try {
     routing(fake);
-    const launch = tools.find((tool) => tool.name === "routed_task");
-    const control = tools.find((tool) => tool.name === "routed_task_control");
+    const launch = tools.find((tool) => tool.name === "subagent");
+    const control = tools.find((tool) => tool.name === "subagent_control");
     const ctx = uiCtx(widgets, colors);
     const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
     for (let tick = 0; tick < 10 && !messages.length; tick += 1) await new Promise((done) => setTimeout(done, 40));
 
     expect(messages).toHaveLength(1);
     const [delivered] = messages;
-    expect(delivered.message.customType).toBe("routed-task-completion");
+    expect(delivered.message.customType).toBe("subagent-completion");
     expect(delivered.message.display).toBe(true);
     expect(delivered.options).toEqual({ deliverAs: "steer", triggerTurn: true });
     expect(delivered.message.content.length).toBeLessThanOrEqual(NOTIFICATION_LIMIT);
     expect(delivered.message.content).not.toContain("D".repeat(700));
-    expect(delivered.message.content).toContain(`routed_task_control action=result handle=${launched.details.handle}`);
+    expect(delivered.message.content).toContain(`subagent_control action=result handle=${launched.details.handle}`);
     expect(delivered.message.details.kind).toBe("completed");
 
     // The full result stays retrievable, and reading it does not add another turn.
@@ -377,7 +377,7 @@ test("Herdr completion delivers exactly one bounded custom message as a steer tu
     // The widget tracks the task and then its completion.
     expect(widgets.every((entry) => entry.key === "routed-tasks")).toBe(true);
     const rows = widgets.at(-1)!.content!;
-    expect(rows[0]).toContain("╭─ Routed agents · 1 recent");
+    expect(rows[0]).toContain("╭─ Subagents · 1 recent");
     expect(rows[1]).toContain("✓ Inspect change · Luna");
     expect(rows.join(" ")).not.toContain(launched.details.handle);
     expect(rows.join(" ")).not.toContain("rt-");
@@ -419,17 +419,17 @@ test("steering a completed task delivers the next completion", async () => {
   };
   try {
     routing(fake);
-    const launch = tools.find((tool) => tool.name === "routed_task");
-    const control = tools.find((tool) => tool.name === "routed_task_control");
+    const launch = tools.find((tool) => tool.name === "subagent");
+    const control = tools.find((tool) => tool.name === "subagent_control");
     const ctx = uiCtx();
     const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
     for (let tick = 0; tick < 10 && messages.length < 1; tick += 1) await new Promise((done) => setTimeout(done, 40));
-    expect(messages.filter((entry) => entry.message.customType === "routed-task-completion")).toHaveLength(1);
+    expect(messages.filter((entry) => entry.message.customType === "subagent-completion")).toHaveLength(1);
 
     await control.execute("2", { action: "steer", handle: launched.details.handle, message: "Use the user's decision and continue." }, undefined, undefined, ctx);
     for (let tick = 0; tick < 10 && messages.length < 2; tick += 1) await new Promise((done) => setTimeout(done, 40));
 
-    const completions = messages.filter((entry) => entry.message.customType === "routed-task-completion");
+    const completions = messages.filter((entry) => entry.message.customType === "subagent-completion");
     expect(completions).toHaveLength(2);
     expect(completions[1].message.content).toContain("Completed after receiving the decision.");
     await lifecycle.get("session_shutdown")?.();
@@ -466,7 +466,7 @@ test("a stale TUI widget renders nothing after its routed tasks expire", async (
   };
   try {
     routing(fake);
-    const launch = tools.find((tool) => tool.name === "routed_task");
+    const launch = tools.find((tool) => tool.name === "subagent");
     await launch.execute("1", { task: "Inspect", description: "Expiring task", route: "luna" }, undefined, undefined, ctx);
     for (let tick = 0; tick < 10 && !messages.length; tick += 1) await new Promise((done) => setTimeout(done, 40));
     expect(staleWidget).toBeDefined();
@@ -486,7 +486,7 @@ test("replayed completion claims are not delivered twice after reload", async ()
   const widgets: Array<{ key: string; content: string[] | undefined }> = [];
   const replayed = {
     handle: "rt-replay", route: "luna", routeExplicit: false, target: "herdr",
-    model: "openai-codex/gpt-5.6-luna", thinking: "high", label: "Replayed task", state: "running",
+    model: "openai-codex/gpt-6-luna", thinking: "high", label: "Replayed task", state: "running",
     startedAt: Date.now() - 5000, agentName: "r-replay", paneId: "w1:p2", paneRetention: "keep",
     transitions: 1, notifiedStates: ["completed"], completionNotifiedAt: Date.now() - 1000, completionDeliveredVia: "message",
   };
@@ -532,8 +532,8 @@ test("manual result retrieval consumes the single completion slot", async () => 
   };
   try {
     routing(fake);
-    const launch = tools.find((tool) => tool.name === "routed_task");
-    const control = tools.find((tool) => tool.name === "routed_task_control");
+    const launch = tools.find((tool) => tool.name === "subagent");
+    const control = tools.find((tool) => tool.name === "subagent_control");
     const ctx = uiCtx();
     const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
     // Stop the watcher, mark the task completed by hand, then consume the result manually.
@@ -547,7 +547,7 @@ test("manual result retrieval consumes the single completion slot", async () => 
     status = "idle";
     await control.execute("5", { action: "steer", handle: launched.details.handle, message: "continue" }, undefined, undefined, ctx);
     await new Promise((done) => setTimeout(done, 200));
-    expect(messages.filter((entry) => entry.message.customType === "routed-task-completion")).toHaveLength(0);
+    expect(messages.filter((entry) => entry.message.customType === "subagent-completion")).toHaveLength(0);
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -574,8 +574,8 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
   };
   try {
     routing(fake);
-    const launch = tools.find(tool => tool.name === "routed_task");
-    const control = tools.find(tool => tool.name === "routed_task_control");
+    const launch = tools.find(tool => tool.name === "subagent");
+    const control = tools.find(tool => tool.name === "subagent_control");
     const ctx: any = { hasUI: true, cwd: "/repo", modelRegistry: { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true }, ui: { setStatus: () => {}, theme: { fg: (_: string, text: string) => text } } };
     const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
     expect(launched.content[0].text).toContain("pane w1:p2");
@@ -619,8 +619,8 @@ test("stop with close aborts tracking, records the closed pane, and exposes live
   };
   try {
     routing(fake);
-    const launch = tools.find(tool => tool.name === "routed_task");
-    const control = tools.find(tool => tool.name === "routed_task_control");
+    const launch = tools.find(tool => tool.name === "subagent");
+    const control = tools.find(tool => tool.name === "subagent_control");
     const ctx = uiCtx();
     const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
     const status = await control.execute("2", { action: "status", handle: launched.details.handle }, undefined, undefined, ctx);
@@ -674,7 +674,7 @@ test("routing RPC refuses launches outside the user-facing root session", async 
   await lifecycle.get("session_shutdown")?.();
 });
 
-test("/routed opens a retained pane and clear survives reload", async () => {
+test("/subagents opens a retained pane and clear survives reload", async () => {
   const restoreEnv = herdrEnv();
   const commands = new Map<string, any>();
   const lifecycle = new Map<string, Function>();
@@ -684,7 +684,7 @@ test("/routed opens a retained pane and clear survives reload", async () => {
   const notices: Array<{ text: string; level: string }> = [];
   const replayed = {
     handle: "rt-stored", route: "sol", routeExplicit: true, target: "herdr",
-    model: "openai-codex/gpt-5.6-sol", thinking: "medium", label: "Stored agent", state: "completed",
+    model: "openai-codex/gpt-6-sol", thinking: "medium", label: "Stored agent", state: "completed",
     startedAt: Date.now() - 60_000, endedAt: Date.now() - 30_000, agentName: "r-stored", paneId: "w1:p9", paneRetention: "keep",
     transitions: 2, notifiedStates: ["completed"], completionNotifiedAt: Date.now() - 30_000, completionDeliveredVia: "message",
   };
@@ -706,16 +706,16 @@ test("/routed opens a retained pane and clear survives reload", async () => {
     ctx.ui.notify = (text: string, level: string) => notices.push({ text, level });
     ctx.sessionManager = sessionManager([{ type: "custom", customType: "routed-task", data: replayed }]);
     await lifecycle.get("session_start")?.({}, ctx);
-    const complete = commands.get("routed").getArgumentCompletions;
+    const complete = commands.get("subagents").getArgumentCompletions;
     expect(complete("focus ")).toEqual([{ value: "focus Stored agent", label: "Stored agent", description: "Sol · completed" }]);
     expect(complete("result Stor")[0].value).toBe("result Stored agent");
     expect(complete("focus rt-")[0].value).toBe("focus rt-stored");
     expect(complete("clear missing")).toBeNull();
-    await commands.get("routed").handler("", ctx);
+    await commands.get("subagents").handler("", ctx);
     expect(calls.some((args) => args.join(" ") === "pane focus w1:p9")).toBe(true);
     expect(notices.at(-1)?.text).toBe("Opened Stored agent");
 
-    await commands.get("routed").handler("clear", ctx);
+    await commands.get("subagents").handler("clear", ctx);
     expect(notices.at(-1)?.text).toContain("Cleared 1 finished routed agent");
     expect(notices.at(-1)?.text).toContain("1 retained pane remains open");
     const cleared = entries.filter((entry) => entry.type === "routed-task").at(-1)?.data;
@@ -733,7 +733,7 @@ test("/routed opens a retained pane and clear survives reload", async () => {
     const reloadCtx = uiCtx();
     reloadCtx.sessionManager = sessionManager([{ type: "custom", customType: "routed-task", data: cleared }]);
     await reloadLifecycle.get("session_start")?.({}, reloadCtx);
-    const list = reloadTools.find((tool) => tool.name === "routed_task_control");
+    const list = reloadTools.find((tool) => tool.name === "subagent_control");
     expect((await list.execute("1", { action: "list" })).content[0].text).toBe("No routed tasks");
     await reloadLifecycle.get("session_shutdown")?.();
     await lifecycle.get("session_shutdown")?.();

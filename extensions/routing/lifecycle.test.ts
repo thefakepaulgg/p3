@@ -4,7 +4,7 @@ import type { TaskHandle } from "./state.ts";
 
 const task = (patch: Partial<TaskHandle> = {}): TaskHandle => ({
   handle: "rt-life", route: "luna", routeExplicit: false,
-  target: "herdr", model: "openai-codex/gpt-5.6-luna", thinking: "high", label: "Lifecycle task",
+  target: "herdr", model: "openai-codex/gpt-6-luna", thinking: "high", label: "Lifecycle task",
   state: "completed", startedAt: 1, result: "must stay in memory only", resultChars: 24,
   transitions: 1, notifiedStates: [], ...patch,
 });

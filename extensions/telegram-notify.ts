@@ -118,8 +118,12 @@ function releasePrimary(instance: object): void {
   if (registry[OWNER_KEY] === instance) delete registry[OWNER_KEY];
 }
 
+const isBackgroundSubagent = (env: NodeJS.ProcessEnv) => env.PI_SUBAGENT_MODE === "background";
+
 export function isEligiblePrimary(ctx: Pick<ExtensionContext, "mode" | "hasUI">, env: NodeJS.ProcessEnv): boolean {
   if (ctx.mode !== "tui" || !ctx.hasUI) return false;
+  // Background subagents never report to the primary, so Telegram is their only outbound channel.
+  if (isBackgroundSubagent(env)) return true;
   if (env.HERDR_ROLE === "helper") return false;
   const routedRootTab = env.PI_ROUTED_ROOT_TAB_ID?.trim();
   const currentTab = env.HERDR_TAB_ID?.trim();
@@ -247,7 +251,8 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
 
     const persist = () => saveState(statePath, state);
     const isEnabled = () => eligible && state.enabled;
-    const areRepliesEnabled = () => isEnabled() && state.repliesEnabled;
+    // Replies route to the primary only; a second poller would steal its updates.
+    const areRepliesEnabled = () => isEnabled() && state.repliesEnabled && !isBackgroundSubagent(env);
 
     const updateStatus = (ctx: ExtensionContext) => {
       const value = !eligible
@@ -278,7 +283,7 @@ export function createTelegramNotifyExtension(options: TelegramNotifyExtensionOp
         return { duplicate: true };
       }
 
-      await deliver(formatMessage(intent, ctx, state.repliesEnabled ? routeId : undefined));
+      await deliver(formatMessage(intent, ctx, areRepliesEnabled() ? routeId : undefined));
       state.lastSentAt = now().toISOString();
       state.lastKind = intent.kind;
       state.lastFingerprint = digest;

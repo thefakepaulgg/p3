@@ -98,6 +98,6 @@ steps:
     await new Promise((resolve) => setTimeout(resolve, 5));
     await commands.get("workflow").handler("status", ctx);
     expect(notices.at(-1)?.text).toContain("[blocked]");
-    expect(notices.some((notice) => notice.text.includes("needs input") && notice.text.includes("/routed"))).toBe(true);
+    expect(notices.some((notice) => notice.text.includes("needs input") && notice.text.includes("/subagents"))).toBe(true);
   } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; }
 });

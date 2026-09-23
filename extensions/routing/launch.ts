@@ -17,6 +17,8 @@ export interface RoutedTaskLaunchParams {
   allow_concurrent?: boolean;
   pane_retention?: "keep" | "close";
   capabilities?: RoutedWorkerCapability[];
+  /** background: long-lived, never marked complete on idle, and never wakes the primary. */
+  mode?: "task" | "background";
   owner?: TaskOwner;
 }
 
@@ -46,7 +48,7 @@ export function validateRoutedTaskLaunchParams(input: RoutedTaskLaunchParams): v
   if (input.task.length > MAX_TASK_LENGTH) throw new Error(`task exceeds the ${MAX_TASK_LENGTH} character limit`);
   if (typeof input.description !== "string" || !input.description.trim()) throw new Error("description is required");
   if (input.description.length > 80) throw new Error("description exceeds the 80 character limit");
-  if ((input as any).surface !== undefined) throw new Error("surface is no longer supported; routed tasks always run in Herdr");
+  if ((input as any).surface !== undefined) throw new Error("surface is no longer supported; subagents always run in Herdr");
   if ((input as any).isolation !== undefined) throw new Error("isolation is no longer supported; pass an existing worktree as cwd");
   if (input.route !== undefined && (typeof input.route !== "string" || !input.route.trim())) throw new Error("route must be a non-empty model or route name");
   if (input.effort !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(input.effort)) throw new Error(`unknown effort level ${String(input.effort)}`);
@@ -57,6 +59,7 @@ export function validateRoutedTaskLaunchParams(input: RoutedTaskLaunchParams): v
   }
   if (input.allow_concurrent !== undefined && typeof input.allow_concurrent !== "boolean") throw new Error("allow_concurrent must be boolean");
   if (input.pane_retention !== undefined && input.pane_retention !== "keep" && input.pane_retention !== "close") throw new Error("pane_retention must be keep or close");
+  if (input.mode !== undefined && input.mode !== "task" && input.mode !== "background") throw new Error("mode must be task or background");
   if (input.capabilities !== undefined && (!Array.isArray(input.capabilities) || input.capabilities.some((capability) => capability !== "memory"))) throw new Error("capabilities must contain only memory");
 }
 
@@ -71,7 +74,9 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   deps.recordDecision(task, decision);
   const requestedRoute = params.route?.trim() ?? classifyModelRoute(task, decision);
   const cwd = resolve(params.cwd ?? ctx.cwd);
-  const phase = inferPhase(`${description}\n${task}`, requestedRoute, params.phase);
+  const background = params.mode === "background";
+  // Background subagents stay active indefinitely, so they must not hold a plan/implement/review slot.
+  const phase = background ? params.phase ?? "other" : inferPhase(`${description}\n${task}`, requestedRoute, params.phase);
   const dependsOn = params.depends_on ?? [];
   const ownedPaths = normalizeOwnedPaths(cwd, params.owned_paths ?? []);
   const allowConcurrent = params.allow_concurrent ?? false;
@@ -84,16 +89,16 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   catch (error) { if (params.route !== undefined) deps.routeRetryGuard.record(retryKey, requestedRoute); throw error; }
   deps.routeRetryGuard.clear(retryKey);
 
-  const active = [...deps.taskHandles.values()].filter((item) => ["queued", "running", "blocked"].includes(item.state)).length;
-  if (active >= 4) throw new Error("Herdr routed-task concurrency limit reached (4 active tasks)");
+  const active = [...deps.taskHandles.values()].filter((item) => !item.background && ["queued", "running", "blocked"].includes(item.state)).length;
+  if (active >= 4) throw new Error("Herdr subagent concurrency limit reached (4 active tasks)");
   const routeName = routePlan.route;
   const route = routePlan.config;
-  const launched: HerdrLaunch = await launchHerdrAgent(deps.pi, task, description, routeName, route, cwd, undefined, deps.manifestPath, params.capabilities);
+  const launched: HerdrLaunch = await launchHerdrAgent(deps.pi, task, description, routeName, route, cwd, undefined, deps.manifestPath, params.capabilities, background);
   const handle = newHandle();
   const tracked: TaskHandle = {
     handle, route: routeName, fallbackFrom: routePlan.fallbackFrom, routeExplicit: params.route !== undefined,
     target: "herdr", model: `${route.provider}/${route.model}`, thinking: route.thinking, label: description,
-    cwd, phase, dependsOn, ownedPaths, allowConcurrent, owner: params.owner, state: "running", startedAt: Date.now(),
+    cwd, phase, dependsOn, ownedPaths, allowConcurrent, owner: params.owner, background: background || undefined, state: "running", startedAt: Date.now(),
     agentName: launched.agent, paneId: launched.paneId, tabId: launched.tabId, paneRetention: params.pane_retention ?? "keep",
     transitions: 0, notifiedStates: [], usageOffset: 0, estimatedCost: 0, costKnown: false,
   };
@@ -101,8 +106,8 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   deps.watchHerdrTask(tracked);
   const fallbackNote = routePlan.fallbackFrom ? ` Policy fallback: ${routePlan.fallbackFrom} was unavailable, so ${routeName} was selected.` : "";
   return {
-    text: `Launched Herdr ${phase} task ${handle}: agent ${launched.agent}, pane ${launched.paneId}, using ${route.provider}/${route.model} (${route.thinking}). The model is fixed. Do not poll; completion will wake the primary.${fallbackNote}`,
-    details: { handle, phase, dependsOn, ownedPaths, allowConcurrent, capabilities: params.capabilities, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
+    text: `Launched Herdr ${phase} task ${handle}: agent ${launched.agent}, pane ${launched.paneId}, using ${route.provider}/${route.model} (${route.thinking}). The model is fixed. ${background ? "Background subagent: it never reports back; pull its latest output with subagent_control action=result." : "Do not poll; completion will wake the primary."}${fallbackNote}`,
+    details: { handle, phase, background, dependsOn, ownedPaths, allowConcurrent, capabilities: params.capabilities, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
     task: tracked,
   };
 }
@@ -113,7 +118,7 @@ export async function launchRoutedTask(deps: LaunchDependencies, ctx: ExtensionC
   const key = workflowOwnerKey(normalizedOwner);
   if (!key) return launchRoutedTaskOnce(deps, ctx, input, normalizedOwner);
   const existingTracked = [...deps.taskHandles.values()].find((task) => task.owner && workflowOwnerKey(task.owner) === key);
-  if (existingTracked) return { text: `Workflow-owned routed task ${existingTracked.handle} already exists; returning the existing handle.`, details: { handle: existingTracked.handle, owner: normalizedOwner, coalesced: true }, task: existingTracked };
+  if (existingTracked) return { text: `Workflow-owned subagent ${existingTracked.handle} already exists; returning the existing handle.`, details: { handle: existingTracked.handle, owner: normalizedOwner, coalesced: true }, task: existingTracked };
   const existing = deps.workflowLaunches.get(key);
   if (existing) return existing;
   const pending = launchRoutedTaskOnce(deps, ctx, { ...input, owner: normalizedOwner }, normalizedOwner);

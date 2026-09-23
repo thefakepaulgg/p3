@@ -9,7 +9,7 @@ test("atomically round-trips and removes a session manifest", () => {
   const manifest = {
     version: ROUTING_MANIFEST_VERSION, parentSessionId: "session", parentPaneId: "w1:p1", updatedAt: 1,
     sessionTotal: 0.0123, sessionTotalKnown: true,
-    tasks: [{ handle: "rt-1", label: "Worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-5.6-luna", state: "running", startedAt: 1 }],
+    tasks: [{ handle: "rt-1", label: "Worker", agentName: "worker", paneId: "w1:p2", route: "luna", model: "openai-codex/gpt-6-luna", state: "running", startedAt: 1 }],
   };
   writeRoutingManifest(path, manifest);
   expect(readRoutingManifest(path)).toEqual(manifest);
@@ -24,7 +24,7 @@ test("uses a stable manifest path for a Herdr pane", () => {
 test("restores a task handle from persisted routing context", () => {
   const restored = restoreTaskHandle({
     handle: "rt-1", label: "Worker", agentName: "worker", paneId: "w1:p2", route: "luna",
-    model: "openai-codex/gpt-5.6-luna", state: "completed", startedAt: 1, notifiedStates: ["completed"],
+    model: "openai-codex/gpt-6-luna", state: "completed", startedAt: 1, notifiedStates: ["completed"],
   });
   expect(restored.agentName).toBe("worker");
   expect(restored.notifiedStates).toEqual(["completed"]);

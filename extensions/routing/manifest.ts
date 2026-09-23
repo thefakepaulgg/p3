@@ -25,6 +25,7 @@ export interface ManifestTask {
   ownedPaths?: string[];
   allowConcurrent?: boolean;
   owner?: TaskHandle["owner"];
+  background?: boolean;
   sessionPath?: string;
   usageOffset?: number;
   estimatedCost?: number;
@@ -60,7 +61,7 @@ export function restoreTaskHandle(task: ManifestTask): TaskHandle {
     route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit ?? false,
     target: task.target ?? "herdr", model: task.model, thinking: task.thinking ?? "medium",
     state: task.state, startedAt: task.startedAt, endedAt: task.endedAt, cwd: task.cwd, phase: task.phase,
-    dependsOn: task.dependsOn, ownedPaths: task.ownedPaths, allowConcurrent: task.allowConcurrent, owner: task.owner,
+    dependsOn: task.dependsOn, ownedPaths: task.ownedPaths, allowConcurrent: task.allowConcurrent, owner: task.owner, background: task.background,
     sessionPath: task.sessionPath, usageOffset: task.usageOffset, estimatedCost: task.estimatedCost, costKnown: task.costKnown,
     paneRetention: task.paneRetention, paneClosedAt: task.paneClosedAt, clearedAt: task.clearedAt,
     transitions: task.transitions ?? 0, notifiedStates: task.notifiedStates ?? [],
@@ -75,7 +76,7 @@ export function taskManifestRecord(task: TaskHandle): ManifestTask | undefined {
     route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit, target: task.target,
     model: task.model, thinking: task.thinking, state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
     cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn, ownedPaths: task.ownedPaths,
-    allowConcurrent: task.allowConcurrent, owner: task.owner, sessionPath: task.sessionPath, usageOffset: task.usageOffset,
+    allowConcurrent: task.allowConcurrent, owner: task.owner, background: task.background, sessionPath: task.sessionPath, usageOffset: task.usageOffset,
     estimatedCost: task.estimatedCost, costKnown: task.costKnown, paneRetention: task.paneRetention,
     paneClosedAt: task.paneClosedAt, clearedAt: task.clearedAt, transitions: task.transitions,
     notifiedStates: task.notifiedStates, completionNotifiedAt: task.completionNotifiedAt,

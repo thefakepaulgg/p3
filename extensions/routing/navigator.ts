@@ -85,6 +85,6 @@ export async function focusManifestPane(pi: ExtensionAPI, paneId: string): Promi
   const workspaceId = process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID;
   const raw = await runHerdr(pi, ["pane", "list", ...(workspaceId ? ["--workspace", workspaceId] : [])], 5000);
   const panes = parseJson(raw, "herdr pane list")?.result?.panes ?? [];
-  if (!panes.some((pane: any) => pane.pane_id === paneId)) throw new Error(`Routed pane ${paneId} no longer exists`);
+  if (!panes.some((pane: any) => pane.pane_id === paneId)) throw new Error(`Subagent pane ${paneId} no longer exists`);
   await runHerdr(pi, ["pane", "focus", paneId], 5000);
 }

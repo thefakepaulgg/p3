@@ -28,6 +28,8 @@ export interface TaskHandle {
   allowConcurrent?: boolean;
   /** Optional workflow correlation; persisted in telemetry but never used for routing policy. */
   owner?: TaskOwner;
+  /** Long-lived subagent that never completes on idle and never notifies the primary. */
+  background?: boolean;
   state: TaskState;
   startedAt: number;
   endedAt?: number;
@@ -93,7 +95,7 @@ export function taskMetadata(task: TaskHandle): Record<string, unknown> {
     handle: task.handle, route: task.route, fallbackFrom: task.fallbackFrom,
     routeExplicit: task.routeExplicit, target: task.target, model: task.model, thinking: task.thinking,
     label: truncate(task.label, 80), cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn?.slice(0, 32),
-    ownedPaths: task.ownedPaths?.slice(0, 20), allowConcurrent: task.allowConcurrent, owner: boundedOwner(task.owner),
+    ownedPaths: task.ownedPaths?.slice(0, 20), allowConcurrent: task.allowConcurrent, owner: boundedOwner(task.owner), background: task.background,
     state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
     agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, paneRetention: task.paneRetention,
     paneClosedAt: task.paneClosedAt, toolUses: task.toolUses, tokens: task.tokens, resultChars: task.resultChars,
@@ -150,14 +152,14 @@ export function markNotified(task: TaskHandle, kind: string): boolean {
 
 /**
  * Build the one bounded completion message. The full result stays cached in memory and is
- * retrieved on demand through routed_task_control, so the message never carries a whole transcript.
+ * retrieved on demand through subagent_control, so the message never carries a whole transcript.
  */
 export function buildCompletionMessage(task: TaskHandle, result: string): string {
   const body = result.trim();
   const excerpt = truncate(body, COMPLETION_EXCERPT_LIMIT);
-  const lines = [`Routed task ${task.handle} completed (${truncate(task.label, 80)}) on ${task.route} ${task.model}.`];
+  const lines = [`Subagent ${task.handle} completed (${truncate(task.label, 80)}) on ${task.route} ${task.model}.`];
   lines.push(body ? `Excerpt: ${excerpt}` : "No assistant text was captured.");
-  lines.push(`Full cached result (${body.length} chars): routed_task_control action=result handle=${task.handle}`);
+  lines.push(`Full cached result (${body.length} chars): subagent_control action=result handle=${task.handle}`);
   if (task.fallbackFrom) lines.push(`Fallback: ${task.fallbackFrom} was unavailable; used ${task.route}.`);
   if (task.escalation) lines.push(`Escalation: ${truncate(task.escalation, 240)}`);
   if (task.paneId) lines.push(task.paneClosedAt ? `Pane ${task.paneId} was closed.` : `Pane ${task.paneId} is retained for inspection.`);
@@ -184,19 +186,18 @@ export function formatElapsed(ms: number): string {
   return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-/** Human-facing model label; provider IDs remain available through routed_task_control. */
+/** Human-facing model label; provider IDs remain available through subagent_control. */
 export function formatModelLabel(model: string): string {
   const id = model.split("/").pop() ?? model;
-  if (/gpt-5\.6-sol/i.test(id)) return "Sol";
-  if (/gpt-5\.6-luna/i.test(id)) return "Luna";
-  if (/gpt-5\.6-terra/i.test(id)) return "Terra";
+  if (/gpt-6-sol/i.test(id)) return "Sol";
+  if (/gpt-6-luna/i.test(id)) return "Luna";
   if (/claude-fable-5-1/i.test(id)) return "Fable 5.1";
   if (/claude-sonnet-5/i.test(id)) return "Sonnet 5";
   if (/claude-sonnet-4[-.]6/i.test(id)) return "Sonnet 4.6";
   return id;
 }
 
-export type TaskWidgetItem = Pick<TaskHandle, "handle" | "label" | "model" | "state" | "startedAt" | "endedAt" | "estimatedCost" | "costKnown" | "paneId" | "paneClosedAt" | "clearedAt">;
+export type TaskWidgetItem = Pick<TaskHandle, "handle" | "background" | "label" | "model" | "state" | "startedAt" | "endedAt" | "estimatedCost" | "costKnown" | "paneId" | "paneClosedAt" | "clearedAt">;
 
 export function formatTaskRow(task: TaskWidgetItem, now: number): string {
   const until = isActiveTask(task) ? now : task.endedAt ?? now;
@@ -207,6 +208,7 @@ export function formatTaskRow(task: TaskWidgetItem, now: number): string {
   ];
   const cost = formatEstimatedCost(task.estimatedCost, task.costKnown);
   if (cost) parts.push(cost);
+  if (task.background && isActiveTask(task)) parts.push("background");
   if (task.state === "blocked") parts.push("needs input");
   else if (task.state === "failed" || task.state === "abandoned") parts.push(task.state);
   else if (task.paneClosedAt) parts.push("closed");
@@ -232,7 +234,7 @@ export function formatTaskWidget(tasks: Iterable<TaskWidgetItem>, now = Date.now
   if (!active.length && !recent.length) return undefined;
   const shown = taskWidgetItems(items, now, maxRows);
   const counts = [active.length ? `${active.length} active` : "", recent.length ? `${recent.length} recent` : ""].filter(Boolean).join(" · ");
-  const lines = [`Routed agents · ${counts}`];
+  const lines = [`Subagents · ${counts}`];
   for (const task of shown) lines.push(formatTaskRow(task, now));
   const hidden = active.length + recent.length - shown.length;
   if (hidden > 0) lines.push(`… ${hidden} more`);
@@ -244,7 +246,7 @@ export function telemetryRecord(task: TaskHandle): Record<string, unknown> {
     handle: task.handle, route: task.route, fallbackFrom: task.fallbackFrom,
     routeExplicit: task.routeExplicit, target: task.target, model: task.model, thinking: task.thinking,
     label: task.label.slice(0, 80), cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn,
-    ownedPaths: task.ownedPaths?.slice(0, 20), allowConcurrent: task.allowConcurrent, owner: boundedOwner(task.owner),
+    ownedPaths: task.ownedPaths?.slice(0, 20), allowConcurrent: task.allowConcurrent, owner: boundedOwner(task.owner), background: task.background,
     state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
     agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, paneRetention: task.paneRetention, paneClosedAt: task.paneClosedAt, clearedAt: task.clearedAt, toolUses: task.toolUses,
     tokens: task.tokens, resultChars: task.resultChars, sessionPath: task.sessionPath, usageOffset: task.usageOffset, estimatedCost: task.estimatedCost, costKnown: task.costKnown, error: task.error?.slice(0, 240),

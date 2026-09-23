@@ -481,7 +481,7 @@ export default function workflowEngine(pi: ExtensionAPI) {
       const next = clone(current);
       next.steps[owner.stepId].status = status;
       setRun(next);
-      if (status === "blocked") notifyRun(activeCtx, next, `Workflow step ${stepById(next, owner.stepId).name} is blocked and needs input. Use /routed to inspect or steer its worker.`, "warning");
+      if (status === "blocked") notifyRun(activeCtx, next, `Workflow step ${stepById(next, owner.stepId).name} is blocked and needs input. Use /subagents to inspect or steer its worker.`, "warning");
     };
     subscriptions.push(pi.events.on("routing:task:running", (raw) => updateWorkerState(raw, "running")));
     subscriptions.push(pi.events.on("routing:task:blocked", (raw) => updateWorkerState(raw, "blocked")));

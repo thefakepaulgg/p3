@@ -31,7 +31,7 @@ describe("Herdr response parsing", () => {
 
 describe("routed worker Pi arguments", () => {
   const agentDir = "/tmp/pi-agent";
-  const rootTools = "routed_task,routed_task_control,model_route,workflow_control";
+  const rootTools = "subagent,subagent_control,model_route,workflow_control";
   const route = (provider: string, model: string, thinking: Route["thinking"] = "medium") => ({ provider, model, thinking } as Route);
   const withAgentDir = (check: () => void) => {
     const previous = process.env.PI_CODING_AGENT_DIR;
@@ -128,8 +128,8 @@ describe("Herdr Unix socket transport", () => {
       [["pane", "focus", "w1:p2"], "pane.focus", { pane_id: "w1:p2" }],
       [["pane", "split", "--pane", "w1:p2", "--direction", "right", "--cwd", "/repo", "--env", "A=B", "--no-focus"], "pane.split", { target_pane_id: "w1:p2", direction: "right", cwd: "/repo", focus: false, env: { A: "B" } }],
       [["pane", "close", "w1:p2"], "pane.close", { pane_id: "w1:p2" }],
-      [["pane", "report-metadata", "w1:p1", "--source", "pi-routing:delegation", "--token", "routed=1 routed active"], "pane.report_metadata", { pane_id: "w1:p1", source: "pi-routing:delegation", clear_display_agent: false, tokens: { routed: "1 routed active" } }],
-      [["pane", "report-metadata", "w1:p1", "--source", "pi-routing:delegation", "--clear-token", "routed"], "pane.report_metadata", { pane_id: "w1:p1", source: "pi-routing:delegation", clear_display_agent: false, tokens: { routed: null } }],
+      [["pane", "report-metadata", "w1:p1", "--source", "pi-routing:delegation", "--token", "subagents=1 subagents active"], "pane.report_metadata", { pane_id: "w1:p1", source: "pi-routing:delegation", clear_display_agent: false, tokens: { routed: "1 routed active" } }],
+      [["pane", "report-metadata", "w1:p1", "--source", "pi-routing:delegation", "--clear-token", "subagents"], "pane.report_metadata", { pane_id: "w1:p1", source: "pi-routing:delegation", clear_display_agent: false, tokens: { routed: null } }],
       [["agent", "get", "worker"], "agent.get", { target: "worker" }],
       [["agent", "focus", "worker"], "agent.focus", { target: "worker" }],
       [["agent", "read", "worker", "--source", "recent-unwrapped", "--lines", "120"], "agent.read", { target: "worker", source: "recent_unwrapped", lines: 120, format: "text", strip_ansi: true }],
@@ -149,7 +149,7 @@ describe("Herdr Unix socket transport", () => {
 describe("watcher notifications", () => {
   const herdrTask = (patch: Partial<TaskHandle> = {}): TaskHandle => ({
     handle: "rt-watch", route: "luna", routeExplicit: false, target: "herdr",
-    model: "openai-codex/gpt-5.6-luna", thinking: "high", label: "Watched task", state: "running",
+    model: "openai-codex/gpt-6-luna", thinking: "high", label: "Watched task", state: "running",
     startedAt: Date.now(), agentName: "r-watch", paneId: "w1:p2", paneRetention: "keep",
     transitions: 0, notifiedStates: [], ...patch,
   });
@@ -191,7 +191,7 @@ describe("watcher notifications", () => {
     expect(notifications).toHaveLength(1);
     expect(notifications[0]!.kind).toBe(COMPLETION_KIND);
     expect(notifications[0]!.content.length).toBeLessThanOrEqual(NOTIFICATION_LIMIT);
-    expect(notifications[0]!.content).toContain("routed_task_control action=result handle=rt-watch");
+    expect(notifications[0]!.content).toContain("subagent_control action=result handle=rt-watch");
     expect(task.state).toBe("completed");
     expect(task.result).toBe("F".repeat(8000));
     expect(task.resultChars).toBe(8000);
@@ -314,12 +314,12 @@ describe("routed agent tab isolation", () => {
       const start = calls.find((args) => args.slice(0, 2).join(" ") === "agent start")!;
       expect(start).toEqual([
         "agent", "start", launched.agent, "--kind", "pi", "--pane", "w1:p2", "--timeout", "30000", "--",
-        "--exclude-tools", "routed_task,routed_task_control,model_route,workflow_control",
+        "--exclude-tools", "subagent,subagent_control,model_route,workflow_control",
         "--model", `${routes.luna.provider}/${routes.luna.model}`, "--thinking", routes.luna.thinking, "--name", "Isolated task",
       ]);
       expect(start).not.toContain(fileURLToPath(new URL("../model-routing.ts", import.meta.url)));
       const create = calls.find((args) => args.slice(0, 2).join(" ") === "tab create")!;
-      expect(create).toContain("Routed agents · t1");
+      expect(create).toContain("Subagents · t1");
       expect(create).toContain("PI_ROUTED_ROOT_WORKSPACE_ID=w1");
       expect(create).toContain("PI_ROUTED_ROOT_TAB_ID=w1:t1");
       expect(create).toContain("--no-focus");
@@ -426,7 +426,7 @@ describe("routed agent tab isolation", () => {
     const pi: any = { exec: async (_command: string, args: string[]) => {
       calls.push(args);
       const key = args.slice(0, 2).join(" ");
-      if (key === "tab list") return ok({ tabs: [{ tab_id: "w1:t2", label: "Routed agents · t1", pane_count: 2 }] });
+      if (key === "tab list") return ok({ tabs: [{ tab_id: "w1:t2", label: "Subagents · t1", pane_count: 2 }] });
       if (key === "pane list") return ok({ panes: [{ pane_id: "w1:p2", tab_id: "w1:t2" }, { pane_id: "w1:p3", tab_id: "w1:t2" }] });
       if (key === "pane layout") return ok({ layout: { panes: [
         { pane_id: "w1:p2", rect: { width: 80, height: 40 } },
@@ -453,7 +453,7 @@ describe("routed agent tab isolation", () => {
     const pi: any = { exec: async (_command: string, args: string[]) => {
       calls.push(args);
       const key = args.slice(0, 2).join(" ");
-      if (key === "tab list") return ok({ tabs: [{ tab_id: "w1:t2", label: "Routed agents · t1", pane_count: ROUTED_TAB_MAX_PANES }] });
+      if (key === "tab list") return ok({ tabs: [{ tab_id: "w1:t2", label: "Subagents · t1", pane_count: ROUTED_TAB_MAX_PANES }] });
       if (key === "tab create") return ok({ tab: { tab_id: "w1:t3" }, root_pane: { pane_id: "w1:p5" } });
       if (key === "agent start") return readyAgent();
       return ok();
@@ -462,7 +462,7 @@ describe("routed agent tab isolation", () => {
       const launched = await launchHerdrAgent(pi, "Inspect only", "Overflow task", "luna", routes.luna, "/repo");
       expect(launched.tabId).toBe("w1:t3");
       const create = calls.find((args) => args.slice(0, 2).join(" ") === "tab create")!;
-      expect(create).toContain("Routed agents · t1 · 2");
+      expect(create).toContain("Subagents · t1 · 2");
       expect(calls.some((args) => args.slice(0, 2).join(" ") === "pane split")).toBe(false);
     } finally { restore(); }
   });
