@@ -186,15 +186,9 @@ export function formatElapsed(ms: number): string {
   return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-/** Human-facing model label; provider IDs remain available through subagent_control. */
+/** Human-facing model label: the full model ID without its provider prefix. */
 export function formatModelLabel(model: string): string {
-  const id = model.split("/").pop() ?? model;
-  if (/gpt-6-sol/i.test(id)) return "Sol";
-  if (/gpt-6-luna/i.test(id)) return "Luna";
-  if (/claude-fable-5-1/i.test(id)) return "Fable 5.1";
-  if (/claude-sonnet-5/i.test(id)) return "Sonnet 5";
-  if (/claude-sonnet-4[-.]6/i.test(id)) return "Sonnet 4.6";
-  return id;
+  return model.split("/").pop() ?? model;
 }
 
 export type TaskWidgetItem = Pick<TaskHandle, "handle" | "background" | "label" | "model" | "state" | "startedAt" | "endedAt" | "estimatedCost" | "costKnown" | "paneId" | "paneClosedAt" | "clearedAt">;

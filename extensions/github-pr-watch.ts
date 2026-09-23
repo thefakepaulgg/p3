@@ -283,6 +283,8 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
         let changed = false;
         const retained: Subscription[] = [];
 
+        // Approvals and merges always reach the parent, even when the steward handles the rest.
+        const milestones: string[] = [];
         queriedSubscriptions.forEach((subscription, index) => {
           const pullRequest = results[index];
           if (!pullRequest) {
@@ -291,6 +293,10 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
           }
 
           if (subscription.snapshot && notify) {
+            const milestone = pullRequest.state === "MERGED" && subscription.snapshot.state !== "MERGED" ? "merged"
+              : pullRequest.reviewDecision === "APPROVED" && subscription.snapshot.reviewDecision !== "APPROVED" ? "approved"
+              : undefined;
+            if (milestone) milestones.push(`${subscription.repository}#${subscription.number} was ${milestone}: ${pullRequest.url}`);
             const changes = describeChanges(subscription.snapshot, pullRequest);
             if (changes.length) updates.push(`${subscription.repository}#${subscription.number} — ${pullRequest.title}\n${pullRequest.url}\n${changes.map((change) => `- ${change}`).join("\n")}`);
           }
@@ -318,6 +324,12 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
             content: `${update}\n\nInspect these changes and act when relevant. ${UNTRUSTED_NOTE}`,
             display: true,
             details: { pullRequests: updates.length },
+          }, { deliverAs: "steer", triggerTurn: true });
+          else if (milestones.length) pi.sendMessage({
+            customType: "github-pr-milestone",
+            content: `Pull request milestone (the ${STEWARD_LABEL} handles everything else):\n${milestones.map((line) => `- ${line}`).join("\n")}\n\nFollow up on work that was waiting for this.`,
+            display: true,
+            details: { pullRequests: milestones.length },
           }, { deliverAs: "steer", triggerTurn: true });
         }
 

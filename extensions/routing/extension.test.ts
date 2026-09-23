@@ -378,7 +378,7 @@ test("Herdr completion delivers exactly one bounded custom message as a steer tu
     expect(widgets.every((entry) => entry.key === "routed-tasks")).toBe(true);
     const rows = widgets.at(-1)!.content!;
     expect(rows[0]).toContain("╭─ Subagents · 1 recent");
-    expect(rows[1]).toContain("✓ Inspect change · Luna");
+    expect(rows[1]).toContain("✓ Inspect change · gpt-6-luna");
     expect(rows.join(" ")).not.toContain(launched.details.handle);
     expect(rows.join(" ")).not.toContain("rt-");
     expect(rows.join(" ")).not.toContain("w1:p2");
@@ -504,7 +504,7 @@ test("replayed completion claims are not delivered twice after reload", async ()
     await new Promise((done) => setTimeout(done, 200));
     expect(messages).toHaveLength(0);
     // The task still reaches its terminal state; only the duplicate announcement is suppressed.
-    expect(widgets.at(-1)!.content!.join("\n")).toContain("✓ Replayed task · Luna");
+    expect(widgets.at(-1)!.content!.join("\n")).toContain("✓ Replayed task · gpt-6-luna");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
