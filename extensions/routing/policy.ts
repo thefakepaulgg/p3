@@ -1,6 +1,8 @@
-export type RouteName = "sol" | "luna";
+import { inferPhase, type TaskPhase } from "./workflow.ts";
+
+export type RouteName = "sol" | "luna" | "opus";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type DelegationTarget = "sol" | "luna";
+export type DelegationTarget = RouteName;
 
 export interface Route {
   label: string;
@@ -20,26 +22,32 @@ export interface RoutingDecision {
 export const routes: Record<RouteName, Route> = {
   sol: { label: "Sol", provider: "openai-codex", model: "gpt-6-sol", thinking: "medium", purpose: "Ambiguous, consequential, or difficult reasoning and implementation" },
   luna: { label: "Luna", provider: "openai-codex", model: "gpt-6-luna", thinking: "high", purpose: "Predictable, mechanical, objectively verifiable work" },
+  opus: { label: "Opus", provider: "anthropic", model: "claude-opus-5-5", thinking: "medium", purpose: "Deep bugs and UI work; smarter and faster than Sol but more expensive" },
 };
 
 export const fallbackChains: Record<RouteName, RouteName[]> = {
   sol: ["sol"],
   luna: ["luna", "sol"],
+  opus: ["opus", "sol"],
 };
 
 const has = (text: string, pattern: RegExp) => pattern.test(text);
-const mechanicalWork = /\b(mechanical|rename|regenerate|generated (types|client|code)|boilerplate|from (the |a )?template|mirror(ing)? (the |an )?existing|seed data|docs?|documentation|verif(y|ied|iable) (with|by|via)|run (the )?(build|formatter|linter|command)|copy|format)\b/;
+// Keep these narrow: broad words such as "docs" or "verify with" appear in almost every brief and sent implementation to Luna.
+const mechanicalWork = /\b(mechanical|rename|regenerate|generated (types|client|code)|boilerplate|from (the |a )?template|seed data|find|locate|search for|where is|which files?|callers?|list|collect|extract)\b/;
+const deepBugWork = /\b(debug|diagnos(e|is|ing)|root[- ]cause|crash(es|ing)?|race condition|deadlock|memory leak|leaks?|flaky|hangs?|hanging|heisenbug|regression|intermittent)\b/;
+const uiWork = /\b(ui|ux|swiftui|uikit|layout|animation|animate|visual|screens?|styling|css|typography|design system|mockups?|components?)\b/;
 const difficultWork = /\b(ambiguous|architecture|architectural|design|high[- ]consequence|high[- ]risk|production decision|destructive|hard to reverse|security[- ]critical|incident|difficult|complex|trade[- ]offs?|migration plan|implementation plan|accepted plan|parallel plan)\b/;
 
-export function classifyDelegation(task: string): RoutingDecision {
+/** Sol by default. Opus for deep bugs and UI work. Luna only for clearly mechanical review/discovery work; never for planning or implementation. */
+export function classifyDelegation(task: string, phase: TaskPhase = inferPhase(task)): RoutingDecision {
   const text = task.toLowerCase();
   if (has(text, /\b(accepted plan|parallel plan|parallel execution)\b/)) return { target: "sol", delegate: true, confidence: "high", rationale: "Parallel execution of an accepted plan is appropriate for a Sol agent." };
+  if (has(text, deepBugWork)) return { target: "opus", delegate: true, confidence: "medium", rationale: "Deep debugging goes to Opus." };
+  if (has(text, uiWork) && phase !== "review") return { target: "opus", delegate: true, confidence: "medium", rationale: "UI work goes to Opus." };
   if (has(text, difficultWork)) return { target: "sol", delegate: false, confidence: "high", rationale: "Difficult, ambiguous, or consequential work stays with Sol unless it is deliberately routed." };
-  if (has(text, mechanicalWork)) return { target: "luna", delegate: true, confidence: "high", rationale: "The task is mechanical and objectively verifiable, so Luna is appropriate." };
-  if (has(text, /\b(find|locate|search for|where is|which files?|references?|callers?|defined|list|collect|extract)\b/) && !has(text, /\b(decide|design|implement|refactor|migrate)\b/)) {
-    return { target: "luna", delegate: true, confidence: "medium", rationale: "Bounded discovery with a checkable result is suitable for Luna." };
-  }
-  return { target: "sol", delegate: false, confidence: "medium", rationale: "Luna is reserved for clearly mechanical work; uncertain work stays with Sol." };
+  if (phase === "plan" || phase === "implement") return { target: "sol", delegate: true, confidence: "high", rationale: "Planning and implementation go to Sol." };
+  if (has(text, mechanicalWork) && !has(text, /\b(decide|design|implement|refactor|migrate)\b/)) return { target: "luna", delegate: true, confidence: "medium", rationale: "Mechanical review or discovery with a checkable result is suitable for Luna." };
+  return { target: "sol", delegate: true, confidence: "medium", rationale: "Luna is reserved for clearly mechanical work; uncertain work goes to Sol." };
 }
 
 export function classifyModelRoute(task: string, decision = classifyDelegation(task)): RouteName {

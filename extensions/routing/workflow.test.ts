@@ -26,9 +26,9 @@ describe("explicit route retry protection", () => {
 });
 
 describe("phase inference", () => {
-  test("planning language is plan", () => expect(inferPhase("write the implementation plan", "sol")).toBe("plan"));
-  test("implementation verbs are implement", () => expect(inferPhase("remove ledger code", "luna")).toBe("implement"));
-  test("review language is review", () => expect(inferPhase("review final diff", "sol")).toBe("review"));
+  test("planning language is plan", () => expect(inferPhase("write the implementation plan")).toBe("plan"));
+  test("implementation verbs are implement", () => expect(inferPhase("remove ledger code")).toBe("implement"));
+  test("review language is review", () => expect(inferPhase("review final diff")).toBe("review"));
 });
 
 describe("workflow guards", () => {

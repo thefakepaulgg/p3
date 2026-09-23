@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { resolve } from "node:path";
 import { classifyDelegation, classifyModelRoute, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./policy.ts";
 import { normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
+import { classifyWithJev } from "./jev.ts";
 import { launchHerdrAgent, type HerdrLaunch, type RoutedWorkerCapability } from "./herdr.ts";
 import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkflowLaunch, type TaskPhase } from "./workflow.ts";
 
@@ -68,12 +69,14 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const params = { ...input, owner: normalizeTaskOwner(owner ?? input.owner) };
   const task = params.task.trim();
   const description = params.description.trim();
-  const decision = classifyDelegation(`${description}\n${task}`);
+  const brief = `${description}\n${task}`;
+  const phase = inferPhase(brief, params.phase);
+  const localDecision = classifyDelegation(brief, phase);
+  const decision = params.route === undefined ? await classifyWithJev(brief, phase, localDecision) : localDecision;
   deps.recordDecision(task, decision);
   const requestedRoute = params.route?.trim() ?? classifyModelRoute(task, decision);
   const cwd = resolve(params.cwd ?? ctx.cwd);
   const background = params.mode === "background";
-  const phase = inferPhase(`${description}\n${task}`, requestedRoute, params.phase);
   const dependsOn = params.depends_on ?? [];
   const ownedPaths = normalizeOwnedPaths(cwd, params.owned_paths ?? []);
   validateWorkflowLaunch({ cwd, dependsOn, ownedPaths, tasks: deps.taskHandles.values() });
@@ -100,9 +103,10 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   };
   deps.trackTask(tracked);
   deps.watchHerdrTask(tracked);
+  const policyNote = params.route === undefined ? ` Policy selected ${routeName}: ${decision.rationale}` : "";
   const fallbackNote = routePlan.fallbackFrom ? ` Policy fallback: ${routePlan.fallbackFrom} was unavailable, so ${routeName} was selected.` : "";
   return {
-    text: `Launched Herdr ${phase} task ${handle}: agent ${launched.agent}, pane ${launched.paneId}, using ${route.provider}/${route.model} (${route.thinking}). The model is fixed. ${background ? "Background subagent: it never reports back; pull its latest output with subagent_control action=result." : "Do not poll; completion will wake the primary."}${fallbackNote}`,
+    text: `Launched Herdr ${phase} task ${handle}: agent ${launched.agent}, pane ${launched.paneId}, using ${route.provider}/${route.model} (${route.thinking}). The model is fixed. ${background ? "Background subagent: it never reports back; pull its latest output with subagent_control action=result." : "Do not poll; completion will wake the primary."}${policyNote}${fallbackNote}`,
     details: { handle, phase, background, dependsOn, ownedPaths, capabilities: params.capabilities, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
     task: tracked,
   };
