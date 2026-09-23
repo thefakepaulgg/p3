@@ -13,6 +13,7 @@ export const ROUTING_RPC_CHANNELS = {
   result: "routing:rpc:result",
   stop: "routing:rpc:stop",
   steer: "routing:rpc:steer",
+  list: "routing:rpc:list",
 } as const;
 
 export interface RoutingRpcTaskStatus { [key: string]: unknown }
@@ -24,6 +25,7 @@ export interface RoutingRpcHandlers {
   result: (handle: string) => Promise<RoutingRpcResult>;
   stop: (handle: string, closePane?: boolean) => Promise<RoutingRpcTaskStatus>;
   steer: (handle: string, message: string) => Promise<RoutingRpcTaskStatus>;
+  list: () => Promise<RoutingRpcTaskStatus[]>;
 }
 
 export interface RoutingRpcRegistration { unsubscribe: () => void }
@@ -80,6 +82,7 @@ export function registerRoutingRpc(events: EventBus, handlers: RoutingRpcHandler
       if (typeof request.handle !== "string" || !request.handle.trim()) throw new Error("handle is required");
       return handlers.stop(request.handle.trim(), request.close_pane === true);
     })),
+    events.on(ROUTING_RPC_CHANNELS.list, (raw) => void reply(events, ROUTING_RPC_CHANNELS.list, raw, () => handlers.list())),
     events.on(ROUTING_RPC_CHANNELS.steer, (raw) => void reply(events, ROUTING_RPC_CHANNELS.steer, raw, async (request) => {
       if (typeof request.handle !== "string" || !request.handle.trim()) throw new Error("handle is required");
       if (typeof request.message !== "string" || !request.message.trim()) throw new Error("message is required");

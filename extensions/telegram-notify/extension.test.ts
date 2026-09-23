@@ -40,6 +40,7 @@ function setup(options: {
     registerCommand: (name: string, command: any) => commands.push({ name, command }),
     sendUserMessage: () => {},
     on: (event: string, handler: Function) => handlers.set(event, handler),
+    events: { on: () => () => {}, emit: () => {} },
   };
 
   createTelegramNotifyExtension({

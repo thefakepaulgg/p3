@@ -129,7 +129,7 @@ test("launches an explicitly requested model outside the programmed routes", asy
     expect(startArgs).toContain("openai-codex/gpt-6-astra");
     expect(startArgs).toContain("xhigh");
     expect(startArgs).not.toContain("--no-extensions");
-    expect(startArgs).toContain("subagent,subagent_control,model_route,workflow_control");
+    expect(startArgs).toContain("subagent,subagent_control,model_route,workflow_control,pr_subscribe,pr_unsubscribe");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -264,7 +264,7 @@ test("does not restore routed agents or cost in a new Pi session", async () => {
     routing(fake);
     await lifecycle.get("session_start")?.({}, ctx);
     const list = await tools.find((tool) => tool.name === "subagent_control").execute("1", { action: "list" }, undefined, undefined, ctx);
-    expect(list.content[0].text).toBe("No routed tasks");
+    expect(list.content[0].text).toBe("No subagents");
     expect(widgets.at(-1)).toEqual({ key: "routed-tasks", content: undefined });
     expect(readRoutingManifest(path)?.parentSessionId).toBe("session-1");
     expect(readRoutingManifest(path)?.tasks).toEqual([]);
@@ -289,7 +289,7 @@ test("blocks direct Agent launches that bypass guarded routing", async () => {
   expect(await toolCall?.({ toolName: "read", input: {} })).toBeUndefined();
 });
 
-test("every routed task uses Herdr and workflow phase guards remain active", async () => {
+test("every subagent uses Herdr and only overlapping owned paths conflict", async () => {
   const tools: any[] = [];
   const lifecycle = new Map<string, Function>();
   let pane = 0;
@@ -315,7 +315,10 @@ test("every routed task uses Herdr and workflow phase guards remain active", asy
     const planned = await launch.execute("1", { task: "Create the implementation plan", description: "Plan change", route: "sol" }, undefined, undefined, ctx);
     expect(planned.details.agent).toMatch(/^r-/);
     expect(planned.details.phase).toBe("plan");
-    await expect(launch.execute("2", { task: "Implement the planned change", description: "Implement change", route: "luna" }, undefined, undefined, ctx)).rejects.toThrow("implement cannot start while plan task");
+    const implemented = await launch.execute("2", { task: "Implement the planned change", description: "Implement change", route: "luna" }, undefined, undefined, ctx);
+    expect(implemented.details.phase).toBe("implement");
+    await expect(launch.execute("3", { task: "Edit the parser", description: "Parser A", route: "luna", owned_paths: ["src/parser"] }, undefined, undefined, ctx)).resolves.toBeDefined();
+    await expect(launch.execute("4", { task: "Edit the parser tests", description: "Parser B", route: "luna", owned_paths: ["src/parser/tests"] }, undefined, undefined, ctx)).rejects.toThrow("overlapping paths");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -589,7 +592,7 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
     const list = await control.execute("6", { action: "list" });
     expect(list.content[0].text).toContain("pane closed");
     await control.execute("7", { action: "clear", handle: launched.details.handle });
-    expect((await control.execute("8", { action: "list" })).content[0].text).toBe("No routed tasks");
+    expect((await control.execute("8", { action: "list" })).content[0].text).toBe("No subagents");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -707,7 +710,7 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
     ctx.sessionManager = sessionManager([{ type: "custom", customType: "routed-task", data: replayed }]);
     await lifecycle.get("session_start")?.({}, ctx);
     const complete = commands.get("subagents").getArgumentCompletions;
-    expect(complete("focus ")).toEqual([{ value: "focus Stored agent", label: "Stored agent", description: "Sol · completed" }]);
+    expect(complete("focus ")).toEqual([{ value: "focus Stored agent", label: "Stored agent", description: "gpt-6-sol · completed" }]);
     expect(complete("result Stor")[0].value).toBe("result Stored agent");
     expect(complete("focus rt-")[0].value).toBe("focus rt-stored");
     expect(complete("clear missing")).toBeNull();
@@ -716,7 +719,7 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
     expect(notices.at(-1)?.text).toBe("Opened Stored agent");
 
     await commands.get("subagents").handler("clear", ctx);
-    expect(notices.at(-1)?.text).toContain("Cleared 1 finished routed agent");
+    expect(notices.at(-1)?.text).toContain("Cleared 1 finished subagent");
     expect(notices.at(-1)?.text).toContain("1 retained pane remains open");
     const cleared = entries.filter((entry) => entry.type === "routed-task").at(-1)?.data;
     expect(cleared.clearedAt).toBeNumber();
@@ -734,7 +737,7 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
     reloadCtx.sessionManager = sessionManager([{ type: "custom", customType: "routed-task", data: cleared }]);
     await reloadLifecycle.get("session_start")?.({}, reloadCtx);
     const list = reloadTools.find((tool) => tool.name === "subagent_control");
-    expect((await list.execute("1", { action: "list" })).content[0].text).toBe("No routed tasks");
+    expect((await list.execute("1", { action: "list" })).content[0].text).toBe("No subagents");
     await reloadLifecycle.get("session_shutdown")?.();
     await lifecycle.get("session_shutdown")?.();
   } finally {

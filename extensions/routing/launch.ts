@@ -14,7 +14,6 @@ export interface RoutedTaskLaunchParams {
   phase?: TaskPhase;
   depends_on?: string[];
   owned_paths?: string[];
-  allow_concurrent?: boolean;
   pane_retention?: "keep" | "close";
   capabilities?: RoutedWorkerCapability[];
   /** background: long-lived, never marked complete on idle, and never wakes the primary. */
@@ -57,7 +56,6 @@ export function validateRoutedTaskLaunchParams(input: RoutedTaskLaunchParams): v
   for (const [name, value] of [["depends_on", input.depends_on], ["owned_paths", input.owned_paths]] as const) {
     if (value !== undefined && (!Array.isArray(value) || value.length > MAX_ARRAY_ITEMS || value.some((item) => typeof item !== "string" || !item.trim() || item.length > MAX_PATH_LENGTH))) throw new Error(`${name} must contain at most ${MAX_ARRAY_ITEMS} bounded strings`);
   }
-  if (input.allow_concurrent !== undefined && typeof input.allow_concurrent !== "boolean") throw new Error("allow_concurrent must be boolean");
   if (input.pane_retention !== undefined && input.pane_retention !== "keep" && input.pane_retention !== "close") throw new Error("pane_retention must be keep or close");
   if (input.mode !== undefined && input.mode !== "task" && input.mode !== "background") throw new Error("mode must be task or background");
   if (input.capabilities !== undefined && (!Array.isArray(input.capabilities) || input.capabilities.some((capability) => capability !== "memory"))) throw new Error("capabilities must contain only memory");
@@ -75,12 +73,10 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const requestedRoute = params.route?.trim() ?? classifyModelRoute(task, decision);
   const cwd = resolve(params.cwd ?? ctx.cwd);
   const background = params.mode === "background";
-  // Background subagents stay active indefinitely, so they must not hold a plan/implement/review slot.
-  const phase = background ? params.phase ?? "other" : inferPhase(`${description}\n${task}`, requestedRoute, params.phase);
+  const phase = inferPhase(`${description}\n${task}`, requestedRoute, params.phase);
   const dependsOn = params.depends_on ?? [];
   const ownedPaths = normalizeOwnedPaths(cwd, params.owned_paths ?? []);
-  const allowConcurrent = params.allow_concurrent ?? false;
-  validateWorkflowLaunch({ cwd, phase, dependsOn, ownedPaths, allowConcurrent, tasks: deps.taskHandles.values() });
+  validateWorkflowLaunch({ cwd, dependsOn, ownedPaths, tasks: deps.taskHandles.values() });
 
   const retryKey = `${cwd}\n${description}\n${task}`;
   deps.routeRetryGuard.assertAllowed(retryKey, params.route !== undefined);
@@ -98,7 +94,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const tracked: TaskHandle = {
     handle, route: routeName, fallbackFrom: routePlan.fallbackFrom, routeExplicit: params.route !== undefined,
     target: "herdr", model: `${route.provider}/${route.model}`, thinking: route.thinking, label: description,
-    cwd, phase, dependsOn, ownedPaths, allowConcurrent, owner: params.owner, background: background || undefined, state: "running", startedAt: Date.now(),
+    cwd, phase, dependsOn, ownedPaths, owner: params.owner, background: background || undefined, state: "running", startedAt: Date.now(),
     agentName: launched.agent, paneId: launched.paneId, tabId: launched.tabId, paneRetention: params.pane_retention ?? "keep",
     transitions: 0, notifiedStates: [], usageOffset: 0, estimatedCost: 0, costKnown: false,
   };
@@ -107,7 +103,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const fallbackNote = routePlan.fallbackFrom ? ` Policy fallback: ${routePlan.fallbackFrom} was unavailable, so ${routeName} was selected.` : "";
   return {
     text: `Launched Herdr ${phase} task ${handle}: agent ${launched.agent}, pane ${launched.paneId}, using ${route.provider}/${route.model} (${route.thinking}). The model is fixed. ${background ? "Background subagent: it never reports back; pull its latest output with subagent_control action=result." : "Do not poll; completion will wake the primary."}${fallbackNote}`,
-    details: { handle, phase, background, dependsOn, ownedPaths, allowConcurrent, capabilities: params.capabilities, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
+    details: { handle, phase, background, dependsOn, ownedPaths, capabilities: params.capabilities, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
     task: tracked,
   };
 }

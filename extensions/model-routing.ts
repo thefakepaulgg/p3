@@ -32,10 +32,7 @@ const RoutedTaskParams = Type.Object({
     description: "Subagent handles that must have completed successfully before this task starts.",
   })),
   owned_paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
-    description: "Exclusively owned paths, relative to cwd unless absolute. Required for concurrent same-tree writers.",
-  })),
-  allow_concurrent: Type.Optional(Type.Boolean({
-    description: "Allow same-tree write concurrency only when both tasks opt in and owned_paths are disjoint. Default false.",
+    description: "Optional paths this task owns, relative to cwd unless absolute. Launch is refused only if another active task in the same tree declared overlapping paths.",
   })),
   pane_retention: Type.Optional(StringEnum(["keep", "close"] as const, {
     description: "Herdr-only completed-pane policy. keep (default) preserves the pane for later inspection; close removes it after caching the result and delivering the single completion message.",
@@ -266,8 +263,19 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     // Workflow runs consume lifecycle events themselves and display bounded run-level
     // status. Never wake the primary with routed-task custom messages for them.
     if (task.owner?.kind === "workflow") return;
-    // Background subagents never report back; the user sees their pane and Telegram.
-    if (task.background) return;
+    // Background subagents never report back to the primary; only a stuck or vanished one
+    // reaches the user, through Telegram.
+    if (task.background) {
+      const blocked = kind.startsWith("blocked");
+      if ((!blocked && kind !== "abandoned") || !markNotified(task, kind)) return;
+      persistTask(task);
+      pi.events.emit("telegram:notify", {
+        kind: "blocked",
+        summary: `Background subagent "${task.label}" ${blocked ? "is waiting for input" : "exited unexpectedly"}`,
+        assistanceNeeded: blocked ? `Open it with /subagents focus ${task.label}` : "Check /subagents and relaunch it if still needed",
+      });
+      return;
+    }
     const completion = kind === COMPLETION_KIND;
     if (completion ? !markCompletionDelivered(task, "message") : !markNotified(task, kind)) return;
     persistTask(task);
@@ -337,7 +345,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use subagent and subagent_control for all agent orchestration; never manage agents through the herdr CLI directly. Subagents use bounded dedicated tabs in the root workspace; never create agent splits in the user-owned root tab.",
       "Normally omit route and effort so policy classifies the task and applies the route default. Set them only when the task or user specifically warrants a custom subagent. Explicit choices never silently fall back.",
-      "Dependent phases must be sequential: plan, primary evaluation, implement with depends_on, then review with depends_on. Do not use subagent for simple work cheaper to do directly.",
+      "Parallel subagents may share a working tree; split the work so they do not edit the same files, and declare owned_paths when overlap matters. Use depends_on when a task must wait for another to finish. Do not use subagent for simple work cheaper to do directly.",
       "After launching, either continue genuinely independent work or end the turn. Automatic completion delivery will wake the primary. Never poll subagent_control, sleep, tail logs, or send impatience steering messages while a task is merely running.",
     ],
     parameters: RoutedTaskParams,
@@ -529,6 +537,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         await steerTask(task, message);
         return taskMetadata(task);
       },
+      list: async () => [...taskHandles.values()].map(taskMetadata),
       stop: async (handle, closePane) => {
         const task = getRoutedTask(handle);
         await stopRoutedTask(task, closePane);

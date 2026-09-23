@@ -245,7 +245,7 @@ export default function workflowEngine(pi: ExtensionAPI) {
         const dependsOn = step.needs.map((need) => latestAttempt(next, need)?.handle).filter((handle): handle is string => !!handle);
         const launched = await requestRpc<{ handle?: string; details?: Record<string, unknown>; task?: { handle?: string } }>(pi, ROUTING_RPC_CHANNELS.launch, {
           task: prompt, description: step.name, route: step.route, phase: step.phase, capabilities: step.capabilities ?? [],
-          depends_on: dependsOn, owned_paths: step.ownershipPaths, allow_concurrent: false, owner,
+          depends_on: dependsOn, owned_paths: step.ownershipPaths, owner,
         }, WORKFLOW_LAUNCH_TIMEOUT_MS);
         const handle = launched.handle ?? launched.task?.handle ?? (launched.details?.handle as string | undefined);
         if (!handle) throw new Error("routing RPC launch returned no task handle");

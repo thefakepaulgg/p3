@@ -31,7 +31,7 @@ describe("Herdr response parsing", () => {
 
 describe("routed worker Pi arguments", () => {
   const agentDir = "/tmp/pi-agent";
-  const rootTools = "subagent,subagent_control,model_route,workflow_control";
+  const rootTools = "subagent,subagent_control,model_route,workflow_control,pr_subscribe,pr_unsubscribe";
   const route = (provider: string, model: string, thinking: Route["thinking"] = "medium") => ({ provider, model, thinking } as Route);
   const withAgentDir = (check: () => void) => {
     const previous = process.env.PI_CODING_AGENT_DIR;
@@ -128,8 +128,8 @@ describe("Herdr Unix socket transport", () => {
       [["pane", "focus", "w1:p2"], "pane.focus", { pane_id: "w1:p2" }],
       [["pane", "split", "--pane", "w1:p2", "--direction", "right", "--cwd", "/repo", "--env", "A=B", "--no-focus"], "pane.split", { target_pane_id: "w1:p2", direction: "right", cwd: "/repo", focus: false, env: { A: "B" } }],
       [["pane", "close", "w1:p2"], "pane.close", { pane_id: "w1:p2" }],
-      [["pane", "report-metadata", "w1:p1", "--source", "pi-routing:delegation", "--token", "subagents=1 subagents active"], "pane.report_metadata", { pane_id: "w1:p1", source: "pi-routing:delegation", clear_display_agent: false, tokens: { routed: "1 routed active" } }],
-      [["pane", "report-metadata", "w1:p1", "--source", "pi-routing:delegation", "--clear-token", "subagents"], "pane.report_metadata", { pane_id: "w1:p1", source: "pi-routing:delegation", clear_display_agent: false, tokens: { routed: null } }],
+      [["pane", "report-metadata", "w1:p1", "--source", "pi-routing:delegation", "--token", "subagents=1 subagents active"], "pane.report_metadata", { pane_id: "w1:p1", source: "pi-routing:delegation", clear_display_agent: false, tokens: { subagents: "1 subagents active" } }],
+      [["pane", "report-metadata", "w1:p1", "--source", "pi-routing:delegation", "--clear-token", "subagents"], "pane.report_metadata", { pane_id: "w1:p1", source: "pi-routing:delegation", clear_display_agent: false, tokens: { subagents: null } }],
       [["agent", "get", "worker"], "agent.get", { target: "worker" }],
       [["agent", "focus", "worker"], "agent.focus", { target: "worker" }],
       [["agent", "read", "worker", "--source", "recent-unwrapped", "--lines", "120"], "agent.read", { target: "worker", source: "recent_unwrapped", lines: 120, format: "text", strip_ansi: true }],
@@ -314,7 +314,7 @@ describe("routed agent tab isolation", () => {
       const start = calls.find((args) => args.slice(0, 2).join(" ") === "agent start")!;
       expect(start).toEqual([
         "agent", "start", launched.agent, "--kind", "pi", "--pane", "w1:p2", "--timeout", "30000", "--",
-        "--exclude-tools", "subagent,subagent_control,model_route,workflow_control",
+        "--exclude-tools", "subagent,subagent_control,model_route,workflow_control,pr_subscribe,pr_unsubscribe",
         "--model", `${routes.luna.provider}/${routes.luna.model}`, "--thinking", routes.luna.thinking, "--name", "Isolated task",
       ]);
       expect(start).not.toContain(fileURLToPath(new URL("../model-routing.ts", import.meta.url)));
