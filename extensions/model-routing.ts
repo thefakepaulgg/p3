@@ -529,6 +529,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         await steerTask(task, message);
         return taskMetadata(task);
       },
+      list: async () => [...taskHandles.values()].map(taskMetadata),
       stop: async (handle, closePane) => {
         const task = getRoutedTask(handle);
         await stopRoutedTask(task, closePane);
