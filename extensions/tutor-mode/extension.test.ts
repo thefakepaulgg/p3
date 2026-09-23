@@ -16,7 +16,7 @@ function harness(branch: any[] = []) {
   const entries: any[] = [];
   const notifications: string[] = [];
   const statuses: any[] = [];
-  let activeTools = ["read", "bash", "edit", "write", "lsp_diagnostics", "web_search", "routed_task"];
+  let activeTools = ["read", "bash", "edit", "write", "lsp_diagnostics", "web_search", "subagent"];
   const execCalls: any[] = [];
 
   const pi: any = {
@@ -87,7 +87,7 @@ describe("tutor mode", () => {
     expect(h.activeTools()).not.toContain("write");
 
     await h.commands.get("tutor").handler("off", ctx);
-    expect(h.activeTools()).toEqual(["read", "bash", "edit", "write", "lsp_diagnostics", "web_search", "routed_task"]);
+    expect(h.activeTools()).toEqual(["read", "bash", "edit", "write", "lsp_diagnostics", "web_search", "subagent"]);
   });
 
   test("injects the teaching policy and writes only through the progress tool", async () => {

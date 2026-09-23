@@ -18,7 +18,7 @@ const RouteParams = Type.Object({
 });
 
 const RoutedTaskParams = Type.Object({
-  task: Type.String({ minLength: 1, description: "Self-contained assignment for the routed worker" }),
+  task: Type.String({ minLength: 1, description: "Self-contained assignment for the subagent" }),
   description: Type.String({ minLength: 3, maxLength: 80, description: "Short task label" }),
   route: Type.Optional(Type.String({ minLength: 1, description: "Model override. Accepts a configured route name, provider/model, or an unambiguous model ID. Omit for policy selection." })),
   effort: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, {
@@ -29,7 +29,7 @@ const RoutedTaskParams = Type.Object({
     description: "Workflow phase. Inferred when omitted; explicit phases improve dependency enforcement.",
   })),
   depends_on: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
-    description: "Routed task handles that must have completed successfully before this task starts.",
+    description: "Subagent handles that must have completed successfully before this task starts.",
   })),
   owned_paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
     description: "Exclusively owned paths, relative to cwd unless absolute. Required for concurrent same-tree writers.",
@@ -41,13 +41,16 @@ const RoutedTaskParams = Type.Object({
     description: "Herdr-only completed-pane policy. keep (default) preserves the pane for later inspection; close removes it after caching the result and delivering the single completion message.",
   })),
   capabilities: Type.Optional(Type.Array(StringEnum(["memory"] as const), {
-    description: "Declared task capabilities. Routed workers inherit configured extensions.",
+    description: "Declared task capabilities. Subagents inherit configured extensions.",
+  })),
+  mode: Type.Optional(StringEnum(["task", "background"] as const, {
+    description: "task (default) completes and wakes the primary once. background is long-lived: it is never marked complete on idle, never wakes the primary, and does not count toward the active-task limit. Pull its latest output with subagent_control action=result; stop it explicitly.",
   })),
 });
 
 const RoutedTaskControlParams = Type.Object({
   action: StringEnum(["list", "status", "result", "focus", "close", "clear", "steer", "stop"] as const),
-  handle: Type.Optional(Type.String({ description: "Routed task handle; required except for list" })),
+  handle: Type.Optional(Type.String({ description: "Subagent handle; required except for list" })),
   message: Type.Optional(Type.String({ description: "Message for steer" })),
   close_pane: Type.Optional(Type.Boolean({ description: "For Herdr stop, also close the owned pane. Default false." })),
 });
@@ -123,7 +126,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     const parentPaneId = routingManifest?.parentPaneId;
     const isChildPane = !ownsManifest && parentPaneId && process.env.HERDR_PANE_ID !== parentPaneId;
     if (isChildPane) {
-      if (!lines.length) lines.push("Routed agents");
+      if (!lines.length) lines.push("Subagents");
       lines.splice(1, 0, "↩ Parent · main");
       targets.unshift({ handle: "parent", label: "Parent", model: "main", state: "completed", startedAt: 0, paneId: parentPaneId });
     }
@@ -194,8 +197,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (count === parentMetadataCount) return;
     parentMetadataCount = count;
     const routedArgs = count > 0
-      ? ["--token", `routed=${count} routed active`]
-      : ["--clear-token", "routed"];
+      ? ["--token", `subagents=${count} subagents active`]
+      : ["--clear-token", "subagents"];
     void runHerdr(pi, [
       "pane", "report-metadata", paneId,
       "--source", "pi-routing:delegation",
@@ -262,12 +265,14 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     // Workflow runs consume lifecycle events themselves and display bounded run-level
     // status. Never wake the primary with routed-task custom messages for them.
     if (task.owner?.kind === "workflow") return;
+    // Background subagents never report back; the user sees their pane and Telegram.
+    if (task.background) return;
     const completion = kind === COMPLETION_KIND;
     if (completion ? !markCompletionDelivered(task, "message") : !markNotified(task, kind)) return;
     persistTask(task);
     refreshWidget();
     pi.sendMessage({
-      customType: completion ? "routed-task-completion" : "routed-task-notification",
+      customType: completion ? "subagent-completion" : "subagent-notification",
       content: boundNotification(content),
       display: true,
       details: { handle: task.handle, route: task.route, state: task.state, kind, escalation: task.escalation },
@@ -324,19 +329,19 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   };
 
   pi.registerTool({
-    name: "routed_task",
-    label: "Routed Task",
-    description: "Launch one sticky-model task in a visible Herdr agent with workflow guards. The model stays fixed. Explicit choices never silently fall back. This is fire-and-forget: after launch, do independent work or end the turn; completion automatically wakes the primary exactly once with a bounded routed-task message. Do not poll status/result, sleep, tail logs, or steer merely to ask whether it finished. Retrieve the full cached result with routed_task_control action=result.",
+    name: "subagent",
+    label: "Subagent",
+    description: "Launch one sticky-model task in a visible Herdr agent with workflow guards. The model stays fixed. Explicit choices never silently fall back. This is fire-and-forget: after launch, do independent work or end the turn; completion automatically wakes the primary exactly once with a bounded subagent message. Do not poll status/result, sleep, tail logs, or steer merely to ask whether it finished. Retrieve the full cached result with subagent_control action=result.",
     promptSnippet: "Launch a guarded sticky-model task in Herdr",
     promptGuidelines: [
-      "Use routed_task and routed_task_control for all agent orchestration; never manage agents through the herdr CLI directly. Routed agents use bounded dedicated tabs in the root workspace; never create agent splits in the user-owned root tab.",
+      "Use subagent and subagent_control for all agent orchestration; never manage agents through the herdr CLI directly. Subagents use bounded dedicated tabs in the root workspace; never create agent splits in the user-owned root tab.",
       "Normally omit route and effort so policy classifies the task and applies the route default. Set them only when the task or user specifically warrants a custom subagent. Explicit choices never silently fall back.",
-      "Dependent phases must be sequential: plan, primary evaluation, implement with depends_on, then review with depends_on. Do not use routed_task for simple work cheaper to do directly.",
-      "After launching, either continue genuinely independent work or end the turn. Automatic completion delivery will wake the primary. Never poll routed_task_control, sleep, tail logs, or send impatience steering messages while a task is merely running.",
+      "Dependent phases must be sequential: plan, primary evaluation, implement with depends_on, then review with depends_on. Do not use subagent for simple work cheaper to do directly.",
+      "After launching, either continue genuinely independent work or end the turn. Automatic completion delivery will wake the primary. Never poll subagent_control, sleep, tail logs, or send impatience steering messages while a task is merely running.",
     ],
     parameters: RoutedTaskParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (ctx.hasUI !== true) throw new Error("routed_task can only launch from the user-facing root Pi session");
+      if (ctx.hasUI !== true) throw new Error("subagent can only launch from the user-facing root Pi session");
       rememberUi(ctx);
       return routedLaunch(params as RoutedTaskLaunchParams, ctx);
     },
@@ -409,7 +414,20 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       await runHerdr(pi, ["pane", "close", task.paneId], 5000);
       updateTask(task, { paneClosedAt: Date.now() }, false); persistTask(task);
     }
-    return `Stopped routed task ${task.handle}${closePane ? " and closed its pane" : ""}`;
+    return `Stopped subagent ${task.handle}${closePane ? " and closed its pane" : ""}`;
+  };
+
+  const steerTask = async (task: TaskHandle, message: string): Promise<void> => {
+    let baseline = "";
+    try {
+      const beforeRaw = await runHerdr(pi, ["agent", "get", task.agentName!], 5000);
+      baseline = readHerdrResult(parseJson(beforeRaw, "herdr agent get")?.result?.agent?.agent_session?.value);
+    } catch { /* steering still proceeds */ }
+    watchers.get(task.handle)?.abort();
+    await runHerdr(pi, ["agent", "prompt", task.agentName!, message], 10000);
+    resetCompletionDelivery(task);
+    updateTask(task, { state: "running" });
+    watchHerdrTask(task, baseline);
   };
 
   const clearRoutedTask = (task: TaskHandle): string => {
@@ -421,25 +439,25 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       refreshWidget();
     }
     const retained = task.paneId && !task.paneClosedAt ? " Its pane remains open." : "";
-    return `Cleared ${task.label} from the routed-agent list.${retained}`;
+    return `Cleared ${task.label} from the subagent list.${retained}`;
   };
 
   pi.registerTool<typeof RoutedTaskControlParams, any>({
-    name: "routed_task_control",
-    label: "Routed Task Control",
-    description: "List, inspect, retrieve, focus, close, clear, steer, or stop Herdr agents launched by routed_task. Completed panes remain available by default until explicitly closed; result returns the full cached worker output.",
-    promptSnippet: "Control and retrieve sticky-model routed tasks",
+    name: "subagent_control",
+    label: "Subagent Control",
+    description: "List, inspect, retrieve, focus, close, clear, steer, or stop Herdr agents launched by subagent. Completed panes remain available by default until explicitly closed; result returns the full cached worker output.",
+    promptSnippet: "Control and retrieve sticky-model subagents",
     parameters: RoutedTaskControlParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       rememberUi(ctx);
       if (params.action === "list") {
         const items = [...taskHandles.values()].filter((item) => !item.clearedAt).sort((a, b) => b.startedAt - a.startedAt);
-        const text = items.length ? items.map((item) => `${item.handle} [${item.state}] ${item.route} — ${item.label}${item.paneClosedAt ? " · pane closed" : ""}`).join("\n") : "No routed tasks";
+        const text = items.length ? items.map((item) => `${item.handle} [${item.state}] ${item.route} — ${item.label}${item.paneClosedAt ? " · pane closed" : ""}`).join("\n") : "No subagents";
         return { content: [{ type: "text", text }], details: { tasks: items } };
       }
       if (!params.handle) throw new Error("handle is required");
       const task = taskHandles.get(params.handle);
-      if (!task) throw new Error(`Unknown routed task handle: ${params.handle}`);
+      if (!task) throw new Error(`Unknown subagent handle: ${params.handle}`);
 
       if (params.action === "status") {
         const liveHerdrStatus = await refreshRoutedTaskStatus(task);
@@ -469,17 +487,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
 
       if (params.action === "steer") {
         if (!params.message?.trim()) throw new Error("message is required for steer");
-        let baseline = "";
-        try {
-          const beforeRaw = await runHerdr(pi, ["agent", "get", task.agentName!], 5000);
-          baseline = readHerdrResult(parseJson(beforeRaw, "herdr agent get")?.result?.agent?.agent_session?.value);
-        } catch { /* steering still proceeds */ }
-        watchers.get(task.handle)?.abort();
-        await runHerdr(pi, ["agent", "prompt", task.agentName!, params.message.trim()], 10000);
-        resetCompletionDelivery(task);
-        updateTask(task, { state: "running" });
-        watchHerdrTask(task, baseline);
-        return { content: [{ type: "text", text: `Steered Herdr task ${task.handle}` }], details: { task } };
+        await steerTask(task, params.message.trim());
+        return { content: [{ type: "text", text: `Steered subagent ${task.handle}` }], details: { task } };
       }
 
       if (params.action === "stop") {
@@ -493,7 +502,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
 
   const getRoutedTask = (handle: string): TaskHandle => {
     const task = taskHandles.get(handle);
-    if (!task) throw new Error(`Unknown routed task handle: ${handle}`);
+    if (!task) throw new Error(`Unknown subagent handle: ${handle}`);
     return task;
   };
   const bindEventSubscriptions = () => {
@@ -514,6 +523,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         return taskMetadata(task);
       },
       result: async (handle) => readFullRoutedTaskResult(getRoutedTask(handle)),
+      steer: async (handle, message) => {
+        const task = getRoutedTask(handle);
+        await steerTask(task, message);
+        return taskMetadata(task);
+      },
       stop: async (handle, closePane) => {
         const task = getRoutedTask(handle);
         await stopRoutedTask(task, closePane);
@@ -532,8 +546,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (exact) return exact;
     const matches = tasks.filter((task) => task.label.toLowerCase().includes(normalized));
     if (matches.length === 1) return matches[0];
-    if (matches.length > 1) throw new Error(`More than one routed agent matches ${JSON.stringify(query)}`);
-    throw new Error(`No routed agent matches ${JSON.stringify(query)}`);
+    if (matches.length > 1) throw new Error(`More than one subagent matches ${JSON.stringify(query)}`);
+    throw new Error(`No subagent matches ${JSON.stringify(query)}`);
   };
 
   const runRoutedCommandAction = async (action: string, task: TaskHandle, ctx: ExtensionContext) => {
@@ -543,11 +557,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       ctx.ui.notify(boundNotification(result.text), "info");
     } else if (action === "close") ctx.ui.notify(await closeRoutedPane(task), "info");
     else if (action === "clear") ctx.ui.notify(clearRoutedTask(task), "info");
-    else throw new Error(`Unknown routed action: ${action}`);
+    else throw new Error(`Unknown subagents action: ${action}`);
   };
 
-  pi.registerCommand("routed", {
-    description: "Open, inspect, close, or clear a routed agent",
+  pi.registerCommand("subagents", {
+    description: "Open, inspect, close, or clear a subagent",
     getArgumentCompletions: (prefix) => {
       const actions = ["focus", "result", "close", "clear"];
       const separator = prefix.indexOf(" ");
@@ -582,29 +596,29 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
           const [verb, ...queryParts] = trimmed.split(/\s+/);
           const aliases: Record<string, string> = { open: "focus", focus: "focus", show: "result", view: "result", result: "result", close: "close", clear: "clear", remove: "clear" };
           action = aliases[verb.toLowerCase()];
-          if (!action) throw new Error("Usage: /routed [focus|result|close] <handle or task name>, or /routed clear [<handle or task name>]");
+          if (!action) throw new Error("Usage: /subagents [focus|result|close] <handle or task name>, or /subagents clear [<handle or task name>]");
           if (!queryParts.length) {
-            if (action !== "clear") throw new Error("Usage: /routed [focus|result|close] <handle or task name>, or /routed clear [<handle or task name>]");
+            if (action !== "clear") throw new Error("Usage: /subagents [focus|result|close] <handle or task name>, or /subagents clear [<handle or task name>]");
             const finished = listedTasks().filter((item) => !isActiveTask(item));
-            if (!finished.length) { ctx.ui.notify("No finished routed agents to clear", "info"); return; }
+            if (!finished.length) { ctx.ui.notify("No finished subagents to clear", "info"); return; }
             const retainedPanes = finished.filter((item) => item.paneId && !item.paneClosedAt).length;
             for (const item of finished) clearRoutedTask(item);
-            const agentWord = finished.length === 1 ? "agent" : "agents";
+            const agentWord = finished.length === 1 ? "subagent" : "subagents";
             const paneNote = retainedPanes ? ` ${retainedPanes} retained ${retainedPanes === 1 ? "pane remains" : "panes remain"} open.` : "";
-            ctx.ui.notify(`Cleared ${finished.length} finished routed ${agentWord} from the list.${paneNote}`, "info");
+            ctx.ui.notify(`Cleared ${finished.length} finished ${agentWord} from the list.${paneNote}`, "info");
             return;
           }
           task = resolveListedTask(queryParts.join(" "));
         } else {
           const tasks = listedTasks();
-          if (!tasks.length) { ctx.ui.notify("No routed agents", "info"); return; }
+          if (!tasks.length) { ctx.ui.notify("No subagents", "info"); return; }
           const duplicateLabels = new Map<string, number>();
           for (const item of tasks) duplicateLabels.set(item.label, (duplicateLabels.get(item.label) ?? 0) + 1);
           const choices = tasks.map((item) => {
             const disambiguator = (duplicateLabels.get(item.label) ?? 0) > 1 ? ` · ${item.handle.slice(-4)}` : "";
             return { item, label: `${item.label} · ${formatModelLabel(item.model)} · ${item.state}${item.paneClosedAt ? " · closed" : ""}${disambiguator}` };
           });
-          const selected = await ctx.ui.select("Routed agents", choices.map((choice) => choice.label));
+          const selected = await ctx.ui.select("Subagents", choices.map((choice) => choice.label));
           if (!selected) return;
           task = choices.find((choice) => choice.label === selected)!.item;
           const actions: Array<{ label: string; action: string }> = [];
@@ -629,7 +643,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     description: "Inspect the current primary session's route or recommend a task-level delegation target. It never changes the primary model; use the user-invoked /route command for an explicit manual override.",
     promptSnippet: "Inspect routing, classify delegation, or explicitly change the primary model route",
     promptGuidelines: [
-      "Use model_route recommend only when a delegation target is genuinely unclear. Normally keep the primary on Sol and launch coherent delegated assignments through routed_task.",
+      "Use model_route recommend only when a delegation target is genuinely unclear. Normally keep the primary on Sol and launch coherent delegated assignments through subagent.",
     ],
     parameters: RouteParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -700,7 +714,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (event.toolName !== "Agent") return;
     return {
       block: true,
-      reason: "Direct Agent launch bypasses Herdr routing and dependency guards. Use routed_task.",
+      reason: "Direct Agent launch bypasses Herdr routing and dependency guards. Use subagent.",
     };
   });
 

@@ -12,7 +12,7 @@ export type RoutedWorkerCapability = "memory";
 export interface HerdrLaunch { agent: string; paneId: string; tabId: string; route: string }
 
 export const ROUTED_TAB_MAX_PANES = 4;
-const ROUTED_TAB_LABEL = "Routed agents";
+const ROUTED_TAB_LABEL = "Subagents";
 let allocationTail: Promise<void> = Promise.resolve();
 
 interface PaneAllocation { paneId: string; tabId: string; createdTab: boolean }
@@ -51,10 +51,13 @@ const splitDirection = (rect?: { width?: number; height?: number }) => {
   return width >= 120 && width >= height * 2 ? "right" : "down";
 };
 
-export async function allocateRoutedAgentPane(pi: ExtensionAPI, cwd: string, manifestPath?: string): Promise<PaneAllocation> {
+export async function allocateRoutedAgentPane(pi: ExtensionAPI, cwd: string, manifestPath?: string, background = false): Promise<PaneAllocation> {
   return withAllocationLock(async () => {
     const { workspaceId, rootTabId } = rootContext();
-    const manifestEnv = manifestPath ? ["--env", `PI_ROUTING_MANIFEST=${manifestPath}`] : [];
+    const manifestEnv = [
+      ...(manifestPath ? ["--env", `PI_ROUTING_MANIFEST=${manifestPath}`] : []),
+      ...(background ? ["--env", "PI_SUBAGENT_MODE=background"] : []),
+    ];
     const base = routedTabBaseLabel(rootTabId);
     const listed = parseJson(await runHerdr(pi, ["tab", "list", "--workspace", workspaceId], 5000), "herdr tab list");
     const routedTabs = (listed?.result?.tabs ?? [])
@@ -87,7 +90,7 @@ export async function allocateRoutedAgentPane(pi: ExtensionAPI, cwd: string, man
     const tabId = available.tab_id as string;
     const panes = parseJson(await runHerdr(pi, ["pane", "list", "--workspace", workspaceId], 5000), "herdr pane list")?.result?.panes ?? [];
     const tabPanes = panes.filter((pane: any) => pane.tab_id === tabId);
-    if (!tabPanes.length) throw new Error(`Routed agent tab ${tabId} has no panes`);
+    if (!tabPanes.length) throw new Error(`Subagent tab ${tabId} has no panes`);
     const layout = parseJson(await runHerdr(pi, ["pane", "layout", "--pane", tabPanes[0].pane_id], 5000), "herdr pane layout");
     const layoutPanes = layout?.result?.layout?.panes ?? [];
     const target = [...layoutPanes].sort((a: any, b: any) => {
@@ -335,8 +338,11 @@ export function watchHerdrTask(options: {
             blockedNotified = true;
             const episode = (task.blockedEpisodes ?? 0) + 1;
             update({ blockedEpisodes: episode }, false);
-            notify(`blocked#${episode}`, `Routed Herdr task ${task.handle} is blocked (${task.label}). ${task.escalation ?? "Inspect or steer the agent."}`);
+            notify(`blocked#${episode}`, `Subagent ${task.handle} is blocked (${task.label}). ${task.escalation ?? "Inspect or steer the agent."}`);
           }
+        } else if (task.background) {
+          // Background subagents idle between self-triggered turns; idle is not completion.
+          if (task.state !== "running") update({ state: "running" });
         } else if ((status === "idle" || status === "done") && (sawWorking || (!!result && result !== baselineResult))) {
           update({ state: "completed", endedAt: Date.now(), resultChars: result.length, result });
           if (shouldCloseCompletedPane(task.paneRetention) && task.paneId && !task.paneClosedAt) {
@@ -349,14 +355,14 @@ export function watchHerdrTask(options: {
       } catch (error) {
         if (!shouldWatch()) return;
         const message = error instanceof Error ? error.message : String(error);
-        if (/agent_not_found/.test(message)) { update({ state: "abandoned", endedAt: Date.now(), error: message }); notify("abandoned", `Routed Herdr task ${task.handle} disappeared before completion. ${task.escalation ?? ""}`); return; }
+        if (/agent_not_found/.test(message)) { update({ state: "abandoned", endedAt: Date.now(), error: message }); notify("abandoned", `Subagent ${task.handle} disappeared before completion. ${task.escalation ?? ""}`); return; }
         consecutivePollErrors += 1;
       }
-      if (!advisoryNotified && Date.now() >= advisoryAt) {
+      if (!task.background && !advisoryNotified && Date.now() >= advisoryAt) {
         advisoryNotified = true;
         task.escalation = "The Herdr task has run for more than 30 minutes; it remains watched and was not stopped.";
         persist();
-        notify("long-running", `Routed Herdr task ${task.handle} is still running after 30 minutes. It remains active and monitored in pane ${task.paneId}.`);
+        notify("long-running", `Subagent ${task.handle} is still running after 30 minutes. It remains active and monitored in pane ${task.paneId}.`);
       }
       const pollDelay = consecutivePollErrors === 0 ? 1000 : Math.min(10_000, 1000 * 2 ** Math.min(consecutivePollErrors, 4));
       await sleep(pollDelay, controller.signal);
@@ -368,7 +374,7 @@ const HERDR_AGENT_READY_TIMEOUT_MS = 30_000;
 
 export function buildRoutedWorkerPiArgs(description: string, route: Route, _capabilities: RoutedWorkerCapability[] = []): string[] {
   return [
-    "--exclude-tools", "routed_task,routed_task_control,model_route,workflow_control",
+    "--exclude-tools", "subagent,subagent_control,model_route,workflow_control",
     "--model", `${route.provider}/${route.model}`,
     "--thinking", route.thinking,
     "--name", description,
@@ -412,8 +418,8 @@ async function waitForHerdrAgentReady(pi: ExtensionAPI, agentName: string, timeo
   throw new Error(`agent_start_timeout: ${agentName} did not become prompt-ready within ${timeout}ms (${lastState})`);
 }
 
-export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string, capabilities: RoutedWorkerCapability[] = []): Promise<HerdrLaunch> {
-  const allocation = await allocateRoutedAgentPane(pi, cwd, manifestPath);
+export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string, capabilities: RoutedWorkerCapability[] = [], background = false): Promise<HerdrLaunch> {
+  const allocation = await allocateRoutedAgentPane(pi, cwd, manifestPath, background);
   const { paneId, tabId } = allocation;
   const slug = description.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "task";
   const agent = `r-${slug}-${Date.now().toString(36).slice(-5)}`.slice(0, 32);
@@ -436,7 +442,10 @@ export async function launchHerdrAgent(pi: ExtensionAPI, task: string, descripti
       catch (error) { lastStartError = error; if (!/agent_pane_busy/.test(error instanceof Error ? error.message : String(error))) throw error; }
     }
     if (!started) throw lastStartError ?? new Error("Herdr pane did not become available");
-    const prompt = [task, "", "Task contract: own only this assignment; do not broaden scope or delegate. Report the outcome, changed artifacts or findings, evidence actually observed, and concrete blockers or risks. Stop if a missing decision materially changes the outcome."].join("\n");
+    const contract = background
+      ? "Background contract: you are a long-lived background subagent. The parent agent never receives your output automatically and may later read your latest reply, so end each turn with a short current-status summary. Own only this assignment; do not delegate. Use notify_user (Telegram) only when the user must act or when something important finished."
+      : "Task contract: own only this assignment; do not broaden scope or delegate. Report the outcome, changed artifacts or findings, evidence actually observed, and concrete blockers or risks. Stop if a missing decision materially changes the outcome.";
+    const prompt = [task, "", contract].join("\n");
     // One socket request both submits and observes the first working transition. If Herdr
     // 0.8.0's delayed Enter is swallowed, submit only the existing composer text and verify
     // activity; never paste the prompt twice.

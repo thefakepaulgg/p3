@@ -7,7 +7,7 @@ import {
 
 const task = (patch: Partial<TaskHandle> = {}): TaskHandle => ({
   handle: "rt-test", route: "luna", routeExplicit: false,
-  target: "herdr", model: "openai-codex/gpt-5.6-luna", thinking: "high", label: "Test task",
+  target: "herdr", model: "openai-codex/gpt-6-luna", thinking: "high", label: "Test task",
   state: "running", startedAt: 1, transitions: 0, notifiedStates: [], ...patch,
 });
 
@@ -96,7 +96,7 @@ describe("bounded completion message", () => {
     const completed = task({ state: "completed", paneId: "w1:p2", resultChars: long.length });
     const message = buildCompletionMessage(completed, long);
     expect(message.length).toBeLessThanOrEqual(NOTIFICATION_LIMIT);
-    expect(message).toContain("routed_task_control action=result handle=rt-test");
+    expect(message).toContain("subagent_control action=result handle=rt-test");
     expect(message).toContain("9000 chars");
     expect(message).toContain("Pane w1:p2 is retained for inspection");
     expect(message).not.toContain(long);
@@ -124,10 +124,10 @@ describe("routed-task widget", () => {
 
   test("shows only human-facing label, model, elapsed and actionable exceptional state", () => {
     const lines = formatTaskWidget([
-      task({ handle: "rt-a", route: "luna", model: "openai-codex/gpt-5.6-luna", label: "Parser fix", state: "running", startedAt: now - 125_000, paneId: "w1:p2" }),
-      task({ handle: "rt-b", route: "sol", model: "openai-codex/gpt-5.6-sol", label: "Plan change", state: "blocked", startedAt: now - 3_600_000, paneId: "w1:p3", paneClosedAt: now }),
+      task({ handle: "rt-a", route: "luna", model: "openai-codex/gpt-6-luna", label: "Parser fix", state: "running", startedAt: now - 125_000, paneId: "w1:p2" }),
+      task({ handle: "rt-b", route: "sol", model: "openai-codex/gpt-6-sol", label: "Plan change", state: "blocked", startedAt: now - 3_600_000, paneId: "w1:p3", paneClosedAt: now }),
     ], now)!;
-    expect(lines[0]).toBe("Routed agents · 2 active");
+    expect(lines[0]).toBe("Subagents · 2 active");
     expect(lines[1]).toBe("◆ Plan change · Sol · 1h00m · needs input");
     expect(lines[2]).toBe("● Parser fix · Luna · 2m");
     expect(lines.join(" ")).not.toContain("rt-");
@@ -138,7 +138,7 @@ describe("routed-task widget", () => {
 
   test("shows closed pane state because it changes available actions", () => {
     const lines = formatTaskWidget([task({ label: "Finished", state: "completed", startedAt: now - 60_000, endedAt: now - 30_000, paneClosedAt: now })], now)!;
-    expect(lines).toEqual(["Routed agents · 1 recent", "✓ Finished · Luna · 30s · closed"]);
+    expect(lines).toEqual(["Subagents · 1 recent", "✓ Finished · Luna · 30s · closed"]);
   });
 
   test("keeps recent terminal tasks after active ones and bounds row count", () => {
@@ -147,7 +147,7 @@ describe("routed-task widget", () => {
       ...[1, 2, 3, 4].map((index) => task({ handle: `rt-${index}`, state: "running", startedAt: now - index * 1000 })),
     ];
     const lines = formatTaskWidget(items, now)!;
-    expect(lines[0]).toBe("Routed agents · 4 active · 1 recent");
+    expect(lines[0]).toBe("Subagents · 4 active · 1 recent");
     expect(lines).toHaveLength(6);
     expect(lines.at(-1)).toBe("… 1 more");
     expect(lines.every((line) => line.length <= 120)).toBe(true);
@@ -160,8 +160,8 @@ describe("routed-task widget", () => {
   });
 
   test("formats model and elapsed labels compactly", () => {
-    expect(formatModelLabel("openai-codex/gpt-5.6-sol")).toBe("Sol");
-    expect(formatModelLabel("openai-codex/gpt-5.6-luna")).toBe("Luna");
+    expect(formatModelLabel("openai-codex/gpt-6-sol")).toBe("Sol");
+    expect(formatModelLabel("openai-codex/gpt-6-luna")).toBe("Luna");
     expect(formatModelLabel("anthropic/claude-fable-5-1")).toBe("Fable 5.1");
     expect(formatElapsed(4_000)).toBe("4s");
     expect(formatElapsed(180_000)).toBe("3m");

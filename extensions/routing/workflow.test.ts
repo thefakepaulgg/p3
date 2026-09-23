@@ -4,7 +4,7 @@ import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkf
 
 const task = (patch: Partial<TaskHandle> = {}): TaskHandle => ({
   handle: "rt-existing", route: "sol", routeExplicit: false,
-  target: "herdr", model: "openai-codex/gpt-5.6-sol", thinking: "medium", label: "Plan",
+  target: "herdr", model: "openai-codex/gpt-6-sol", thinking: "medium", label: "Plan",
   cwd: "/repo", phase: "plan", state: "running", startedAt: 1, transitions: 0, notifiedStates: [], ...patch,
 });
 
