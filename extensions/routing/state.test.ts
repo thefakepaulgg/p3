@@ -128,8 +128,8 @@ describe("routed-task widget", () => {
       task({ handle: "rt-b", route: "sol", model: "openai-codex/gpt-6-sol", label: "Plan change", state: "blocked", startedAt: now - 3_600_000, paneId: "w1:p3", paneClosedAt: now }),
     ], now)!;
     expect(lines[0]).toBe("Subagents · 2 active");
-    expect(lines[1]).toBe("◆ Plan change · Sol · 1h00m · needs input");
-    expect(lines[2]).toBe("● Parser fix · Luna · 2m");
+    expect(lines[1]).toBe("◆ Plan change · gpt-6-sol · 1h00m · needs input");
+    expect(lines[2]).toBe("● Parser fix · gpt-6-luna · 2m");
     expect(lines.join(" ")).not.toContain("rt-");
     expect(lines.join(" ")).not.toContain("w1:p");
     expect(lines.join(" ")).not.toContain("herdr/");
@@ -138,7 +138,7 @@ describe("routed-task widget", () => {
 
   test("shows closed pane state because it changes available actions", () => {
     const lines = formatTaskWidget([task({ label: "Finished", state: "completed", startedAt: now - 60_000, endedAt: now - 30_000, paneClosedAt: now })], now)!;
-    expect(lines).toEqual(["Subagents · 1 recent", "✓ Finished · Luna · 30s · closed"]);
+    expect(lines).toEqual(["Subagents · 1 recent", "✓ Finished · gpt-6-luna · 30s · closed"]);
   });
 
   test("keeps recent terminal tasks after active ones and bounds row count", () => {
@@ -160,9 +160,9 @@ describe("routed-task widget", () => {
   });
 
   test("formats model and elapsed labels compactly", () => {
-    expect(formatModelLabel("openai-codex/gpt-6-sol")).toBe("Sol");
-    expect(formatModelLabel("openai-codex/gpt-6-luna")).toBe("Luna");
-    expect(formatModelLabel("anthropic/claude-fable-5-1")).toBe("Fable 5.1");
+    expect(formatModelLabel("openai-codex/gpt-6-sol")).toBe("gpt-6-sol");
+    expect(formatModelLabel("openai-codex/gpt-6-luna")).toBe("gpt-6-luna");
+    expect(formatModelLabel("anthropic/claude-fable-5-1")).toBe("claude-fable-5-1");
     expect(formatElapsed(4_000)).toBe("4s");
     expect(formatElapsed(180_000)).toBe("3m");
     expect(formatElapsed(3_900_000)).toBe("1h05m");

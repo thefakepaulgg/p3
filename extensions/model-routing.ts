@@ -154,7 +154,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       const theme = ctx.ui.theme;
       const markerColor = { "○": "muted", "●": "accent", "◆": "warning", "✓": "success", "×": "error", "−": "dim", "?": "warning", "↩": "accent" } as const;
       const title = typeof theme.bold === "function" ? theme.bold(current.lines[0]) : current.lines[0];
-      const rendered = [theme.fg("accent", `╭─ ${title}`)];
+      // Keep the whole frame dim; only the title carries the accent color.
+      const rendered = [`${theme.fg("dim", "╭─")} ${theme.fg("accent", title)}`];
       for (const [index, line] of current.lines.slice(1).entries()) {
         if (line.startsWith("…")) {
           rendered.push(`${theme.fg("dim", "│")} ${theme.fg("dim", line)}`);
