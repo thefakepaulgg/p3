@@ -160,8 +160,8 @@ async function persistLargeTextResult(content: Array<TextContent | ImageContent>
   if (!content.every((item): item is TextContent => item.type === "text")) return { content };
 
   const fullText = content.map((item) => item.text).join("\n\n");
-  if (Math.ceil(fullText.length / ESTIMATED_CHARS_PER_TOKEN) <= MAX_INLINE_RESULT_TOKENS) return { content };
-
+  // Always save the exact response so callers can archive it byte-for-byte instead of
+  // reproducing inline text (the work-vault Zoom pipeline depends on this).
   const tempDir = await mkdtemp(join(tmpdir(), "pi-claude-connectors-"));
   const fullOutputPath = join(tempDir, "output.txt");
   await withFileMutationQueue(fullOutputPath, async () => {
@@ -169,6 +169,14 @@ async function persistLargeTextResult(content: Array<TextContent | ImageContent>
   });
 
   const totalBytes = Buffer.byteLength(fullText, "utf8");
+  if (Math.ceil(fullText.length / ESTIMATED_CHARS_PER_TOKEN) <= MAX_INLINE_RESULT_TOKENS) {
+    return {
+      content: [...content, { type: "text" as const, text: `[Full output saved to: ${fullOutputPath}]` }],
+      fullOutputPath,
+      totalBytes,
+    };
+  }
+
   const preview = utf8Prefix(fullText, RESULT_PREVIEW_BYTES);
   return {
     content: [{
