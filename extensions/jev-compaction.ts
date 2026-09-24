@@ -44,23 +44,23 @@ export default function (pi: ExtensionAPI) {
     try {
       const { TypeSafeClient, noul } = await import("@typesafe-ai/sdk");
       const jev = new TypeSafeClient({ apiKey, timeout: 15_000, retry: { maxRetries: 0 }, logLevel: "off" });
-      const questions = Object.fromEntries(candidates.map((_, id) => [
-        `keep_${id}`,
-        noul(`Should tool output ${id} be carried forward verbatim after this history is summarized? Yes only if it holds errors, failing test output, exact values, identifiers, or constraints that a prose summary would lose and that cannot cheaply be re-obtained by re-running the tool.`),
-      ]));
-      const { answers } = await jev.systemOne({
-        state: {
-          goal: customInstructions ?? "Continue the ongoing coding task.",
-          previousSummary: preparation.previousSummary?.slice(0, 4_000) ?? null,
-          outputs: candidates.map((candidate, id) => ({ id, tool: candidate.tool, isError: candidate.isError, text: candidate.text.slice(0, SCORE_CHARS) })),
-        },
-        questions,
-      }, { signal });
+      const goal = customInstructions ?? "Continue the ongoing coding task.";
+      const question = noul("Does this tool output contain errors, failing test output, exact values, identifiers, or constraints that a prose summary would lose and that cannot cheaply be re-obtained by re-running the tool?");
+      // One call per output: batching many outputs into one request compresses the probabilities
+      // (clear keepers scored ~0.55-0.66 batched vs ~0.75-0.86 alone), so nothing cleared the threshold.
+      const scores = await Promise.allSettled(candidates.map((candidate) => jev.systemOne({
+        state: { goal, output: { tool: candidate.tool, isError: candidate.isError, text: candidate.text.slice(0, SCORE_CHARS) } },
+        questions: { keep: question },
+      }, { signal })));
+      if (scores.every((score) => score.status === "rejected")) return;
 
       // Highest-probability outputs win the budget; they are then shown in original order.
       let budget = RETAINED_BUDGET_CHARS;
       const kept = candidates
-        .map((candidate, id) => ({ ...candidate, id, probability: answers[`keep_${id}`]?.noul ?? 0 }))
+        .map((candidate, id) => {
+          const score = scores[id];
+          return { ...candidate, id, probability: score.status === "fulfilled" ? score.value.answers.keep.noul : 0 };
+        })
         .filter((candidate) => candidate.probability >= KEEP_PROBABILITY)
         .sort((a, b) => b.probability - a.probability)
         .filter((candidate) => {
