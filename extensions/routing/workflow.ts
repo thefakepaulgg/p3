@@ -3,7 +3,7 @@ import type { TaskHandle } from "./state.ts";
 
 export type TaskPhase = "plan" | "implement" | "review" | "other";
 
-const activeStates = new Set(["queued", "running", "blocked"]);
+const activeStates = new Set(["queued", "running", "blocked", "interrupted"]);
 
 export class ExplicitRouteRetryGuard {
   private readonly failures = new Map<string, { route: string; at: number }>();
