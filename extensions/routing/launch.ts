@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { classifyDelegation, classifyModelRoute, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./policy.ts";
 import { normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
@@ -62,7 +63,8 @@ export function validateRoutedTaskLaunchParams(input: RoutedTaskLaunchParams): v
   if (input.capabilities !== undefined && (!Array.isArray(input.capabilities) || input.capabilities.some((capability) => capability !== "memory"))) throw new Error("capabilities must contain only memory");
 }
 
-const workflowOwnerKey = (owner?: TaskOwner): string | undefined => owner ? `workflow:${owner.runId}:${owner.stepId}:${owner.attemptId}` : undefined;
+const ownerKey = (owner?: TaskOwner): string | undefined => owner?.kind === "workflow" ? `workflow:${owner.runId}:${owner.stepId}:${owner.attemptId}`
+  : owner?.kind === "pr" ? `pr:${owner.key}:${owner.signature}` : undefined;
 
 async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionContext, input: RoutedTaskLaunchParams, owner?: unknown): Promise<RoutedTaskLaunchResult> {
   validateRoutedTaskLaunchParams(input);
@@ -98,7 +100,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
     handle, route: routeName, fallbackFrom: routePlan.fallbackFrom, routeExplicit: params.route !== undefined,
     target: "herdr", model: `${route.provider}/${route.model}`, thinking: route.thinking, label: description,
     cwd, phase, dependsOn, ownedPaths, owner: params.owner, background: background || undefined, state: "running", startedAt: Date.now(),
-    agentName: launched.agent, paneId: launched.paneId, tabId: launched.tabId, paneRetention: params.pane_retention ?? "keep",
+    agentName: launched.agent, paneId: launched.paneId, tabId: launched.tabId, messageToken: randomUUID(), paneRetention: params.pane_retention ?? "keep",
     transitions: 0, notifiedStates: [], usageOffset: 0, estimatedCost: 0, costKnown: false,
   };
   deps.trackTask(tracked);
@@ -115,10 +117,10 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
 export async function launchRoutedTask(deps: LaunchDependencies, ctx: ExtensionContext, input: RoutedTaskLaunchParams, owner?: unknown): Promise<RoutedTaskLaunchResult> {
   validateRoutedTaskLaunchParams(input);
   const normalizedOwner = normalizeTaskOwner(owner ?? input.owner);
-  const key = workflowOwnerKey(normalizedOwner);
+  const key = ownerKey(normalizedOwner);
   if (!key) return launchRoutedTaskOnce(deps, ctx, input, normalizedOwner);
-  const existingTracked = [...deps.taskHandles.values()].find((task) => task.owner && workflowOwnerKey(task.owner) === key);
-  if (existingTracked) return { text: `Workflow-owned subagent ${existingTracked.handle} already exists; returning the existing handle.`, details: { handle: existingTracked.handle, owner: normalizedOwner, coalesced: true }, task: existingTracked };
+  const existingTracked = [...deps.taskHandles.values()].find((task) => task.owner && ownerKey(task.owner) === key);
+  if (existingTracked) return { text: `Owned subagent ${existingTracked.handle} already exists; returning the existing handle.`,  details: { handle: existingTracked.handle, owner: normalizedOwner, coalesced: true }, task: existingTracked };
   const existing = deps.workflowLaunches.get(key);
   if (existing) return existing;
   const pending = launchRoutedTaskOnce(deps, ctx, { ...input, owner: normalizedOwner }, normalizedOwner);

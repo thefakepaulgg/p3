@@ -6,12 +6,8 @@ import { formatEstimatedCost } from "./usage.ts";
 export type TaskState = "queued" | "running" | "blocked" | "interrupted" | "completed" | "failed" | "stopped" | "abandoned";
 
 /** Bounded correlation metadata supplied by workflow callers over routing RPC. */
-export interface TaskOwner {
-  kind: "workflow";
-  runId: string;
-  stepId: string;
-  attemptId: string;
-}
+export type TaskOwner = { kind: "workflow"; runId: string; stepId: string; attemptId: string }
+  | { kind: "pr"; key: string; signature: string };
 
 export interface TaskHandle {
   handle: string;
@@ -36,6 +32,7 @@ export interface TaskHandle {
   agentName?: string;
   paneId?: string;
   tabId?: string;
+  messageToken?: string;
   paneRetention?: "keep" | "close";
   paneClosedAt?: number;
   /** Hides a terminal task from user-facing recent/list surfaces while preserving its durable record. */
@@ -77,19 +74,21 @@ export const ROUTING_RPC_VERSION = 1;
 export function normalizeTaskOwner(owner: unknown): TaskOwner | undefined {
   if (!owner || typeof owner !== "object") return undefined;
   const candidate = owner as Record<string, unknown>;
-  if (candidate.kind !== "workflow") throw new Error("owner.kind must be workflow");
-  const value = (key: keyof Omit<TaskOwner, "kind">) => {
+  if (candidate.kind !== "workflow" && candidate.kind !== "pr") throw new Error("owner.kind must be workflow or pr");
+  const value = (key: string) => {
     const entry = candidate[key];
     if (typeof entry !== "string" || !entry.trim()) throw new Error(`owner.${key} must be a non-empty string`);
     return entry.trim().slice(0, 128);
   };
-  return { kind: "workflow", runId: value("runId"), stepId: value("stepId"), attemptId: value("attemptId") };
+  return candidate.kind === "pr"
+    ? { kind: "pr", key: value("key"), signature: value("signature") }
+    : { kind: "workflow", runId: value("runId"), stepId: value("stepId"), attemptId: value("attemptId") };
 }
 
 /** Metadata safe for lifecycle/RPC status channels; never includes the in-memory result. */
-const boundedOwner = (owner?: TaskOwner): TaskOwner | undefined => owner ? {
-  kind: "workflow", runId: owner.runId.slice(0, 128), stepId: owner.stepId.slice(0, 128), attemptId: owner.attemptId.slice(0, 128),
-} : undefined;
+const boundedOwner = (owner?: TaskOwner): TaskOwner | undefined => owner?.kind === "pr"
+  ? { kind: "pr", key: owner.key.slice(0, 128), signature: owner.signature.slice(0, 128) }
+  : owner ? { kind: "workflow", runId: owner.runId.slice(0, 128), stepId: owner.stepId.slice(0, 128), attemptId: owner.attemptId.slice(0, 128) } : undefined;
 
 export function taskMetadata(task: TaskHandle): Record<string, unknown> {
   return {
