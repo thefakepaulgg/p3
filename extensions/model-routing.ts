@@ -288,10 +288,15 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }, { deliverAs: "steer", triggerTurn: true });
   };
 
+  const hasAuth = (ctx: ExtensionContext, provider: string, id: string) => {
+    const model = ctx.modelRegistry.find(provider, id);
+    return !!model && ctx.modelRegistry.hasConfiguredAuth(model);
+  };
+
   const availableRoute = (ctx: ExtensionContext, name: RouteName) => {
     const route = routes[name];
-    const model = ctx.modelRegistry.find(route.provider, route.model);
-    return !!model && ctx.modelRegistry.hasConfiguredAuth(model);
+    return hasAuth(ctx, route.provider, route.model) ||
+      (name === "sol" && hasAuth(ctx, "openai", route.model));
   };
 
   const resolveRoute = (ctx: ExtensionContext, requested: string, explicit: boolean, effort?: ThinkingLevel) => {
@@ -299,7 +304,12 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       const plan = planFallback(requested as RouteName, explicit, (name) => availableRoute(ctx, name));
       if ("error" in plan) throw new Error(plan.error);
       const config = routes[plan.route];
-      return { ...plan, config: effort ? { ...config, thinking: effort } : config };
+      const provider = plan.route === "sol" && !hasAuth(ctx, config.provider, config.model) ? "openai" : config.provider;
+      return { ...plan, config: { ...config, provider, thinking: effort ?? config.thinking } };
+    }
+
+    if (requested === "openai/gpt-6-sol" && hasAuth(ctx, "openai-codex", "gpt-6-sol")) {
+      throw new Error("openai-codex/gpt-6-sol is available; use route 'sol' or 'openai-codex/gpt-6-sol' instead of openai/gpt-6-sol");
     }
 
     const slash = requested.indexOf("/");
