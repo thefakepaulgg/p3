@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Route } from "./policy.ts";
-import { buildCompletionMessage, COMPLETION_KIND, isActiveTask, type TaskHandle } from "./state.ts";
+import { buildCompletionMessage, buildInterruptedMessage, COMPLETION_KIND, isActiveTask, type TaskHandle } from "./state.ts";
 import { readIncrementalUsage } from "./usage.ts";
 
 export type RoutedWorkerCapability = "memory";
@@ -273,22 +273,35 @@ export async function runHerdr(pi: ExtensionAPI, args: string[], timeout: number
   return request.textResult ? request.textResult(response) : JSON.stringify(response);
 }
 
-export function readHerdrResult(sessionPath?: string): string {
-  if (!sessionPath || !existsSync(sessionPath)) return "";
+/**
+ * Pi ends an Esc-interrupted turn with an empty assistant message: stopReason "aborted" from
+ * agent core, or "error" with the AbortError text ("This operation was aborted") when the
+ * provider request was cancelled mid-stream.
+ */
+const isAbortedAssistant = (message: any) =>
+  message?.stopReason === "aborted" || (message?.stopReason === "error" && /\baborted\b/i.test(String(message?.errorMessage ?? "")));
+
+/** Latest assistant text, and whether the latest assistant message ended the turn by interrupt. */
+export function readHerdrTurn(sessionPath?: string): { result: string; aborted: boolean } {
+  if (!sessionPath || !existsSync(sessionPath)) return { result: "", aborted: false };
   const lines = readFileSync(sessionPath, "utf8").split("\n").filter(Boolean);
+  let aborted: boolean | undefined;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     try {
       const entry = JSON.parse(lines[i]);
       const message = entry?.type === "message" ? entry.message : undefined;
       if (message?.role !== "assistant") continue;
+      aborted ??= isAbortedAssistant(message);
       const text = Array.isArray(message.content)
         ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n")
         : typeof message.content === "string" ? message.content : "";
-      if (text.trim()) return text.trim();
+      if (text.trim()) return { result: text.trim(), aborted };
     } catch { /* ignore incomplete JSONL tail */ }
   }
-  return "";
+  return { result: "", aborted: aborted ?? false };
 }
+
+export const readHerdrResult = (sessionPath?: string): string => readHerdrTurn(sessionPath).result;
 
 export const shouldCloseCompletedPane = (retention?: "keep" | "close") => retention === "close";
 
@@ -312,6 +325,8 @@ export function watchHerdrTask(options: {
   void (async () => {
     let sawWorking = false;
     let blockedNotified = false;
+    // A restarted watcher must not re-announce an interrupt that was already reported.
+    let interruptNotified = task.state === "interrupted";
     let advisoryNotified = false;
     let consecutivePollErrors = 0;
     const advisoryAt = Date.now() + 30 * 60_000;
@@ -323,7 +338,7 @@ export function watchHerdrTask(options: {
         const status = agent?.agent_status as string | undefined;
         const sessionPath = agent?.agent_session?.value as string | undefined;
         // Background tasks never complete, so skip re-reading their ever-growing session log.
-        const result = task.background ? "" : readHerdrResult(sessionPath);
+        const { result, aborted } = task.background ? { result: "", aborted: false } : readHerdrTurn(sessionPath);
         const usage = readIncrementalUsage(sessionPath, {
           sessionPath: task.sessionPath,
           offset: task.usageOffset ?? 0,
@@ -332,7 +347,8 @@ export function watchHerdrTask(options: {
         });
         if (usage.changed) update({ sessionPath: usage.sessionPath, usageOffset: usage.offset, estimatedCost: usage.cost, costKnown: usage.costKnown }, false);
         consecutivePollErrors = 0;
-        if (status === "working") { sawWorking = true; blockedNotified = false; update({ state: "running" }, task.state !== "running"); }
+        const settled = (status === "idle" || status === "done") && (sawWorking || (!!result && result !== baselineResult));
+        if (status === "working") { sawWorking = true; blockedNotified = false; interruptNotified = false; update({ state: "running" }, task.state !== "running"); }
         else if (status === "blocked") {
           update({ state: "blocked" }, task.state !== "blocked");
           if (!blockedNotified) {
@@ -344,7 +360,15 @@ export function watchHerdrTask(options: {
         } else if (task.background) {
           // Background subagents idle between self-triggered turns; idle is not completion.
           if (task.state !== "running") update({ state: "running" });
-        } else if ((status === "idle" || status === "done") && (sawWorking || (!!result && result !== baselineResult))) {
+        } else if (settled && aborted) {
+          // Esc in the pane is not completion: keep watching so a resumed turn can still complete.
+          if (!interruptNotified) {
+            interruptNotified = true;
+            const episode = (task.interruptedEpisodes ?? 0) + 1;
+            update({ state: "interrupted", interruptedEpisodes: episode });
+            notify(`interrupted#${episode}`, buildInterruptedMessage(task, result));
+          }
+        } else if (settled) {
           update({ state: "completed", endedAt: Date.now(), resultChars: result.length, result });
           if (shouldCloseCompletedPane(task.paneRetention) && task.paneId && !task.paneClosedAt) {
             const closed = await runHerdr(pi, ["pane", "close", task.paneId], 5000).then(() => true).catch(() => false);

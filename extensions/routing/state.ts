@@ -2,7 +2,8 @@ import type { RouteName, ThinkingLevel } from "./policy.ts";
 import type { TaskPhase } from "./workflow.ts";
 import { formatEstimatedCost } from "./usage.ts";
 
-export type TaskState = "queued" | "running" | "blocked" | "completed" | "failed" | "stopped" | "abandoned";
+/** interrupted: the user pressed Esc in the pane mid-task; the agent is idle but the task is unfinished and still watched. */
+export type TaskState = "queued" | "running" | "blocked" | "interrupted" | "completed" | "failed" | "stopped" | "abandoned";
 
 /** Bounded correlation metadata supplied by workflow callers over routing RPC. */
 export interface TaskOwner {
@@ -57,6 +58,7 @@ export interface TaskHandle {
   completionNotifiedAt?: number;
   completionDeliveredVia?: CompletionDelivery;
   blockedEpisodes?: number;
+  interruptedEpisodes?: number;
 }
 
 export type CompletionDelivery = "message" | "manual";
@@ -105,6 +107,7 @@ export function taskMetadata(task: TaskHandle): Record<string, unknown> {
 
 export function recommendEscalation(task: Pick<TaskHandle, "state" | "route" | "fallbackFrom" | "resultChars" | "error">): string | undefined {
   if (task.state === "blocked") return "Steer the Herdr agent with the missing decision or inspect its pane.";
+  if (task.state === "interrupted") return "Its output is partial, not a result. Steer it to resume, or stop it.";
   if (task.error && /auth|credential|model|unavailable/i.test(task.error)) return "Resolve model credentials or explicitly select an available route; do not silently substitute an explicit route.";
   if (task.state === "failed" || task.state === "stopped" || task.state === "abandoned") return "Return the evidence to the Sol primary and reassess scope or quality needs.";
   if (task.state === "completed" && (task.resultChars ?? 0) < 40) return "The result is unusually short; verify it before reporting completion.";
@@ -165,7 +168,17 @@ export function buildCompletionMessage(task: TaskHandle, result: string): string
   return boundNotification(lines.join("\n"));
 }
 
-const ACTIVE_STATES: TaskState[] = ["queued", "running", "blocked"];
+/** Bounded wake message for a user interrupt; the excerpt is labelled as partial, never as a result. */
+export function buildInterruptedMessage(task: TaskHandle, lastOutput: string): string {
+  const body = lastOutput.trim();
+  const lines = [`Subagent ${task.handle} was interrupted by the user (${truncate(task.label, 80)}) before finishing its task.`];
+  if (body) lines.push(`Last partial output: ${truncate(body, COMPLETION_EXCERPT_LIMIT)}`);
+  if (task.escalation) lines.push(truncate(task.escalation, 240));
+  if (task.paneId) lines.push(`Pane ${task.paneId} is still open and watched; a resumed turn will report completion.`);
+  return boundNotification(lines.join("\n"));
+}
+
+const ACTIVE_STATES: TaskState[] = ["queued", "running", "blocked", "interrupted"];
 export const isActiveTask = (task: Pick<TaskHandle, "state">) => ACTIVE_STATES.includes(task.state);
 
 /** Widget key used for the routed-task status widget. */
@@ -174,7 +187,7 @@ export const WIDGET_MAX_ROWS = 4;
 export const WIDGET_RECENT_WINDOW_MS = 30 * 60_000;
 
 const STATE_MARKER: Record<TaskState, string> = {
-  queued: "○", running: "●", blocked: "◆", completed: "✓", failed: "×", stopped: "−", abandoned: "?",
+  queued: "○", running: "●", blocked: "◆", interrupted: "‖", completed: "✓", failed: "×", stopped: "−", abandoned: "?",
 };
 
 export function formatElapsed(ms: number): string {
@@ -203,6 +216,7 @@ export function formatTaskRow(task: TaskWidgetItem, now: number): string {
   if (cost) parts.push(cost);
   if (task.background && isActiveTask(task)) parts.push("background");
   if (task.state === "blocked") parts.push("needs input");
+  else if (task.state === "interrupted") parts.push("interrupted");
   else if (task.state === "failed" || task.state === "abandoned") parts.push(task.state);
   else if (task.paneClosedAt) parts.push("closed");
   return truncate(parts.join(" · "), 120);
@@ -246,6 +260,6 @@ export function telemetryRecord(task: TaskHandle): Record<string, unknown> {
     escalation: task.escalation?.slice(0, 240), transitions: task.transitions,
     notifiedStates: (task.notifiedStates ?? []).slice(-NOTIFIED_KIND_LIMIT).map(notificationKind),
     completionNotifiedAt: task.completionNotifiedAt, completionDeliveredVia: task.completionDeliveredVia,
-    blockedEpisodes: task.blockedEpisodes,
+    blockedEpisodes: task.blockedEpisodes, interruptedEpisodes: task.interruptedEpisodes,
   };
 }

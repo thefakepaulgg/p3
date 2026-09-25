@@ -8,7 +8,8 @@ const lifecycleStates = new Set<TaskState>(["queued", "running", "blocked", "com
 
 /** Emit bounded task lifecycle metadata without ever including the in-memory worker result. */
 export function emitTaskLifecycle(events: LifecycleEventBus, task: TaskHandle, state: TaskState = task.state): void {
-  const lifecycleState = state === "abandoned" ? "failed" : state;
+  // Workflows treat an interrupted worker like a blocked one: waiting for input, not terminal.
+  const lifecycleState = state === "abandoned" ? "failed" : state === "interrupted" ? "blocked" : state;
   if (!lifecycleStates.has(lifecycleState)) return;
   events.emit(`routing:task:${lifecycleState}`, { version: ROUTING_RPC_VERSION, ...taskMetadata(task) });
 }

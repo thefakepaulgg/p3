@@ -149,7 +149,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       const current = widgetData();
       if (!current.lines.length) return [];
       const theme = ctx.ui.theme;
-      const markerColor = { "○": "muted", "●": "accent", "◆": "warning", "✓": "success", "×": "error", "−": "dim", "?": "warning", "↩": "accent" } as const;
+      const markerColor = { "○": "muted", "●": "accent", "◆": "warning", "‖": "warning", "✓": "success", "×": "error", "−": "dim", "?": "warning", "↩": "accent" } as const;
       const title = typeof theme.bold === "function" ? theme.bold(current.lines[0]) : current.lines[0];
       // Keep the whole frame dim; only the title carries the accent color.
       const rendered = [`${theme.fg("dim", "╭─")} ${theme.fg("accent", title)}`];
@@ -161,7 +161,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         const marker = line[0] ?? "?";
         const segments = line.slice(2).split(" · ");
         const label = segments.shift() ?? "";
-        const meta = segments.map((segment) => theme.fg(segment === "needs input" || segment === "failed" || segment === "abandoned" ? "warning" : "muted", segment)).join(theme.fg("dim", " · "));
+        const meta = segments.map((segment) => theme.fg(segment === "needs input" || segment === "interrupted" || segment === "failed" || segment === "abandoned" ? "warning" : "muted", segment)).join(theme.fg("dim", " · "));
         const color = markerColor[marker as keyof typeof markerColor] ?? "muted";
         const branch = current.targets[index]?.handle === selectedHandle ? theme.fg("accent", "›") : theme.fg("dim", "│");
         rendered.push(`${branch} ${theme.fg(color, marker)} ${theme.fg("text", label)}${meta ? `${theme.fg("dim", " · ")}${meta}` : ""}`);
