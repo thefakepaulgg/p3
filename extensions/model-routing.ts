@@ -288,10 +288,15 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }, { deliverAs: "steer", triggerTurn: true });
   };
 
+  const hasAuth = (ctx: ExtensionContext, provider: string, id: string) => {
+    const model = ctx.modelRegistry.find(provider, id);
+    return !!model && ctx.modelRegistry.hasConfiguredAuth(model);
+  };
+
   const availableRoute = (ctx: ExtensionContext, name: RouteName) => {
     const route = routes[name];
-    const model = ctx.modelRegistry.find(route.provider, route.model);
-    return !!model && ctx.modelRegistry.hasConfiguredAuth(model);
+    return hasAuth(ctx, route.provider, route.model) ||
+      (route.provider === "openai-codex" && hasAuth(ctx, "openai", route.model));
   };
 
   const resolveRoute = (ctx: ExtensionContext, requested: string, explicit: boolean, effort?: ThinkingLevel) => {
@@ -299,7 +304,12 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       const plan = planFallback(requested as RouteName, explicit, (name) => availableRoute(ctx, name));
       if ("error" in plan) throw new Error(plan.error);
       const config = routes[plan.route];
-      return { ...plan, config: effort ? { ...config, thinking: effort } : config };
+      const provider = config.provider === "openai-codex" && !hasAuth(ctx, config.provider, config.model) ? "openai" : config.provider;
+      return { ...plan, config: { ...config, provider, thinking: effort ?? config.thinking } };
+    }
+
+    if (requested.startsWith("openai/") && hasAuth(ctx, "openai-codex", requested.slice("openai/".length))) {
+      throw new Error(`openai-codex/${requested.slice("openai/".length)} is available; use it instead of ${requested}`);
     }
 
     const slash = requested.indexOf("/");
