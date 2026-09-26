@@ -155,25 +155,35 @@ function graphqlQuery(subscriptions: Subscription[]): string {
   return `query PiPullRequestWatch { ${selections.join("\n")} }`;
 }
 
-function describeChanges(previous: PullRequestSnapshot, current: PullRequestData): string[] {
-  const next = snapshotOf(current);
-  const changes: string[] = [];
+type PrChanges = { attention: string[]; routine: string[] };
 
-  if (previous.state !== next.state) changes.push(`State changed: ${previous.state} → ${next.state}`);
-  if (previous.headRefOid !== next.headRefOid) changes.push(`New commits pushed: ${previous.headRefOid.slice(0, 7)} → ${next.headRefOid.slice(0, 7)}`);
-  if (previous.reviewDecision !== next.reviewDecision) changes.push(`Review decision: ${previous.reviewDecision ?? "none"} → ${next.reviewDecision ?? "none"}`);
-  if (previous.mergeStateStatus !== next.mergeStateStatus) changes.push(`Merge status: ${previous.mergeStateStatus} → ${next.mergeStateStatus}`);
+const failedCheck = (value: string | undefined) => value !== undefined &&
+  ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"].includes(value.split("/").at(-1)!);
+
+export function describeChanges(previous: PullRequestSnapshot, current: PullRequestData): PrChanges {
+  const next = snapshotOf(current);
+  const attention: string[] = [];
+  const routine: string[] = [];
+
+  if (previous.state !== next.state) attention.push(`State changed: ${previous.state} → ${next.state}`);
+  if (previous.headRefOid !== next.headRefOid) routine.push(`new commits (${previous.headRefOid.slice(0, 7)} → ${next.headRefOid.slice(0, 7)})`);
+  if (previous.reviewDecision !== next.reviewDecision) attention.push(`Review decision: ${previous.reviewDecision ?? "none"} → ${next.reviewDecision ?? "none"}`);
+  if (previous.mergeStateStatus !== next.mergeStateStatus) {
+    if (previous.mergeStateStatus === "DIRTY" || next.mergeStateStatus === "DIRTY") {
+      attention.push(`Merge status: ${previous.mergeStateStatus} → ${next.mergeStateStatus}`);
+    } else routine.push("merge status updated");
+  }
 
   const knownComments = new Set(previous.commentIds);
   for (const comment of commentsOf(current).filter((item) => !knownComments.has(item.id))) {
-    changes.push(`New comment by @${comment.author?.login ?? "unknown"}: ${bounded(comment.body.trim())}\n${comment.url}`);
+    attention.push(`New comment by @${comment.author?.login ?? "unknown"}: ${bounded(comment.body.trim())}\n${comment.url}`);
   }
 
   for (const review of current.reviews.nodes) {
     const value = `${review.state}:${review.submittedAt ?? ""}`;
     if (previous.reviews[review.id] === value) continue;
     const body = review.body.trim() ? ` — ${bounded(review.body.trim())}` : "";
-    changes.push(`Review ${review.state.toLowerCase()} by @${review.author?.login ?? "unknown"}${body}\n${review.url}`);
+    attention.push(`Review ${review.state.toLowerCase()} by @${review.author?.login ?? "unknown"}${body}\n${review.url}`);
   }
 
   const checks = current.commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [];
@@ -183,10 +193,23 @@ function describeChanges(previous: PullRequestSnapshot, current: PullRequestData
     if (previous.checks[key] === value) continue;
     const name = check.name ?? check.context ?? "unknown check";
     const url = check.detailsUrl ?? check.targetUrl;
-    changes.push(`Check ${name}: ${previous.checks[key] ?? "new"} → ${value}${url ? `\n${url}` : ""}`);
+    if (failedCheck(value) || failedCheck(previous.checks[key])) {
+      attention.push(`Check ${name}: ${previous.checks[key] ?? "new"} → ${value}${url ? `\n${url}` : ""}`);
+    } else {
+      routine.push(value === "COMPLETED/SUCCESS" || value === "SUCCESS" ? "checks passed" : "checks running");
+    }
   }
 
-  return changes;
+  return { attention, routine: [...new Set(routine.filter((event) => event !== "checks passed" || !routine.includes("checks running")))] };
+}
+
+/** Replace an older routine line for this PR without touching its attention updates. */
+export function queuePrChanges(pending: string[], key: string, title: string, url: string, changes: PrChanges): string[] {
+  const prefix = `${key}: `;
+  const next = pending.filter((line) => !changes.routine.length || !line.startsWith(prefix));
+  if (changes.attention.length) next.push(`${key} — ${title}\n${url}\n${changes.attention.map((change) => `- ${change}`).join("\n")}`);
+  if (changes.routine.length) next.push(`${prefix}${changes.routine.join("; ")}`);
+  return next;
 }
 
 export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void {
@@ -406,7 +429,6 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
         }
         const results = await fetchPullRequests(queriedSubscriptions);
         if (generation !== lifecycleGeneration) return;
-        const updates: string[] = [];
         let changed = false;
         const retained: Subscription[] = [];
 
@@ -426,7 +448,10 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
               : undefined;
             if (milestone) milestones.push(`${subscription.repository}#${subscription.number} was ${milestone}: ${pullRequest.url}`);
             const changes = describeChanges(subscription.snapshot, pullRequest);
-            if (changes.length) updates.push(`${subscription.repository}#${subscription.number} — ${pullRequest.title}\n${pullRequest.url}\n${changes.map((change) => `- ${change}`).join("\n")}`);
+            if (changes.attention.length || changes.routine.length) {
+              pending = queuePrChanges(pending, `${subscription.repository}#${subscription.number}`, pullRequest.title, pullRequest.url, changes);
+              changed = true;
+            }
           }
 
           const snapshot = snapshotOf(pullRequest);
@@ -447,11 +472,6 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
         }
         // Approvals and merges interrupt immediately; everything else waits for a quiet moment.
         if (milestones.length) deliverNow(`Pull request milestone:\n${milestones.map((line) => `- ${line}`).join("\n")}\n\nFollow up on work that was waiting for this.`);
-        if (updates.length) {
-          pending.push(...updates);
-          changed = true;
-        }
-
         subscriptions = retained;
         if (changed) persist();
         updateStatus();
@@ -486,7 +506,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
   pi.registerTool({
     name: "pr_subscribe",
     label: "Subscribe to Pull Request",
-    description: `Subscribe this Pi session to a GitHub PR. It checks once per minute and starts bounded unattended fixes for failed checks and trusted review feedback (including configured review bots). Approvals, merges, and fixes that need parent review wake the session immediately; other updates and fix results are held until the conversation has been quiet for 5 minutes, then delivered as one batch. Comments containing ${PI_AGENT_MARKER} never trigger fixes.`,
+    description: `Subscribe this Pi session to a GitHub PR. It checks once per minute and starts bounded unattended fixes for failed checks and trusted review feedback (including configured review bots). Approvals, merges, and fixes that need parent review wake the session immediately; actionable updates, routine PR summaries, and fix results are held until the conversation has been quiet for 5 minutes, then delivered as one batch. Comments containing ${PI_AGENT_MARKER} never trigger fixes.`,
     promptSnippet: "Subscribe this session to a relevant GitHub pull request",
     promptGuidelines: [
       "Subscribe whenever you create, update, review, or wait on a pull request relevant to the current work.",
