@@ -8,6 +8,7 @@ import { parseJson, requestHerdrSocket, runHerdr, waitForHerdrAgentReady } from 
 const WorkspaceAgentParams = Type.Object({
   action: StringEnum(["create", "open"] as const, { description: "Create a worktree or open an existing one as a Herdr workspace" }),
   branch: Type.Optional(Type.String({ minLength: 1, description: "Branch to create or open" })),
+  repo: Type.Optional(Type.String({ minLength: 1, description: "Repository checkout path. Omit to use the current workspace's repository." })),
   path: Type.Optional(Type.String({ minLength: 1, description: "Existing worktree path (open only)" })),
   task: Type.String({ minLength: 1, description: "Initial assignment for the independent agent" }),
   description: Type.String({ minLength: 1, maxLength: 80, description: "Agent/workspace label" }),
@@ -39,14 +40,18 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "workspace_agent",
     label: "Workspace Agent",
-    description: "At the user's request, create or open a Git worktree in its own Herdr workspace and start an independent Pi agent there. Unlike a subagent, it remains available for direct interaction and does not report completion here. Uses Herdr's socket API, not the CLI.",
+    description: "At the user's request, create or open a Git worktree from the current or a specified repository in its own Herdr workspace and start an independent Pi agent there. Unlike a subagent, it remains available for direct interaction and does not report completion here. Uses Herdr's socket API, not the CLI.",
     parameters: WorkspaceAgentParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const { workspaceId } = requirePane();
       if (params.action === "create" && params.path) throw new Error("path is only supported when opening a worktree");
       if (params.action === "open" && (!!params.branch === !!params.path)) throw new Error("Open by exactly one of branch or path");
+      const listed = await requestHerdrSocket("worktree.list", params.repo
+        ? { cwd: resolve(ctx.cwd, params.repo) }
+        : { workspace_id: workspaceId }, 5000);
+      const source = listed.result.source as { source_workspace_id?: string; repo_root: string };
       const result = await requestHerdrSocket(`worktree.${params.action}`, {
-        workspace_id: workspaceId,
+        ...(source.source_workspace_id ? { workspace_id: source.source_workspace_id } : { cwd: source.repo_root }),
         ...(params.branch ? { branch: params.branch } : {}),
         ...(params.path ? { path: resolve(ctx.cwd, params.path) } : {}),
         label: params.description,
