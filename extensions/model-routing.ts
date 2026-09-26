@@ -14,6 +14,7 @@ import { manifestPathForPane, readRoutingManifest, restoreTaskHandle, ROUTING_MA
 import { focusManifestPane, RoutedTaskWidget } from "./routing/navigator.ts";
 import { inboxPath, sendParentMessage, startParentInbox } from "./routing/messages.ts";
 import { formatEstimatedCost, sumSessionCost } from "./routing/usage.ts";
+import { registerIndependentAgentTools } from "./routing/independent.ts";
 
 const RouteParams = Type.Object({
   action: StringEnum(["status", "recommend"] as const),
@@ -352,6 +353,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }, ctx, params, owner);
     return { content: [{ type: "text" as const, text: result.text }], details: result.details };
   };
+
+  registerIndependentAgentTools(pi);
 
   pi.registerTool({
     name: "message_parent",

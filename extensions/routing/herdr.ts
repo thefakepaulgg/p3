@@ -416,7 +416,7 @@ const isHerdrAgentReady = (agent: any): boolean => {
   return ["working", "done", "blocked"].includes(String(agent.agent_status ?? ""));
 };
 
-async function waitForHerdrAgentReady(pi: ExtensionAPI, agentName: string, timeout = HERDR_AGENT_READY_TIMEOUT_MS): Promise<void> {
+export async function waitForHerdrAgentReady(pi: ExtensionAPI, agentName: string, timeout = HERDR_AGENT_READY_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeout;
   let lastState = "no agent state";
   let observedAgent = false;

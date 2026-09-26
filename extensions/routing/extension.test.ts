@@ -71,7 +71,7 @@ test("registers the simplified public surface", () => {
     events: { on: () => () => {}, emit: () => {} }, exec: async () => ({ code: 0, stdout: "{}", stderr: "" }),
   };
   routing(fake);
-  expect(tools.map((tool) => tool.name)).toEqual(["subagent", "subagent_control", "model_route"]);
+  expect(tools.map((tool) => tool.name)).toEqual(["workspace_agent", "message_agent", "message_parent", "subagent", "subagent_control", "model_route"]);
   const properties = tools.find((tool) => tool.name === "subagent").parameters.properties;
   expect(properties.surface).toBeUndefined();
   expect(properties.isolation).toBeUndefined();
