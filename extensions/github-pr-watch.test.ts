@@ -37,6 +37,8 @@ describe("PR watch updates", () => {
     const first = queuePrChanges([], "example/repo#4", "PR", previous.url, queued);
     const next = queuePrChanges(first, "example/repo#4", "PR", previous.url, passed);
     expect(next).toEqual(["example/repo#4: new commits (abc1234 → def5678); checks passed"]);
+    expect(queuePrChanges(next, "example/repo#4", "PR", previous.url, { attention: [], routine: ["checks running"] }))
+      .toEqual(["example/repo#4: new commits (abc1234 → def5678); checks running"]);
   });
 
   test("forwards failed checks and recovery in full with links", () => {

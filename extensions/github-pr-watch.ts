@@ -206,9 +206,15 @@ export function describeChanges(previous: PullRequestSnapshot, current: PullRequ
 /** Replace an older routine line for this PR without touching its attention updates. */
 export function queuePrChanges(pending: string[], key: string, title: string, url: string, changes: PrChanges): string[] {
   const prefix = `${key}: `;
+  const older = pending.findLast((line) => line.startsWith(prefix));
   const next = pending.filter((line) => !changes.routine.length || !line.startsWith(prefix));
   if (changes.attention.length) next.push(`${key} — ${title}\n${url}\n${changes.attention.map((change) => `- ${change}`).join("\n")}`);
-  if (changes.routine.length) next.push(`${prefix}${changes.routine.join("; ")}`);
+  if (changes.routine.length) {
+    const previousCommit = older?.slice(prefix.length).split("; ").find((event) => event.startsWith("new commits ("));
+    const routine = previousCommit && !changes.routine.some((event) => event.startsWith("new commits ("))
+      ? [previousCommit, ...changes.routine] : changes.routine;
+    next.push(`${prefix}${routine.join("; ")}`);
+  }
   return next;
 }
 
