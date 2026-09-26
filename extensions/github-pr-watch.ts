@@ -227,7 +227,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
     activeContext.ui.setStatus(
       "github-pr-watch",
       subscriptions.length || pending.length
-        ? activeContext.ui.theme.fg(pending.length ? "warning" : "muted", `PRs ${subscriptions.length}${pending.length ? ` · ${pending.length} update${pending.length === 1 ? "" : "s"} pending (/pr-flush)` : ""}`)
+        ? activeContext.ui.theme.fg("muted", `PRs ${subscriptions.length}${pending.length ? ` · ${pending.length} update${pending.length === 1 ? "" : "s"} queued` : ""}`)
         : undefined,
     );
   };
