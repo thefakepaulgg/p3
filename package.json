@@ -15,6 +15,7 @@
   "pi": {
     "extensions": [
       "./extensions/advisor.ts",
+      "./extensions/agent-grants.ts",
       "./extensions/claude-connectors.ts",
       "./extensions/github-pr-watch.ts",
       "./extensions/jev-compaction.ts",
