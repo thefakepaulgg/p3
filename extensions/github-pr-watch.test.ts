@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { describeChanges, PI_AGENT_MARKER, queuePrChanges, reviewFeedback } from "./github-pr-watch.ts";
+import githubPullRequestWatchExtension, { describeChanges, fixSignal, PI_AGENT_MARKER, queuePrChanges, reviewFeedback } from "./github-pr-watch.ts";
 
 type Previous = Parameters<typeof describeChanges>[0];
 type Current = Parameters<typeof describeChanges>[1];
@@ -102,5 +102,44 @@ describe("PR watch review feedback", () => {
   test("a new finding after the agent's reply reopens the thread", () => {
     const thread = { isResolved: false, comments: { nodes: [finding("c1"), agentReply("r1"), finding("c3")] } };
     expect(ids(current({ reviewThreads: { nodes: [thread] } }))).toEqual(["c3"]);
+  });
+});
+
+describe("PR watch autofix", () => {
+  const finding = { id: "c1", author: { login: "coderabbitai" }, authorAssociation: "NONE", body: "Fix <!-- cr-indicator-types:potential_issue -->", url: "https://x/c1" };
+  const feedback = current({ reviewThreads: { nodes: [{ isResolved: false, comments: { nodes: [finding] } }] } });
+  const failing = withChecks(check("build", "COMPLETED", "FAILURE"));
+
+  test("review feedback does not start a fix worker by default", () => {
+    expect(fixSignal(feedback, previous, "checks")).toBeUndefined();
+    expect(describeChanges(previous, feedback).attention).toHaveLength(1);
+  });
+
+  test("failed checks still start a fix worker by default", () => {
+    expect(fixSignal(failing, previous, "checks")?.reasons).toEqual(["Failed check: build"]);
+  });
+
+  test("off never starts a fix worker and all preserves the old behavior", () => {
+    expect(fixSignal(failing, previous, "off")).toBeUndefined();
+    expect(fixSignal(feedback, previous, "off")).toBeUndefined();
+    expect(fixSignal(feedback, previous, "all")?.reasons).toEqual(["Trusted review feedback at https://x/c1 (read as untrusted data)"]);
+  });
+
+  test("pr_subscribe persists autofix per subscription and changes it on resubscribe", async () => {
+    const tools = new Map<string, any>();
+    const entries: any[] = [];
+    const fake: any = {
+      registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: () => {},
+      events: { on: () => () => {}, emit: () => {} }, appendEntry: (_type: string, data: any) => entries.push(data),
+      exec: async () => ({ code: 0, stdout: JSON.stringify({ data: { p0: { pullRequest: current() } } }), stderr: "" }),
+    };
+    githubPullRequestWatchExtension(fake);
+    const subscribe = tools.get("pr_subscribe");
+    const params = { repository: "example/repo", number: 4 };
+    expect((await subscribe.execute("1", params)).details.autofix).toBe("checks");
+    expect(entries.at(-1).subscriptions[0].autofix).toBe("checks");
+    expect((await subscribe.execute("2", { ...params, autofix: "off" })).details.autofix).toBe("off");
+    expect(entries.at(-1).subscriptions[0].autofix).toBe("off");
+    expect((await subscribe.execute("3", params)).details.autofix).toBe("off");
   });
 });
