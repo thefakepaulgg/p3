@@ -110,6 +110,10 @@ const TRUSTED_REVIEW_BOTS = ["coderabbitai"];
 export const PI_AGENT_MARKER = "<!-- pi-agent -->";
 
 const keyOf = ({ repository, number }: PullRequestKey) => `${repository.toLowerCase()}#${number}`;
+const discardPendingFor = (pending: string[], key: string) => pending.filter((line) => {
+  const lower = line.toLowerCase();
+  return !lower.startsWith(`${key}:`) && !lower.startsWith(`${key} —`);
+});
 const bounded = (value: string, limit = BODY_LIMIT) => value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
 const quote = (value: string) => JSON.stringify(value);
 
@@ -505,6 +509,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
           } else {
             changed = true;
             const key = keyOf(subscription);
+            pending = discardPendingFor(pending, key);
             if (jobs[key]?.handle) closures.push({ key, handle: jobs[key].handle! });
             else delete jobs[key];
           }
@@ -608,6 +613,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
         details: { repository: params.repository, number: params.number, subscribed: false },
       };
       const key = keyOf(params);
+      pending = discardPendingFor(pending, key);
       const handle = jobs[key]?.handle;
       if (handle) {
         try { await requestRouting(ROUTING_RPC_CHANNELS.stop, { handle, close_pane: true }, 15_000); delete jobs[key]; }
