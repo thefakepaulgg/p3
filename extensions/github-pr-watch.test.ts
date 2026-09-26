@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { describeChanges, queuePrChanges } from "./github-pr-watch.ts";
+import { describeChanges, PI_AGENT_MARKER, queuePrChanges, reviewFeedback } from "./github-pr-watch.ts";
 
 type Previous = Parameters<typeof describeChanges>[0];
 type Current = Parameters<typeof describeChanges>[1];
@@ -76,5 +76,31 @@ describe("PR watch updates", () => {
     expect(queuePrChanges(pending, "example/repo#4", "PR", previous.url, { attention: [], routine: ["checks passed"] })).toEqual([
       pending[0], pending[2], "example/repo#4: checks passed",
     ]);
+  });
+});
+
+describe("PR watch review feedback", () => {
+  const bot = { login: "coderabbitai" };
+  const finding = (id: string, body = "Fix this <!-- cr-indicator-types:potential_issue -->") =>
+    ({ id, author: bot, authorAssociation: "NONE", body, url: `https://github.com/example/repo/pull/4#${id}` });
+  const agentReply = (id: string) =>
+    ({ id, author: { login: "pi" }, authorAssociation: "MEMBER", body: `Not applicable. ${PI_AGENT_MARKER}`, url: `https://x/${id}` });
+  const summary = { ...finding("review", "**Actionable comments posted: 1**"), state: "COMMENTED", submittedAt: "t" };
+  const ids = (pr: Current) => reviewFeedback(pr).map((item) => item.id);
+
+  test("an open bot finding and its review summary start a fix", () => {
+    const pr = current({ reviewThreads: { nodes: [{ isResolved: false, comments: { nodes: [finding("c1")] } }] }, reviews: { nodes: [summary] } });
+    expect(ids(pr)).toEqual(["c1", "review"]);
+  });
+
+  test("resolved threads and threads the agent already answered are settled", () => {
+    const resolved = { isResolved: true, comments: { nodes: [finding("c1")] } };
+    const answered = { isResolved: false, comments: { nodes: [finding("c2"), agentReply("r2")] } };
+    expect(ids(current({ reviewThreads: { nodes: [resolved, answered] }, reviews: { nodes: [summary] } }))).toEqual([]);
+  });
+
+  test("a new finding after the agent's reply reopens the thread", () => {
+    const thread = { isResolved: false, comments: { nodes: [finding("c1"), agentReply("r1"), finding("c3")] } };
+    expect(ids(current({ reviewThreads: { nodes: [thread] } }))).toEqual(["c3"]);
   });
 });
