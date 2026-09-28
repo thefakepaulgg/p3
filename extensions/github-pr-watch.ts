@@ -557,7 +557,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
     description: `Subscribe this Pi session to a GitHub PR. It checks once per minute. By default (autofix=checks) failed checks start a bounded unattended fix; review feedback is delivered to this session instead. autofix=all also fixes trusted review feedback (including configured review bots); autofix=off never starts fixes. Call again on an existing subscription to change autofix. Approvals, merges, and fixes that need parent review wake the session immediately; actionable updates, routine PR summaries, and fix results are held until the conversation has been quiet for 5 minutes, then delivered as one batch. Comments containing ${PI_AGENT_MARKER} never trigger fixes.`,
     promptSnippet: "Subscribe this session to a relevant GitHub pull request",
     promptGuidelines: [
-      "Subscribe whenever you create, update, review, or wait on a pull request relevant to the current work.",
+      "Subscribe whenever you create, update, review, or wait on a pull request within your assigned task.",
       "When the user asks about or to flush pending PR updates, call pr_flush.",
       `End every comment or reply you post on a subscribed PR with ${PI_AGENT_MARKER} so it does not start a fix worker.`,
     ],
