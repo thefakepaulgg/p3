@@ -15,6 +15,6 @@
       "typebox": ["./node_modules/typebox"]
     }
   },
-  "include": ["extensions/advisor.ts", "extensions/advisor/**/*.ts", "extensions/claude-connectors.ts", "extensions/github-pr-watch.ts", "extensions/model-routing.ts", "extensions/model-style.ts", "extensions/tasks.ts", "extensions/telegram-notify.ts", "extensions/telegram-notify/**/*.ts", "extensions/tutor-mode.ts", "extensions/tutor-mode/**/*.ts", "extensions/routing/**/*.ts", "extensions/workflow-engine.ts", "extensions/workflows/**/*.ts"],
+  "include": ["extensions/advisor.ts", "extensions/agent-grants.ts", "extensions/advisor/**/*.ts", "extensions/claude-connectors.ts", "extensions/github-pr-watch.ts", "extensions/model-routing.ts", "extensions/model-style.ts", "extensions/tasks.ts", "extensions/telegram-notify.ts", "extensions/telegram-notify/**/*.ts", "extensions/tutor-mode.ts", "extensions/tutor-mode/**/*.ts", "extensions/routing/**/*.ts", "extensions/workflow-engine.ts", "extensions/workflows/**/*.ts"],
   "exclude": ["extensions/github-pr-watch.test.ts", "extensions/advisor/**/*.test.ts", "extensions/telegram-notify/**/*.test.ts", "extensions/tutor-mode/**/*.test.ts", "extensions/routing/**/*.test.ts", "extensions/workflows/**/*.test.ts"]
 }
