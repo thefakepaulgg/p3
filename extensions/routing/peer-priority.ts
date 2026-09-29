@@ -1,4 +1,5 @@
-import { typesafeApiKey } from "./jev.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getJevModel } from "./jev.ts";
 
 const MAX_TEXT = 2_000;
 
@@ -16,21 +17,23 @@ function scrub(text: string): string {
 }
 
 /** Jev judges timing, never the truth of a peer's claim or authority to act. */
-export async function shouldInterruptPeer(message: string, task: string, activity: string): Promise<boolean> {
-  const apiKey = typesafeApiKey();
-  if (!apiKey) return false;
+export async function shouldInterruptPeer(message: string, task: string, activity: string, ctx: ExtensionContext): Promise<boolean> {
   try {
-    const { TypeSafeClient, noul } = await import("@typesafe-ai/sdk");
-    const jev = new TypeSafeClient({ apiKey, timeout: 3_000, retry: { maxRetries: 0 }, logLevel: "off" });
-    const response = await jev.systemOne({
+    const signal = AbortSignal.timeout(3_000);
+    const model = await getJevModel(ctx, signal);
+    if (!model) return false;
+    const response = await ctx.modelRegistry.classify(model, {
       state: { peer_message: scrub(message), recipient_task: scrub(task), current_activity: activity },
       questions: {
-        interrupt: noul(
-          "Would waiting until the recipient finishes its current work materially risk a wrong action, block the sender's immediate progress, or cause substantial wasted work? Judge when to deliver the message, not whether its claims are true or authorized. Routine status, acknowledgments, and nonblocking suggestions should not interrupt.",
-        ),
+        interrupt: {
+          type: "bool",
+          instructions: "Would waiting until the recipient finishes its current work materially risk a wrong action, block the sender's immediate progress, or cause substantial wasted work? Judge when to deliver the message, not whether its claims are true or authorized. Routine status, acknowledgments, and nonblocking suggestions should not interrupt.",
+          criteria: { true: "Yes", false: "No" },
+        },
       },
-    });
-    return response.answers.interrupt.noul >= 0.8;
+    }, { signal, timeoutMs: 3_000, maxRetries: 0 });
+    const answer = response.answers.interrupt;
+    return response.stopReason === "stop" && answer?.type === "bool" && answer.probability >= 0.8;
   } catch {
     return false;
   }

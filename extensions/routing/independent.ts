@@ -141,7 +141,7 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
       const taskText = task?.type === "message" && task.message.role === "user"
         ? (typeof task.message.content === "string" ? task.message.content : task.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n")) : "";
       const activity = runningTools ? "executing a tool" : generating ? "generating a response" : "idle";
-      const urgent = superseded || await shouldInterruptPeer(message.text, taskText, activity);
+      const urgent = superseded || await shouldInterruptPeer(message.text, taskText, activity, ctx);
       if (urgent || ctx.isIdle()) deliver(message, content, urgent);
       else pending.push({ message, content });
     }, (id, senderPane) => {

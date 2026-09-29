@@ -74,7 +74,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const brief = `${description}\n${task}`;
   const phase = inferPhase(brief, params.phase);
   const localDecision = classifyDelegation(brief, phase);
-  const decision = params.route === undefined ? await classifyWithJev(brief, phase, localDecision) : localDecision;
+  const decision = params.route === undefined ? await classifyWithJev(brief, phase, localDecision, ctx) : localDecision;
   deps.recordDecision(task, decision);
   const requestedRoute = params.route?.trim() ?? classifyModelRoute(task, decision);
   const cwd = resolve(params.cwd ?? ctx.cwd);
