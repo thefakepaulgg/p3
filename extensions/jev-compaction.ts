@@ -1,5 +1,4 @@
 import type { ClassifierBoolQuestion, ToolResultMessage } from "@earendil-works/pi-ai";
-import { providerHeadersToRecord } from "@earendil-works/pi-ai/utils/headers";
 import { compact, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getJevModel } from "./routing/jev.ts";
 
@@ -83,7 +82,11 @@ export default function (pi: ExtensionAPI) {
 
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (!auth.ok) return;
-      const result = await compact(preparation, model, auth.apiKey, providerHeadersToRecord(auth.headers), customInstructions, signal, pi.getThinkingLevel(), undefined, auth.env);
+      const headers: Record<string, string> = {};
+      for (const [name, value] of Object.entries(auth.headers ?? {})) {
+        if (value !== null) headers[name] = value;
+      }
+      const result = await compact(preparation, model, auth.apiKey, headers, customInstructions, signal, pi.getThinkingLevel(), undefined, auth.env);
       ctx.ui.setStatus("jev", `jev: compact kept ${kept.length}/${candidates.length} outputs`);
       if (kept.length === 0) return { compaction: result };
 
