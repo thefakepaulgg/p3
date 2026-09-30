@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
-import { buildRoutedWorkerPiArgs, herdrSocketRequestForArgs, launchHerdrAgent, parseJson, readHerdrResult, requestHerdrSocket, resolveHerdrSocketPath, ROUTED_TAB_MAX_PANES, setHerdrTestTransportForTests, shouldCloseCompletedPane, watchHerdrTask } from "./herdr.ts";
+import { buildRoutedWorkerPiArgs, herdrSocketRequestForArgs, launchHerdrAgent, parseJson, readHerdrResult, readHerdrTurn, requestHerdrSocket, resolveHerdrSocketPath, ROUTED_TAB_MAX_PANES, setHerdrTestTransportForTests, shouldCloseCompletedPane, watchHerdrTask } from "./herdr.ts";
 import { routes, type Route } from "./policy.ts";
 import { COMPLETION_KIND, NOTIFICATION_LIMIT, type TaskHandle } from "./state.ts";
 
@@ -216,6 +216,64 @@ describe("watcher notifications", () => {
     expect(task.state).toBe("blocked");
   });
 
+  const assistant = (text: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }], ...extra } });
+  // Observed Pi session tail after Esc: an empty assistant message with the AbortError text.
+  const interruptedTail = assistant("", { stopReason: "error", errorMessage: "This operation was aborted" });
+
+  test("reports a user interrupt as interrupted, not completed, and keeps watching until a resumed turn completes", async () => {
+    temp = mkdtempSync(join(tmpdir(), "routing-watch-"));
+    const sessionPath = join(temp, "session.jsonl");
+    writeFileSync(sessionPath, [assistant("Now the throwaway UI test", { stopReason: "toolUse" }), interruptedTail, ""].join("\n"));
+    let status = "idle";
+    const task = herdrTask();
+    const notifications: Array<{ kind: string; content: string }> = [];
+    const pi: any = {
+      exec: async (_command: string, args: string[]) => ({
+        code: 0, stderr: "",
+        stdout: JSON.stringify({ result: args.slice(0, 2).join(" ") === "agent get" ? { agent: { agent_status: status, agent_session: { value: sessionPath } } } : {} }),
+      }),
+    };
+    const watchers = new Map<string, AbortController>();
+    const originalSetTimeout = globalThis.setTimeout;
+    // Compress the watcher's 1s poll interval so several polls fit in the test.
+    globalThis.setTimeout = ((fn: () => void, _ms?: number) => originalSetTimeout(fn, 5)) as typeof setTimeout;
+    try {
+      watchHerdrTask({ pi, task, watchers, update: (patch) => Object.assign(task, patch), persist: () => {}, notify: (kind, content) => notifications.push({ kind, content }) });
+      const settle = () => new Promise((done) => originalSetTimeout(done, 60));
+      await settle();
+      expect(notifications.map((n) => n.kind)).toEqual(["interrupted#1"]);
+      expect(notifications[0]!.content).toContain("interrupted by the user");
+      expect(notifications[0]!.content).not.toContain(" completed ");
+      expect(task.state).toBe("interrupted");
+      expect(task.result).toBeUndefined();
+      expect(watchers.has(task.handle)).toBe(true);
+
+      status = "working";
+      await settle();
+      expect(task.state).toBe("running");
+      writeFileSync(sessionPath, [interruptedTail, assistant("Verified: final answer", { stopReason: "stop" }), ""].join("\n"));
+      status = "idle";
+      await settle();
+      expect(notifications.map((n) => n.kind)).toEqual(["interrupted#1", COMPLETION_KIND]);
+      expect(task.state).toBe("completed");
+      expect(task.result).toBe("Verified: final answer");
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      watchers.get(task.handle)?.abort();
+    }
+  });
+
+  test("a restarted watcher does not re-announce an interrupt already reported", async () => {
+    temp = mkdtempSync(join(tmpdir(), "routing-watch-"));
+    const file = join(temp, "session.jsonl");
+    writeFileSync(file, [assistant("partial"), interruptedTail, ""].join("\n"));
+    const task = herdrTask({ state: "interrupted", interruptedEpisodes: 1 });
+    const { notifications } = await drive(task, "idle", file);
+    expect(notifications).toHaveLength(0);
+    expect(task.state).toBe("interrupted");
+  });
+
   test("does not abandon a stopped task when an in-flight poll observes a closed agent", async () => {
     const task = herdrTask();
     const notifications: Array<{ kind: string; content: string }> = [];
@@ -266,6 +324,18 @@ describe("Pi session result extraction", () => {
       "",
     ].join("\n"));
     expect(readHerdrResult(file)).toBe("final result");
+  });
+
+  test("flags an interrupted final turn while keeping the last assistant text", () => {
+    temp = mkdtempSync(join(tmpdir(), "routing-test-"));
+    const file = join(temp, "session.jsonl");
+    const line = (message: Record<string, unknown>) => JSON.stringify({ type: "message", message: { role: "assistant", ...message } });
+    writeFileSync(file, [line({ content: [{ type: "text", text: "mid-task" }], stopReason: "toolUse" }), line({ content: [{ type: "text", text: "" }], stopReason: "aborted" }), ""].join("\n"));
+    expect(readHerdrTurn(file)).toEqual({ result: "mid-task", aborted: true });
+    writeFileSync(file, [line({ content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "This operation was aborted" }), ""].join("\n"));
+    expect(readHerdrTurn(file).aborted).toBe(true);
+    writeFileSync(file, [line({ content: [{ type: "text", text: "" }], stopReason: "aborted" }), line({ content: [{ type: "text", text: "done" }], stopReason: "stop" }), ""].join("\n"));
+    expect(readHerdrTurn(file)).toEqual({ result: "done", aborted: false });
   });
 
   test("ignores incomplete tail", () => {

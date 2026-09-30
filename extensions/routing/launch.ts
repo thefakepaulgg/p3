@@ -74,7 +74,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const brief = `${description}\n${task}`;
   const phase = inferPhase(brief, params.phase);
   const localDecision = classifyDelegation(brief, phase);
-  const decision = params.route === undefined ? await classifyWithJev(brief, phase, localDecision) : localDecision;
+  const decision = params.route === undefined ? await classifyWithJev(brief, phase, localDecision, ctx) : localDecision;
   deps.recordDecision(task, decision);
   const requestedRoute = params.route?.trim() ?? classifyModelRoute(task, decision);
   const cwd = resolve(params.cwd ?? ctx.cwd);
@@ -90,7 +90,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   catch (error) { if (params.route !== undefined) deps.routeRetryGuard.record(retryKey, requestedRoute); throw error; }
   deps.routeRetryGuard.clear(retryKey);
 
-  const active = [...deps.taskHandles.values()].filter((item) => !item.background && ["queued", "running", "blocked"].includes(item.state)).length;
+  const active = [...deps.taskHandles.values()].filter((item) => !item.background && ["queued", "running", "blocked", "interrupted"].includes(item.state)).length;
   if (active >= 4) throw new Error("Herdr subagent concurrency limit reached (4 active tasks)");
   const routeName = routePlan.route;
   const route = routePlan.config;

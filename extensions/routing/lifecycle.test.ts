@@ -21,3 +21,9 @@ test("lifecycle events are versioned, state-specific, bounded, and omit full res
   expect(emitted[0][1].owner.runId).toHaveLength(128);
   expect(JSON.stringify(emitted)).not.toContain("must stay in memory only");
 });
+
+test("an interrupted worker is reported to workflows as blocked, not terminal", () => {
+  const emitted: string[] = [];
+  emitTaskLifecycle({ emit: (name) => emitted.push(name) }, task({ state: "interrupted" }));
+  expect(emitted).toEqual(["routing:task:blocked"]);
+});

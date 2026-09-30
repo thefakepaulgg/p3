@@ -15,6 +15,7 @@
   "pi": {
     "extensions": [
       "./extensions/advisor.ts",
+      "./extensions/agent-grants.ts",
       "./extensions/claude-connectors.ts",
       "./extensions/github-pr-watch.ts",
       "./extensions/jev-compaction.ts",
@@ -34,7 +35,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@typesafe-ai/sdk": "^0.6.0",
     "yaml": "^2.9.0"
   },
   "peerDependencies": {

@@ -1,6 +1,6 @@
-import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import type { ClassifierBoolQuestion, ToolResultMessage } from "@earendil-works/pi-ai";
 import { compact, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { typesafeApiKey } from "./routing/jev.ts";
+import { getJevModel } from "./routing/jev.ts";
 
 const MAX_CANDIDATES = 40;
 const SCORE_CHARS = 1_500;
@@ -24,14 +24,17 @@ function resultText(message: ToolResultMessage): string {
  * truncates tool results and paraphrases exact values. Any failure falls back to default compaction.
  */
 export default function (pi: ExtensionAPI) {
-  pi.on("session_start", (_event, ctx) => {
-    if (typesafeApiKey()) ctx.ui.setStatus("jev", "jev: ready");
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      if (await getJevModel(ctx, AbortSignal.timeout(5_000))) ctx.ui.setStatus("jev", "jev: ready");
+    } catch {
+      // Unavailable native auth leaves Jev disabled.
+    }
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
-    const apiKey = typesafeApiKey();
     const model = ctx.model;
-    if (!apiKey || !model) return;
+    if (!model) return;
 
     const { preparation, customInstructions, signal } = event;
     const candidates: Candidate[] = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]
@@ -42,25 +45,31 @@ export default function (pi: ExtensionAPI) {
     if (candidates.length === 0) return;
 
     try {
-      const { TypeSafeClient, noul } = await import("@typesafe-ai/sdk");
-      const jev = new TypeSafeClient({ apiKey, timeout: 15_000, retry: { maxRetries: 0 }, logLevel: "off" });
-      const questions = Object.fromEntries(candidates.map((_, id) => [
-        `keep_${id}`,
-        noul(`Should tool output ${id} be carried forward verbatim after this history is summarized? Yes only if it holds errors, failing test output, exact values, identifiers, or constraints that a prose summary would lose and that cannot cheaply be re-obtained by re-running the tool.`),
-      ]));
-      const { answers } = await jev.systemOne({
-        state: {
-          goal: customInstructions ?? "Continue the ongoing coding task.",
-          previousSummary: preparation.previousSummary?.slice(0, 4_000) ?? null,
-          outputs: candidates.map((candidate, id) => ({ id, tool: candidate.tool, isError: candidate.isError, text: candidate.text.slice(0, SCORE_CHARS) })),
-        },
-        questions,
-      }, { signal });
+      const classificationSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+      const jev = await getJevModel(ctx, classificationSignal);
+      if (!jev) return;
+      const goal = customInstructions ?? "Continue the ongoing coding task.";
+      const question: ClassifierBoolQuestion = {
+        type: "bool",
+        instructions: "Does this tool output contain errors, failing test output, exact values, identifiers, or constraints that a prose summary would lose and that cannot cheaply be re-obtained by re-running the tool?",
+        criteria: { true: "Yes", false: "No" },
+      };
+      // One call per output: batching many outputs into one request compresses the probabilities
+      // (clear keepers scored ~0.55-0.66 batched vs ~0.75-0.86 alone), so nothing cleared the threshold.
+      const scores = await Promise.allSettled(candidates.map((candidate) => ctx.modelRegistry.classify(jev, {
+        state: { goal, output: { tool: candidate.tool, isError: candidate.isError, text: candidate.text.slice(0, SCORE_CHARS) } },
+        questions: { keep: question },
+      }, { signal: classificationSignal, timeoutMs: 15_000, maxRetries: 0 })));
+      if (scores.every((score) => score.status === "rejected" || score.value.stopReason !== "stop" || score.value.answers.keep?.type !== "bool")) return;
 
       // Highest-probability outputs win the budget; they are then shown in original order.
       let budget = RETAINED_BUDGET_CHARS;
       const kept = candidates
-        .map((candidate, id) => ({ ...candidate, id, probability: answers[`keep_${id}`]?.noul ?? 0 }))
+        .map((candidate, id) => {
+          const score = scores[id];
+          const answer = score.status === "fulfilled" && score.value.stopReason === "stop" ? score.value.answers.keep : undefined;
+          return { ...candidate, id, probability: answer?.type === "bool" ? answer.probability : 0 };
+        })
         .filter((candidate) => candidate.probability >= KEEP_PROBABILITY)
         .sort((a, b) => b.probability - a.probability)
         .filter((candidate) => {
@@ -73,7 +82,11 @@ export default function (pi: ExtensionAPI) {
 
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (!auth.ok) return;
-      const result = await compact(preparation, model, auth.apiKey, auth.headers, customInstructions, signal, pi.getThinkingLevel(), undefined, auth.env);
+      const headers: Record<string, string> = {};
+      for (const [name, value] of Object.entries(auth.headers ?? {})) {
+        if (value !== null) headers[name] = value;
+      }
+      const result = await compact(preparation, model, auth.apiKey, headers, customInstructions, signal, pi.getThinkingLevel(), undefined, auth.env);
       ctx.ui.setStatus("jev", `jev: compact kept ${kept.length}/${candidates.length} outputs`);
       if (kept.length === 0) return { compaction: result };
 
