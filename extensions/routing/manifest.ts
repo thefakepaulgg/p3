@@ -10,6 +10,7 @@ export interface ManifestTask {
   agentName: string;
   paneId: string;
   tabId?: string;
+  messageToken?: string;
   route: TaskHandle["route"];
   fallbackFrom?: TaskHandle["fallbackFrom"];
   routeExplicit?: boolean;
@@ -42,6 +43,7 @@ export interface RoutingManifest {
   version: typeof ROUTING_MANIFEST_VERSION;
   parentSessionId: string;
   parentPaneId: string;
+  parentInbox?: string;
   parentSessionPath?: string;
   primaryCost?: number;
   primaryCostKnown?: boolean;
@@ -56,7 +58,7 @@ export const manifestPathForPane = (sessionDir: string, paneId: string) =>
 
 export function restoreTaskHandle(task: ManifestTask): TaskHandle {
   return {
-    handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId,
+    handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, messageToken: task.messageToken,
     route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit ?? false,
     target: task.target ?? "herdr", model: task.model, thinking: task.thinking ?? "medium",
     state: task.state, startedAt: task.startedAt, endedAt: task.endedAt, cwd: task.cwd, phase: task.phase,
@@ -71,7 +73,7 @@ export function restoreTaskHandle(task: ManifestTask): TaskHandle {
 export function taskManifestRecord(task: TaskHandle): ManifestTask | undefined {
   if (!task.agentName || !task.paneId) return undefined;
   return {
-    handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId,
+    handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, messageToken: task.messageToken,
     route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit, target: task.target,
     model: task.model, thinking: task.thinking, state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
     cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn, ownedPaths: task.ownedPaths,

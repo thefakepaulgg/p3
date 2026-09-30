@@ -1,4 +1,6 @@
 import { StringEnum } from "@earendil-works/pi-ai";
+import { rmSync } from "node:fs";
+import type { Server } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { classifyDelegation, classifyModelRoute, planFallback, routes, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./routing/policy.ts";
@@ -10,6 +12,7 @@ import { registerRoutingRpc, type RoutingRpcResult } from "./routing/rpc.ts";
 import { emitTaskLifecycle } from "./routing/lifecycle.ts";
 import { manifestPathForPane, readRoutingManifest, restoreTaskHandle, ROUTING_MANIFEST_VERSION, taskManifestRecord, writeRoutingManifest, type RoutingManifest } from "./routing/manifest.ts";
 import { focusManifestPane, RoutedTaskWidget } from "./routing/navigator.ts";
+import { inboxPath, sendParentMessage, startParentInbox } from "./routing/messages.ts";
 import { formatEstimatedCost, sumSessionCost } from "./routing/usage.ts";
 
 const RouteParams = Type.Object({
@@ -74,6 +77,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   let routedWidget: RoutedTaskWidget | undefined;
   let manifestSignature = "";
   let parentMetadataCount: number | undefined;
+  let parentInbox: Server | undefined;
+  let parentInboxPath: string | undefined;
 
   const routeSummary = (name: RouteName) => {
     const route = routes[name];
@@ -106,7 +111,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     const sessionTotal = primary.cost + knownChildren.reduce((sum, task) => sum + (task.estimatedCost ?? 0), 0);
     routingManifest = {
       version: ROUTING_MANIFEST_VERSION,
-      parentSessionId: activeCtx.sessionManager.getSessionId(), parentPaneId: process.env.HERDR_PANE_ID!,
+      parentSessionId: activeCtx.sessionManager.getSessionId(), parentPaneId: process.env.HERDR_PANE_ID!, parentInbox: parentInboxPath,
       parentSessionPath: activeCtx.sessionManager.getSessionFile(), primaryCost: primary.cost, primaryCostKnown: primary.known,
       sessionTotal, sessionTotalKnown, updatedAt: Date.now(), tasks,
     };
@@ -263,6 +268,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     // Workflow runs consume lifecycle events themselves and display bounded run-level
     // status. Never wake the primary with routed-task custom messages for them.
     if (task.owner?.kind === "workflow") return;
+    if (task.owner?.kind === "pr" && kind === COMPLETION_KIND) return;
     // Background subagents never report back to the primary; only a stuck or vanished one
     // reaches the user, through Telegram.
     if (task.background) {
@@ -346,6 +352,21 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }, ctx, params, owner);
     return { content: [{ type: "text" as const, text: result.text }], details: result.details };
   };
+
+  pi.registerTool({
+    name: "message_parent",
+    label: "Message Parent",
+    description: "Send a message to the parent chat immediately without ending this subagent's task. Use for questions or decisions requiring the parent, not routine progress.",
+    parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 4000 }) }),
+    async execute(_toolCallId, params) {
+      if (ownsManifest) throw new Error("Only subagents can message a parent");
+      const manifest = readRoutingManifest(manifestPath);
+      const task = manifest?.tasks.find((candidate) => candidate.paneId === process.env.HERDR_PANE_ID);
+      if (!manifest?.parentInbox || !task?.messageToken) throw new Error("Parent inbox is unavailable");
+      await sendParentMessage(manifest.parentInbox, { handle: task.handle, paneId: task.paneId, token: task.messageToken, text: params.text });
+      return { content: [{ type: "text", text: "Message delivered to parent" }], details: { handle: task.handle } };
+    },
+  });
 
   pi.registerTool({
     name: "subagent",
@@ -771,7 +792,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         const data = candidate.data as TaskHandle | undefined;
         if (data?.handle && data.agentName && data.paneId && typeof data.route === "string" && data.route && !seenTasks.has(data.handle)) {
           seenTasks.add(data.handle);
-          taskHandles.set(data.handle, { ...data, transitions: data.transitions ?? 0, notifiedStates: data.notifiedStates ?? [] });
+          taskHandles.set(data.handle, { ...data, messageToken: data.messageToken ?? routingManifest?.tasks.find((task) => task.handle === data.handle)?.messageToken, transitions: data.transitions ?? 0, notifiedStates: data.notifiedStates ?? [] });
         }
       }
     }
@@ -782,6 +803,18 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         }
       }
     }
+    if (parentInbox) { parentInbox.close(); parentInbox = undefined; }
+    if (ownsManifest) {
+      parentInboxPath = inboxPath(ctx.sessionManager.getSessionId());
+      try {
+        parentInbox = await startParentInbox(parentInboxPath, (message) => {
+          const task = taskHandles.get(message.handle);
+          if (!task || task.paneId !== message.paneId || task.messageToken !== message.token || !isActiveTask(task) || typeof message.text !== "string" || !message.text.trim() || message.text.length > 4000) return false;
+          pi.sendMessage({ customType: "subagent-message", content: `Subagent ${task.label} (${task.handle}) asks:\n${message.text}`, display: true, details: { handle: task.handle } }, { deliverAs: "steer", triggerTurn: true });
+          return true;
+        });
+      } catch { parentInboxPath = undefined; }
+    } else parentInboxPath = undefined;
     syncManifest();
     updateStatus(ctx);
     refreshWidget();
@@ -811,6 +844,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     for (const watcher of watchers.values()) watcher.abort();
     watchers.clear();
+    if (parentInbox) { parentInbox.close(); parentInbox = undefined; }
+    if (parentInboxPath) { rmSync(parentInboxPath, { force: true }); parentInboxPath = undefined; }
     if (uiCtx && typeof uiCtx.ui?.setWidget === "function") {
       try { uiCtx.ui.setWidget(WIDGET_KEY, undefined); } catch { /* the UI may already be gone */ }
     }
