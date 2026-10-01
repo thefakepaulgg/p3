@@ -6,7 +6,10 @@ const MAX_BRIEF_CHARS = 6_000;
 
 export async function getJevModel(ctx: ExtensionContext, signal: AbortSignal) {
   const models = await ctx.modelRegistry.getAvailableOfType("classifier", "typesafe", { signal });
-  return models.find((model) => model.provider === "typesafe" && model.id === "jev-latest");
+  const jev = models.find((model) => model.provider === "typesafe" && model.id === "jev-latest");
+  if (jev) return jev;
+  const cloudflareModels = await ctx.modelRegistry.getAvailableOfType("classifier", "cloudflare-workers-ai", { signal });
+  return cloudflareModels.find((model) => model.provider === "cloudflare-workers-ai" && model.id === "typesafe/jev");
 }
 
 const MIN_CONFIDENCE: Record<RouteName, number> = { sol: 0.6, opus: 0.7, luna: 0.8 };
