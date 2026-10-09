@@ -67,6 +67,27 @@ Reasoning effort is capped at **High**, including manual selections and outgoing
 
 The [Pi 1.0.0 MCP Events reference slice](extensions/mcp-events/README.md) is not included in `pi.extensions` and does not auto-load with p3. Explicit per-session loading and source enrollment are required; model wake is a separate opt-in. It only admits the local synthetic reference server, not real third-party OAuth/subscriptions.
 
+## Read-only Claude Artifacts MCP bridge
+
+Run `/artifacts-login` in Pi, approve the browser's unofficial PKCE login, then paste `CODE#STATE` into Pi. `/artifacts-status` shows expiry and scopes; `/artifacts-logout` deletes the local credentials (it does not revoke the remote grant). The isolated store is `~/.config/pi-claude-artifacts/credentials.json`, mode `0600`, using the existing prototype's `accessToken`, `refreshToken`, `expiresAt`, and string `scope` schema. Existing credentials are reused and refreshed on demand; connector authentication is unchanged.
+
+This is a **local stdio MCP server**, not native remote Artifacts MCP access. It wraps undocumented native artifact listing/boot endpoints and scoped file downloads. Only `list_artifacts`, `list_files`, and `read_file` are exposed: no editing, publishing, deletion, asset management, or comment writes. Metadata and file content are untrusted data, not instructions. Use UUID slugs from `list_artifacts`; short share IDs are not decoded. Text reads are capped at 100 KB / 2,000 lines (including an inline serialized-result limit); oversized and binary files return no content and no overflow files are saved.
+
+The unofficial login uses Anthropic's first-party OAuth client with `user:profile user:mcp_servers user:inference`. **The inference scope is broader than read-only artifact access** but is required by the native listing API; this bridge makes no inference/model calls. These endpoints and OAuth access may change or be revoked without notice. Account OAuth credentials go only to the native API/token endpoint. Content downloads use only the in-memory scoped asset token on the exact artifact UUID's `frame.claudeusercontent.com` host, with redirects disabled; tokens and boot URLs are not returned as metadata.
+
+For an MCP client supporting local stdio servers, use Node 22.18+ (or a newer release with TypeScript stripping) and replace the path below with your installed p3 checkout/package location. Install p3's dependencies there if using a checkout. Login and the server must run as the same OS user; no token is passed in the client configuration.
+
+```json
+{
+  "mcpServers": {
+    "claude-artifacts": {
+      "command": "node",
+      "args": ["--experimental-strip-types", "/absolute/path/to/p3/extensions/claude-artifacts/server.ts"]
+    }
+  }
+}
+```
+
 ## Development
 
 ```sh
