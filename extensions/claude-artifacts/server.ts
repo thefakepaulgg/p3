@@ -48,7 +48,7 @@ server.registerTool("create_artifact", {
 }, ({ type_slug, title }) => call(() => createArtifact(type_slug, title)));
 
 server.registerTool("delete_artifact", {
-  description: "Delete an artifact you own (native soft-delete; no restore tool is provided here). confirm_title must exactly match the artifact's current title, " +
+  description: "Delete an artifact you own. Treat it as permanent: no restore route was found. confirm_title must exactly match the artifact's current title, " +
     "which guards against a wrong UUID. If the result says the status is unknown, check list_artifacts before retrying.",
   inputSchema: { slug: artifactId, confirm_title: z.string().min(1).max(4000).describe("The artifact's exact current title") },
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
