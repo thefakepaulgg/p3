@@ -231,8 +231,8 @@ export async function createArtifact(typeSlug: string, title: string) {
   return { slug: created.data.slug, version: created.data.version, title };
 }
 
-// Native DELETE /api/frame/{slug}. The client's own listing flags rows as softDeleted, so this is presumably
-// recoverable, but no restore route exists here. Requiring the exact current title guards against a wrong UUID.
+// Native DELETE /api/frame/{slug}. A deleted artifact 404s afterwards and no restore route was found, so treat it as
+// permanent. Requiring the exact current title guards against a wrong UUID.
 export async function deleteArtifact(slug: string, confirmTitle: string) {
   parse(UUID, slug);
   const data = await boot(slug);
