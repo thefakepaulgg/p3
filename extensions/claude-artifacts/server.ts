@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { artifactId, createArtifact, listArtifacts, listFiles, listTypes, readFile, result, writeFileInput, writeFiles } from "./api.ts";
+import { artifactId, createArtifact, deleteArtifact, listArtifacts, listFiles, listTypes, readFile, result, writeFileInput, writeFiles } from "./api.ts";
 import { safeError } from "./auth.ts";
 
 const server = new McpServer({ name: "p3-claude-artifacts", version: "0.1.0" });
@@ -46,6 +46,13 @@ server.registerTool("create_artifact", {
   inputSchema: { type_slug: artifactId.describe("Type UUID from list_types"), title: z.string().min(1).max(200) },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 }, ({ type_slug, title }) => call(() => createArtifact(type_slug, title)));
+
+server.registerTool("delete_artifact", {
+  description: "Delete an artifact you own (native soft-delete; no restore tool is provided here). confirm_title must exactly match the artifact's current title, " +
+    "which guards against a wrong UUID. If the result says the status is unknown, check list_artifacts before retrying.",
+  inputSchema: { slug: artifactId, confirm_title: z.string().min(1).max(4000).describe("The artifact's exact current title") },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+}, ({ slug, confirm_title }) => call(() => deleteArtifact(slug, confirm_title)));
 
 try { await server.connect(new StdioServerTransport()); }
 catch { process.stderr.write("Artifacts MCP server could not start.\n"); process.exitCode = 1; }

@@ -14,7 +14,7 @@ const bootSchema = z.object({ ver: version, assetToken: z.string().min(1), files
   title: z.string().max(4000).optional(), favicon: z.unknown().optional() });
 const listingSchema = z.object({ frames: z.array(z.object({ slug: UUID,
   title: z.string().max(4000).optional(), type_title: z.string().max(1024).optional(),
-  rel: z.string().max(128).optional(), live: version.optional() })).nullable() });
+  rel: z.string().max(128).optional(), live: version.optional(), softDeleted: z.boolean().optional() })).nullable() });
 const MAX_RESULT_BYTES = 100_000; // Connector pattern: about 25,000 tokens; no overflow file is written.
 const MAX_JSON_BYTES = 2_000_000;
 
@@ -81,7 +81,7 @@ async function boot(slug: string) {
 
 export async function listArtifacts(limit: number) {
   const data = parse(listingSchema, await native(`/api/frame/frames?limit=${limit}`));
-  return { untrustedData: true, artifacts: (data.frames ?? []).map((row) => ({
+  return { untrustedData: true, artifacts: (data.frames ?? []).filter((row) => row.softDeleted !== true).map((row) => ({
     slug: row.slug, title: row.title, type: row.type_title, rel: row.rel, version: row.live,
   })) };
 }
@@ -229,6 +229,25 @@ export async function createArtifact(typeSlug: string, title: string) {
   const created = createdSchema.safeParse(reply);
   if (!created.success) fail("The server accepted the request but its reply was malformed; an artifact may have been created. Check list_artifacts.");
   return { slug: created.data.slug, version: created.data.version, title };
+}
+
+// Native DELETE /api/frame/{slug}. The client's own listing flags rows as softDeleted, so this is presumably
+// recoverable, but no restore route exists here. Requiring the exact current title guards against a wrong UUID.
+export async function deleteArtifact(slug: string, confirmTitle: string) {
+  parse(UUID, slug);
+  const data = await boot(slug);
+  if (data.title === undefined || data.title !== confirmTitle)
+    fail(`confirm_title must exactly match the artifact's current title (${JSON.stringify(data.title ?? "")}). Nothing was deleted.`);
+  let response: Response;
+  try {
+    response = await fetch(new URL(`/api/frame/${slug}`, "https://api.anthropic.com"), {
+      method: "DELETE", headers: await nativeHeaders(), redirect: "error", signal: AbortSignal.timeout(30_000),
+    });
+  } catch { fail("Delete status is unknown: it may or may not have been applied. Check list_artifacts before retrying."); }
+  await response.body?.cancel();
+  if (response.status >= 500) fail("Delete status is unknown: it may or may not have been applied. Check list_artifacts before retrying.");
+  if (!response.ok) fail(`Delete rejected (HTTP ${response.status}). Nothing was deleted.`);
+  return { slug, title: data.title, deleted: true };
 }
 
 export function result(value: unknown) {
