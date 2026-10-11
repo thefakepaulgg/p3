@@ -198,6 +198,39 @@ export async function writeFiles(slug: string, baseVersion: string, files: z.inf
   return { slug, version: deployed.data.version, changed };
 }
 
+const typesSchema = z.object({ types: z.array(z.object({ slug: UUID, title: z.string().max(1024).optional(),
+  description: z.string().max(4000).optional() })) });
+const createdSchema = z.object({ slug: UUID, version });
+
+export async function listTypes() {
+  const data = parse(typesSchema, await native("/api/frame/types"));
+  return { untrustedData: true, types: data.types.map(({ slug, title, description }) => ({ slug, title, description })) };
+}
+
+// Sends only the title: the server instantiates the type's template (verified live for the Design type).
+export async function createArtifact(typeSlug: string, title: string) {
+  parse(UUID, typeSlug);
+  if (title.length === 0 || title.length > 200) fail("Title must be 1-200 characters.");
+  const unknown = "Creation status is unknown: an artifact may or may not have been created. " +
+    "Check list_artifacts for the title before retrying; do not resend blindly.";
+  let response: Response;
+  try {
+    response = await fetch(new URL(`/api/frame/types/${typeSlug}/create`, "https://api.anthropic.com"), {
+      method: "POST", headers: { ...await nativeHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ title }), redirect: "error", signal: AbortSignal.timeout(60_000),
+    });
+  } catch { fail(unknown); }
+  let reply: unknown;
+  try { reply = JSON.parse((await bytes(response, MAX_JSON_BYTES)).toString("utf8")); }
+  catch { reply = undefined; }
+  if (response.status === 429) fail("Creation refused: a rate or daily artifact limit was reached. Nothing was created.");
+  if (response.status >= 500) fail(unknown);
+  if (!response.ok) fail(`Creation rejected (HTTP ${response.status}). Nothing was created.`);
+  const created = createdSchema.safeParse(reply);
+  if (!created.success) fail("The server accepted the request but its reply was malformed; an artifact may have been created. Check list_artifacts.");
+  return { slug: created.data.slug, version: created.data.version, title };
+}
+
 export function result(value: unknown) {
   // Signed content URLs are credentials too, even when embedded in an artifact's text.
   const text = JSON.stringify(value, null, 2).replace(/https?:\/\/[^\s"<>]+/g, (url) => {
