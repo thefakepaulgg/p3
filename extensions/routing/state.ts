@@ -3,7 +3,7 @@ import type { TaskPhase } from "./workflow.ts";
 import { formatEstimatedCost } from "./usage.ts";
 
 /** interrupted: the user pressed Esc in the pane mid-task; the agent is idle but the task is unfinished and still watched. */
-export type TaskState = "queued" | "running" | "blocked" | "interrupted" | "completed" | "failed" | "stopped" | "abandoned";
+export type TaskState = "queued" | "running" | "blocked" | "interrupted" | "unknown" | "lost" | "completed" | "failed" | "stopped" | "abandoned";
 
 /** Bounded correlation metadata supplied by workflow callers over routing RPC. */
 export type TaskOwner = { kind: "workflow"; runId: string; stepId: string; attemptId: string }
@@ -11,6 +11,20 @@ export type TaskOwner = { kind: "workflow"; runId: string; stepId: string; attem
 
 export interface TaskHandle {
   handle: string;
+  assignmentId?: string;
+  parentSessionId?: string;
+  requestId?: string;
+  minimumGeneration?: number;
+  outcomeGeneration?: number;
+  sessionId?: string;
+  terminalId?: string;
+  resultRef?: string;
+  resultPath?: string;
+  resultHash?: string;
+  readonly?: boolean;
+  lastActivityAt?: number;
+  presence?: "live" | "unknown" | "lost";
+  pendingCompletion?: boolean;
   route: string;
   fallbackFrom?: RouteName;
   routeExplicit: boolean;
@@ -92,7 +106,12 @@ const boundedOwner = (owner?: TaskOwner): TaskOwner | undefined => owner?.kind =
 
 export function taskMetadata(task: TaskHandle): Record<string, unknown> {
   return {
-    handle: task.handle, route: task.route, fallbackFrom: task.fallbackFrom,
+    handle: task.handle, assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, requestId: task.requestId, sessionId: task.sessionId, terminalId: task.terminalId,
+    resultRef: task.resultRef, resultPath: task.resultPath, resultHash: task.resultHash, readonly: task.readonly,
+    minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
+    lastActivityAt: task.lastActivityAt, presence: task.presence, pendingCompletion: task.pendingCompletion,
+    available_actions: availableTaskActions(task), nextAction: taskNextAction(task),
+    route: task.route, fallbackFrom: task.fallbackFrom,
     routeExplicit: task.routeExplicit, target: task.target, model: task.model, thinking: task.thinking,
     label: truncate(task.label, 80), cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn?.slice(0, 32),
     ownedPaths: task.ownedPaths?.slice(0, 20), owner: boundedOwner(task.owner), background: task.background,
@@ -160,7 +179,8 @@ export function buildCompletionMessage(task: TaskHandle, result: string): string
   const excerpt = truncate(body, COMPLETION_EXCERPT_LIMIT);
   const lines = [`Subagent ${task.handle} completed (${truncate(task.label, 80)}) on ${task.route} ${task.model}.`];
   lines.push(body ? `Excerpt: ${excerpt}` : "No assistant text was captured.");
-  lines.push(`Full cached result (${body.length} chars): subagent_control action=result handle=${task.handle}`);
+  lines.push(`Full result (${body.length} chars): subagent_control action=result handle=${task.handle}`);
+  if (task.resultRef) lines.push(`Evidence: ${task.resultRef}`);
   if (task.fallbackFrom) lines.push(`Fallback: ${task.fallbackFrom} was unavailable; used ${task.route}.`);
   if (task.escalation) lines.push(`Escalation: ${truncate(task.escalation, 240)}`);
   if (task.paneId) lines.push(task.paneClosedAt ? `Pane ${task.paneId} was closed.` : `Pane ${task.paneId} is retained for inspection.`);
@@ -177,8 +197,34 @@ export function buildInterruptedMessage(task: TaskHandle, lastOutput: string): s
   return boundNotification(lines.join("\n"));
 }
 
-const ACTIVE_STATES: TaskState[] = ["queued", "running", "blocked", "interrupted"];
+const ACTIVE_STATES: TaskState[] = ["queued", "running", "blocked", "interrupted", "unknown", "lost"];
 export const isActiveTask = (task: Pick<TaskHandle, "state">) => ACTIVE_STATES.includes(task.state);
+
+export function availableTaskActions(task: TaskHandle): string[] {
+  const actions = ["status"];
+  if (task.resultHash || task.result !== undefined) actions.push("result");
+  if (task.presence === "unknown" || task.state === "unknown") return actions;
+  if (task.state === "lost") return [...actions, "stop"];
+  if (task.presence === "lost") return [...actions, "clear"];
+  if (task.paneId && !task.paneClosedAt) actions.push("focus");
+  if (isActiveTask(task)) actions.push("steer", "stop");
+  else {
+    actions.push("clear");
+    if (task.paneId && !task.paneClosedAt && !task.pendingCompletion) actions.push("close", "steer");
+  }
+  return actions;
+}
+
+export function taskNextAction(task: TaskHandle): string {
+  if (task.presence === "unknown" || task.state === "unknown") return "Identity or runtime evidence is unverified; inspect status before any mutation. Do not replace or replay work.";
+  if (task.state === "lost") return "The exact executor is absent. Inspect its saved session/external effects; use stop only to explicitly abandon this unresolved assignment. No replacement was started.";
+  if (task.presence === "lost") return "The assignment was abandoned; saved session evidence remains. No physical resources were removed or external effects rolled back.";
+  if (task.pendingCompletion) return "The result is durable and awaits receipt in the parent conversation; do not repeat the assignment.";
+  if (task.state === "interrupted") return "Resume deliberately with steer, or stop when abandoning this assignment.";
+  if (task.state === "failed") return "Inspect execution failure and any external effects; do not treat partial text as a result or blindly replay tools.";
+  if (task.state === "blocked") return "Supply the missing decision with steer; this is not a new assignment.";
+  return isActiveTask(task) ? "Allow work to progress; use controls only when the assignment changes or evidence calls for recovery." : "Read the durable result or close the retained pane when no longer needed.";
+}
 
 /** Widget key used for the routed-task status widget. */
 export const WIDGET_KEY = "routed-tasks";
@@ -186,7 +232,7 @@ export const WIDGET_MAX_ROWS = 4;
 export const WIDGET_RECENT_WINDOW_MS = 30 * 60_000;
 
 const STATE_MARKER: Record<TaskState, string> = {
-  queued: "○", running: "●", blocked: "◆", interrupted: "‖", completed: "✓", failed: "×", stopped: "−", abandoned: "?",
+  queued: "○", running: "●", blocked: "◆", interrupted: "‖", unknown: "?", lost: "?", completed: "✓", failed: "×", stopped: "−", abandoned: "?",
 };
 
 export function formatElapsed(ms: number): string {
@@ -249,6 +295,10 @@ export function formatTaskWidget(tasks: Iterable<TaskWidgetItem>, now = Date.now
 
 export function telemetryRecord(task: TaskHandle): Record<string, unknown> {
   return {
+    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
+    sessionId: task.sessionId, terminalId: task.terminalId, resultRef: task.resultRef, resultPath: task.resultPath,
+    resultHash: task.resultHash, readonly: task.readonly, lastActivityAt: task.lastActivityAt, presence: task.presence,
+    pendingCompletion: task.pendingCompletion, messageToken: task.messageToken,
     handle: task.handle, route: task.route, fallbackFrom: task.fallbackFrom,
     routeExplicit: task.routeExplicit, target: task.target, model: task.model, thinking: task.thinking,
     label: task.label.slice(0, 80), cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn,

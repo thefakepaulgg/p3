@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  boundNotification, buildCompletionMessage, canDeliverCompletion, COMPLETION_EXCERPT_LIMIT, formatElapsed,
+  availableTaskActions, isActiveTask, taskNextAction, boundNotification, buildCompletionMessage, canDeliverCompletion, COMPLETION_EXCERPT_LIMIT, formatElapsed,
   formatModelLabel, formatTaskWidget, markCompletionDelivered, markNotified, NOTIFICATION_LIMIT, recommendEscalation,
   taskMetadata, telemetryRecord, type TaskHandle,
 } from "./state.ts";
@@ -167,4 +167,22 @@ describe("routed-task widget", () => {
     expect(formatElapsed(180_000)).toBe("3m");
     expect(formatElapsed(3_900_000)).toBe("1h05m");
   });
+});
+
+for (const state of ["unknown", "lost"] as const) {
+  test(`${state} work remains active and unresolved`, () => {
+    const unresolved = task({ state });
+    expect(isActiveTask(unresolved)).toBe(true);
+    expect(unresolved.completionNotifiedAt).toBeUndefined();
+    expect(availableTaskActions(unresolved)).not.toContain("clear");
+  });
+}
+
+test("queued completion is not delivered and retains its pane controls until receipt", () => {
+  const pending = task({ state: "completed", pendingCompletion: true, paneId: "w1:p2", resultHash: "hash" });
+  expect(canDeliverCompletion(pending)).toBe(true);
+  expect(pending.completionNotifiedAt).toBeUndefined();
+  expect(availableTaskActions(pending)).not.toContain("close");
+  expect(taskNextAction(pending)).toContain("awaits receipt");
+  expect(telemetryRecord(pending).pendingCompletion).toBe(true);
 });

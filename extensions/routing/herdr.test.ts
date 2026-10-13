@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,8 @@ import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { buildRoutedWorkerPiArgs, herdrSocketRequestForArgs, launchHerdrAgent, parseJson, readHerdrResult, readHerdrTurn, requestHerdrSocket, resolveHerdrSocketPath, ROUTED_TAB_MAX_PANES, setHerdrTestTransportForTests, shouldCloseCompletedPane, watchHerdrTask } from "./herdr.ts";
 import { routes, type Route } from "./policy.ts";
+import { randomUUID } from "node:crypto";
+import { resultPathForAssignment, readAssignmentReceipt, saveAssignmentResult, writeAssignmentReceipt, type AssignmentReceipt } from "./artifacts.ts";
 import { COMPLETION_KIND, NOTIFICATION_LIMIT, type TaskHandle } from "./state.ts";
 
 // Existing orchestration tests use deterministic in-memory transport responses. Dedicated
@@ -17,6 +19,18 @@ setHerdrTestTransportForTests(async (pi: any, args, timeout) => {
 });
 
 let temp: string | undefined;
+let agentDir: string;
+let previousAgentDir: string | undefined;
+beforeEach(() => {
+  previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  agentDir = mkdtempSync(join(tmpdir(), "routing-herdr-agent-"));
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+});
+afterEach(() => {
+  rmSync(agentDir, { recursive: true, force: true });
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+});
 afterEach(() => { if (temp) rmSync(temp, { recursive: true, force: true }); temp = undefined; });
 
 describe("completed pane retention", () => {
@@ -31,7 +45,7 @@ describe("Herdr response parsing", () => {
 
 describe("routed worker Pi arguments", () => {
   const agentDir = "/tmp/pi-agent";
-  const rootTools = "subagent,subagent_control,model_route,workflow_control,pr_subscribe,pr_unsubscribe";
+  const rootTools = "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe";
   const route = (provider: string, model: string, thinking: Route["thinking"] = "medium") => ({ provider, model, thinking } as Route);
   const withAgentDir = (check: () => void) => {
     const previous = process.env.PI_CODING_AGENT_DIR;
@@ -51,6 +65,18 @@ describe("routed worker Pi arguments", () => {
     ]);
     expect(args).not.toContain("--no-extensions");
   }));
+
+  test("assigned readonly workers use native policy, a UUID session and the lifecycle extension", () => {
+    const assignmentId = randomUUID();
+    const args = buildRoutedWorkerPiArgs("Inspect only", route("openai-codex", "gpt-6-luna"), [], true, assignmentId);
+    expect(args).toContain("--session-id");
+    expect(args[args.indexOf("--session-id") + 1]).toBe(assignmentId);
+    expect(args[args.indexOf("--extension") + 1]).toBe(fileURLToPath(new URL("./worker-lifecycle.ts", import.meta.url)));
+    expect(args[args.indexOf("--tools") + 1]).toBe("read,ls,find,grep,message_parent");
+    expect(args).toContain("mcp__*");
+    expect(args).toContain("--no-mcp");
+    expect(args).not.toContain("--no-extensions");
+  });
 
   test("automatic workers use the wrapper and clamp legacy above-high effort", () => {
     const wrapped = { ...route("anthropic", "claude-haiku-5-5"), launchModel: "p3-failover/haiku", thinking: "max" } as unknown as Route;
@@ -155,18 +181,34 @@ describe("Herdr Unix socket transport", () => {
 });
 
 describe("watcher notifications", () => {
-  const herdrTask = (patch: Partial<TaskHandle> = {}): TaskHandle => ({
-    handle: "rt-watch", route: "luna", routeExplicit: false, target: "herdr",
-    model: "openai-codex/gpt-6-luna", thinking: "high", label: "Watched task", state: "running",
-    startedAt: Date.now(), agentName: "r-watch", paneId: "w1:p2", paneRetention: "keep",
-    transitions: 0, notifiedStates: [], ...patch,
-  });
+  const sessionId = "worker-session";
+  const header = JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: "/repo" });
+  const herdrTask = (patch: Partial<TaskHandle> = {}): TaskHandle => {
+    const assignmentId = randomUUID();
+    return {
+      handle: "rt-watch", assignmentId, requestId: assignmentId, minimumGeneration: 1,
+      sessionId, terminalId: "terminal-2", route: "luna", routeExplicit: false, target: "herdr",
+      model: "openai-codex/gpt-6-luna", thinking: "high", label: "Watched task", state: "running",
+      startedAt: Date.now(), agentName: "r-watch", paneId: "w1:p2", paneRetention: "keep",
+      transitions: 0, notifiedStates: [], ...patch,
+    };
+  };
 
   const sessionWith = (text: string) => {
     temp = mkdtempSync(join(tmpdir(), "routing-watch-"));
     const file = join(temp, "session.jsonl");
-    writeFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`);
+    writeFileSync(file, [header, JSON.stringify({ type: "message", id: "response", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] } }), ""].join("\n"));
     return file;
+  };
+
+  const seedReceipt = (task: TaskHandle, sessionPath: string, text: string, patch: Partial<AssignmentReceipt> = {}) => {
+    const receipt: AssignmentReceipt = {
+      version: 1, assignmentId: task.assignmentId!, requestId: task.requestId!, generation: 1,
+      sessionId: task.sessionId!, sessionPath, paneId: task.paneId!, terminalId: task.terminalId!,
+      outcome: "completed", lastActivityAt: Date.now(), responseEntryId: "response", ...patch,
+    };
+    if (receipt.outcome === "completed") receipt.resultHash = saveAssignmentResult(receipt.requestId, receipt.generation, receipt.sessionId, "response", text);
+    writeAssignmentReceipt(receipt);
   };
 
   const drive = async (task: TaskHandle, status: string, sessionPath: string) => {
@@ -176,7 +218,7 @@ describe("watcher notifications", () => {
       exec: async (_command: string, args: string[]) => {
         calls.push(args);
         if (args.slice(0, 2).join(" ") === "agent get") {
-          return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: status, agent_session: { value: sessionPath } } } }), stderr: "" };
+          return { code: 0, stdout: JSON.stringify({ result: { agent: { pane_id: task.paneId, terminal_id: task.terminalId, agent_status: status, agent_session: { value: sessionPath } } } }), stderr: "" };
         }
         return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
       },
@@ -195,7 +237,7 @@ describe("watcher notifications", () => {
 
   test("delivers one bounded completion notification and stops watching", async () => {
     const task = herdrTask();
-    const { notifications } = await drive(task, "idle", sessionWith("F".repeat(8000)));
+    const { notifications } = await drive(task, "idle", (() => { const file = sessionWith("F".repeat(8000)); seedReceipt(task, file, "F".repeat(8000)); return file; })());
     expect(notifications).toHaveLength(1);
     expect(notifications[0]!.kind).toBe(COMPLETION_KIND);
     expect(notifications[0]!.content.length).toBeLessThanOrEqual(NOTIFICATION_LIMIT);
@@ -207,20 +249,22 @@ describe("watcher notifications", () => {
     expect(notifications).toHaveLength(1);
   });
 
-  test("closes the pane before announcing completion when close was requested", async () => {
+  test("retains the pane while completion awaits a parent delivery receipt", async () => {
     const task = herdrTask({ paneRetention: "close" });
-    const { notifications, calls } = await drive(task, "idle", sessionWith("done"));
-    expect(calls.some((args) => args.join(" ") === "pane close w1:p2")).toBe(true);
-    expect(task.paneClosedAt).toBeNumber();
-    expect(notifications[0]!.content).toContain("Pane w1:p2 was closed");
+    const file = sessionWith("done");
+    seedReceipt(task, file, "done");
+    const { notifications, calls } = await drive(task, "idle", file);
+    expect(calls.some((args) => args.join(" ") === "pane close w1:p2")).toBe(false);
+    expect(task.paneClosedAt).toBeUndefined();
+    expect(notifications[0]!.kind).toBe(COMPLETION_KIND);
   });
 
   test("blocked notifications carry an episode kind", async () => {
     const task = herdrTask();
     const { notifications } = await drive(task, "blocked", sessionWith("partial"));
     expect(notifications).toHaveLength(1);
-    expect(notifications[0]!.kind).toBe("blocked#1");
-    expect(task.blockedEpisodes).toBe(1);
+    expect(notifications[0]!.kind).toBe("blocked#0");
+    expect(task.result).toBeUndefined();
     expect(task.state).toBe("blocked");
   });
 
@@ -232,14 +276,15 @@ describe("watcher notifications", () => {
   test("reports a user interrupt as interrupted, not completed, and keeps watching until a resumed turn completes", async () => {
     temp = mkdtempSync(join(tmpdir(), "routing-watch-"));
     const sessionPath = join(temp, "session.jsonl");
-    writeFileSync(sessionPath, [assistant("Now the throwaway UI test", { stopReason: "toolUse" }), interruptedTail, ""].join("\n"));
+    writeFileSync(sessionPath, [header, assistant("Now the throwaway UI test", { stopReason: "toolUse" }), interruptedTail, ""].join("\n"));
     let status = "idle";
     const task = herdrTask();
+    seedReceipt(task, sessionPath, "", { outcome: "aborted" });
     const notifications: Array<{ kind: string; content: string }> = [];
     const pi: any = {
       exec: async (_command: string, args: string[]) => ({
         code: 0, stderr: "",
-        stdout: JSON.stringify({ result: args.slice(0, 2).join(" ") === "agent get" ? { agent: { agent_status: status, agent_session: { value: sessionPath } } } : {} }),
+        stdout: JSON.stringify({ result: args.slice(0, 2).join(" ") === "agent get" ? { agent: { pane_id: task.paneId, terminal_id: task.terminalId, agent_status: status, agent_session: { value: sessionPath } } } : {} }),
       }),
     };
     const watchers = new Map<string, AbortController>();
@@ -257,10 +302,12 @@ describe("watcher notifications", () => {
       expect(task.result).toBeUndefined();
       expect(watchers.has(task.handle)).toBe(true);
 
+      seedReceipt(task, sessionPath, "", { outcome: "running", generation: 2 });
       status = "working";
       await settle();
       expect(task.state).toBe("running");
-      writeFileSync(sessionPath, [interruptedTail, assistant("Verified: final answer", { stopReason: "stop" }), ""].join("\n"));
+      writeFileSync(sessionPath, [header, interruptedTail, assistant("Verified: final answer", { stopReason: "stop" }), ""].join("\n"));
+      seedReceipt(task, sessionPath, "Verified: final answer", { generation: 2 });
       status = "idle";
       await settle();
       expect(notifications.map((n) => n.kind)).toEqual(["interrupted#1", COMPLETION_KIND]);
@@ -272,15 +319,77 @@ describe("watcher notifications", () => {
     }
   });
 
-  test("a restarted watcher does not re-announce an interrupt already reported", async () => {
-    temp = mkdtempSync(join(tmpdir(), "routing-watch-"));
-    const file = join(temp, "session.jsonl");
-    writeFileSync(file, [assistant("partial"), interruptedTail, ""].join("\n"));
-    const task = herdrTask({ state: "interrupted", interruptedEpisodes: 1 });
-    const { notifications } = await drive(task, "idle", file);
-    expect(notifications).toHaveLength(0);
-    expect(task.state).toBe("interrupted");
+  test("idle text without native outcome evidence stays unresolved", async () => {
+    const task = herdrTask();
+    const { notifications } = await drive(task, "idle", sessionWith("looks finished"));
+    expect(notifications.some((n) => n.kind === COMPLETION_KIND)).toBe(false);
+    expect(task.state).toBe("unknown");
+    expect(task.result).toBeUndefined();
   });
+
+  for (const field of ["sessionId", "terminalId", "requestId"] as const) {
+    test(`rejects a completed receipt with the wrong ${field}`, async () => {
+      const task = herdrTask();
+      const file = sessionWith("wrong executor");
+      seedReceipt(task, file, "wrong executor", { [field]: field === "requestId" ? randomUUID() : "wrong" });
+      const { notifications } = await drive(task, "idle", file);
+      expect(task.state).toBe("unknown");
+      expect(task.result).toBeUndefined();
+      expect(notifications.some((n) => n.kind === COMPLETION_KIND)).toBe(false);
+    });
+  }
+
+  test("partial text with a nonabort error receipt fails rather than completes", async () => {
+    const task = herdrTask();
+    const file = sessionWith("partial output");
+    seedReceipt(task, file, "partial output", { outcome: "error", error: "provider failed" });
+    const { notifications } = await drive(task, "idle", file);
+    expect(task.state).toBe("failed");
+    expect(task.result).toBeUndefined();
+    expect(notifications.map((n) => n.kind)).toEqual(["failed"]);
+  });
+
+  test("a mutated result artifact cannot complete its matching receipt", async () => {
+    const task = herdrTask();
+    const file = sessionWith("verified");
+    seedReceipt(task, file, "verified");
+    writeFileSync(resultPathForAssignment(task.requestId!), "mutated");
+    const { notifications } = await drive(task, "idle", file);
+    expect(task.state).toBe("unknown");
+    expect(task.result).toBeUndefined();
+    expect(notifications.some((n) => n.kind === COMPLETION_KIND)).toBe(false);
+  });
+
+  test("a durable completed receipt restores full results without a live pane", async () => {
+    const task = herdrTask();
+    const file = sessionWith("R".repeat(9000));
+    seedReceipt(task, file, "R".repeat(9000));
+    const { calls } = await drive(task, "closed", file);
+    expect(task.result).toBe("R".repeat(9000));
+    expect(task.resultHash).toBe(readAssignmentReceipt(task.assignmentId!)!.resultHash);
+    expect(calls.some((args) => args.slice(0, 2).join(" ") === "agent get")).toBe(false);
+  });
+
+  for (const [error, inventory, expected] of [
+    ["agent_not_found", [], "lost"],
+    ["herdr_socket_error: disconnected", [], "unknown"],
+    ["agent_not_found", undefined, "unknown"],
+  ] as const) {
+    test(`${error} with ${inventory === undefined ? "unavailable" : "empty"} inventory remains unresolved as ${expected}`, async () => {
+      const task = herdrTask();
+      const watchers = new Map<string, AbortController>();
+      const pi: any = { exec: async (_: string, args: string[]) => {
+        if (args[1] === "list" && inventory !== undefined) return ok({ agents: inventory });
+        return { code: 1, stdout: "", stderr: error };
+      } };
+      watchHerdrTask({ pi, task, watchers, update: (patch) => Object.assign(task, patch), persist: () => {}, notify: () => {} });
+      await new Promise((done) => setTimeout(done, 20));
+      watchers.get(task.handle)?.abort();
+      expect(task.state).toBe(expected);
+      expect(task.result).toBeUndefined();
+      expect(task.endedAt).toBeUndefined();
+    });
+  }
 
   test("does not abandon a stopped task when an in-flight poll observes a closed agent", async () => {
     const task = herdrTask();
@@ -392,7 +501,7 @@ describe("routed agent tab isolation", () => {
       const start = calls.find((args) => args.slice(0, 2).join(" ") === "agent start")!;
       expect(start).toEqual([
         "agent", "start", launched.agent, "--kind", "pi", "--pane", "w1:p2", "--timeout", "30000", "--",
-        "--exclude-tools", "subagent,subagent_control,model_route,workflow_control,pr_subscribe,pr_unsubscribe",
+        "--exclude-tools", "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe",
         "--model", `${routes.luna.provider}/${routes.luna.model}`, "--thinking", routes.luna.thinking, "--name", "Isolated task",
       ]);
       expect(start).not.toContain(fileURLToPath(new URL("../model-routing.ts", import.meta.url)));
@@ -432,7 +541,7 @@ describe("routed agent tab isolation", () => {
     } };
     try {
       await launchHerdrAgent(pi, "Inspect only", "Delayed startup", "luna", routes.luna, "/repo");
-      expect(getCalls).toBe(2);
+      expect(getCalls).toBe(3);
       const getIndex = calls.findIndex((args) => args.slice(0, 2).join(" ") === "agent get");
       const promptIndex = calls.findIndex((args) => args.slice(0, 2).join(" ") === "agent prompt");
       expect(getIndex).toBeGreaterThan(-1);
@@ -475,7 +584,7 @@ describe("routed agent tab isolation", () => {
     } };
     try {
       await launchHerdrAgent(pi, "Inspect only", "Late registration", "luna", routes.luna, "/repo");
-      expect(getCalls).toBe(2);
+      expect(getCalls).toBe(3);
     } finally { restore(); }
   });
 

@@ -2,7 +2,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { classifyDelegation, classifyModelRoute, type CapabilityTier, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./policy.ts";
-import { normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
+import { isActiveTask, normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
+import { prepareEvidence } from "./evidence.ts";
+import { pathForResultRef } from "./artifacts.ts";
 import { classifyRoute, routingClassifierConfig } from "./classifier.ts";
 import { launchHerdrAgent, type HerdrLaunch, type RoutedWorkerCapability } from "./herdr.ts";
 import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkflowLaunch, type TaskPhase } from "./workflow.ts";
@@ -18,6 +20,8 @@ export interface RoutedTaskLaunchParams {
   owned_paths?: string[];
   pane_retention?: "keep" | "close";
   capabilities?: RoutedWorkerCapability[];
+  files?: string[];
+  readonly?: boolean;
   /** background: long-lived, never marked complete on idle, and never wakes the primary. */
   mode?: "task" | "background";
   owner?: TaskOwner;
@@ -61,6 +65,8 @@ export function validateRoutedTaskLaunchParams(input: RoutedTaskLaunchParams): v
   if (input.pane_retention !== undefined && input.pane_retention !== "keep" && input.pane_retention !== "close") throw new Error("pane_retention must be keep or close");
   if (input.mode !== undefined && input.mode !== "task" && input.mode !== "background") throw new Error("mode must be task or background");
   if (input.capabilities !== undefined && (!Array.isArray(input.capabilities) || input.capabilities.some((capability) => capability !== "memory"))) throw new Error("capabilities must contain only memory");
+  if (input.readonly !== undefined && typeof input.readonly !== "boolean") throw new Error("readonly must be a boolean");
+  if (input.files !== undefined && (!Array.isArray(input.files) || input.files.length > MAX_ARRAY_ITEMS || input.files.some((file) => typeof file !== "string" || !file.trim() || file.length > MAX_PATH_LENGTH))) throw new Error("files must contain at most 32 bounded paths or result references");
 }
 
 const ownerKey = (owner?: TaskOwner): string | undefined => owner?.kind === "workflow" ? `workflow:${owner.runId}:${owner.stepId}:${owner.attemptId}`
@@ -79,6 +85,8 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const requestedRoute = params.route?.trim() ?? classifyModelRoute(task, decision);
   const cwd = resolve(params.cwd ?? ctx.cwd);
   const background = params.mode === "background";
+  const evidence = prepareEvidence(params.files, cwd, pathForResultRef);
+  const prompt = [task, evidence.text].filter(Boolean).join("\n\n");
   const dependsOn = params.depends_on ?? [];
   const ownedPaths = normalizeOwnedPaths(cwd, params.owned_paths ?? []);
   validateWorkflowLaunch({ cwd, dependsOn, ownedPaths, tasks: deps.taskHandles.values() });
@@ -90,26 +98,49 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   catch (error) { if (params.route !== undefined) deps.routeRetryGuard.record(retryKey, requestedRoute); throw error; }
   deps.routeRetryGuard.clear(retryKey);
 
-  const active = [...deps.taskHandles.values()].filter((item) => !item.background && ["queued", "running", "blocked", "interrupted"].includes(item.state)).length;
+  const active = [...deps.taskHandles.values()].filter((item) => !item.background && isActiveTask(item)).length;
   if (active >= 4) throw new Error("Herdr subagent concurrency limit reached (4 active tasks)");
   const routeName = routePlan.route;
   const route = routePlan.config;
-  const launched: HerdrLaunch = await launchHerdrAgent(deps.pi, task, description, routeName, route, cwd, undefined, deps.manifestPath, params.capabilities, background);
   const handle = newHandle();
   const tracked: TaskHandle = {
-    handle, route: routeName, fallbackFrom: routePlan.fallbackFrom, routeExplicit: params.route !== undefined,
+    handle, assignmentId: randomUUID(), parentSessionId: ctx.sessionManager.getSessionId(), minimumGeneration: 1, readonly: params.readonly,
+    route: routeName, fallbackFrom: routePlan.fallbackFrom, routeExplicit: params.route !== undefined,
     target: "herdr", model: `${route.provider}/${route.model}`, thinking: route.thinking, label: description,
-    cwd, phase, dependsOn, ownedPaths, owner: params.owner, background: background || undefined, state: "running", startedAt: Date.now(),
-    agentName: launched.agent, paneId: launched.paneId, tabId: launched.tabId, messageToken: randomUUID(), paneRetention: params.pane_retention ?? "keep",
+    cwd, phase, dependsOn, ownedPaths, owner: params.owner, background: background || undefined, state: "queued", startedAt: Date.now(),
+    messageToken: randomUUID(), paneRetention: params.pane_retention ?? "keep",
     transitions: 0, notifiedStates: [], usageOffset: 0, estimatedCost: 0, costKnown: false,
   };
+  tracked.requestId = tracked.assignmentId;
   deps.trackTask(tracked);
-  deps.watchHerdrTask(tracked);
+  let launched: HerdrLaunch;
+  try {
+    launched = await launchHerdrAgent(deps.pi, prompt, description, routeName, route, cwd, undefined, deps.manifestPath, params.capabilities, background, {
+      assignmentId: tracked.assignmentId, readonly: params.readonly,
+      onStarted: (launch) => {
+        Object.assign(tracked, { agentName: launch.agent, paneId: launch.paneId, tabId: launch.tabId,
+          terminalId: launch.terminalId, sessionId: launch.sessionId, sessionPath: launch.sessionPath });
+        deps.trackTask(tracked);
+      },
+    });
+    tracked.state = "running";
+    deps.trackTask(tracked);
+    deps.watchHerdrTask(tracked);
+  } catch (error) {
+    if (tracked.paneId) {
+      tracked.state = "unknown"; tracked.presence = "unknown";
+      tracked.error = error instanceof Error ? error.message : String(error);
+      deps.trackTask(tracked); deps.watchHerdrTask(tracked);
+      throw new Error(`Launch outcome is unresolved for ${handle}: ${tracked.error}. Inspect this handle; do not repeat the assignment.`);
+    }
+    tracked.state = "failed"; tracked.error = error instanceof Error ? error.message : String(error); deps.trackTask(tracked);
+    throw error;
+  }
   const policyNote = params.route === undefined ? ` Policy selected ${routeName}: ${decision.rationale}` : "";
   const fallbackNote = routePlan.fallbackFrom ? ` Policy fallback: ${routePlan.fallbackFrom} was unavailable, so ${routeName} was selected.` : "";
   return {
     text: `Launched Herdr ${phase} task ${handle}: agent ${launched.agent}, pane ${launched.paneId}, using ${route.provider}/${route.model} (${route.thinking}). ${params.route !== undefined ? "The explicit model is fixed." : "Fixed starting route with bounded provider failover on exhausted usage."} ${background ? "Background subagent: it never reports back; pull its latest output with subagent_control action=result." : "Do not poll; completion will wake the primary."}${policyNote}${fallbackNote}`,
-    details: { handle, phase, background, dependsOn, ownedPaths, capabilities: params.capabilities, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
+    details: { handle, assignmentId: tracked.assignmentId, readonly: tracked.readonly, files: evidence.files, phase, background, dependsOn, ownedPaths, capabilities: params.capabilities, ...launched, fallbackFrom: routePlan.fallbackFrom, model: `${route.provider}/${route.model}`, thinking: route.thinking, decision, owner: params.owner },
     task: tracked,
   };
 }

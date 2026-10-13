@@ -4,10 +4,10 @@ import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export interface PeerMessage { id: string; senderPane: string; text: string; supersedes?: string }
+export interface PeerMessage { id: string; senderPane: string; text: string; supersedes?: string; evidence?: string }
 export type PeerMessageState = "queued" | "delivered" | "acknowledged" | "superseded";
 export type PeerRequest = { type: "message"; message: PeerMessage } | { type: "status"; id: string; senderPane: string };
-const LIMIT = 8192;
+const LIMIT = 1024 * 1024;
 
 export const peerInboxPath = (paneId: string) => join(tmpdir(), `pi-peer-${process.getuid?.() ?? "local"}-${createHash("sha256").update(paneId).digest("hex").slice(0, 20)}.sock`);
 
@@ -22,7 +22,7 @@ export async function startPeerInbox(
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
       input += chunk;
-      if (input.length > LIMIT) { socket.end("error: message too long\n"); return; }
+      if (Buffer.byteLength(input) > LIMIT) { socket.end("error: message too long\n"); return; }
       const end = input.indexOf("\n");
       if (end < 0) return;
       socket.removeAllListeners("data");
@@ -45,12 +45,14 @@ export async function startPeerInbox(
 }
 
 function requestPeer(path: string, request: PeerRequest): Promise<string> {
+  const payload = `${JSON.stringify(request)}\n`;
+  if (Buffer.byteLength(payload) > LIMIT) return Promise.reject(new Error("Peer evidence payload exceeds its transport limit"));
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     const timer = setTimeout(() => socket.destroy(new Error("Peer message timed out")), 10000);
     let reply = "";
     socket.setEncoding("utf8");
-    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.once("connect", () => socket.write(payload));
     socket.on("data", (chunk: string) => { reply += chunk; });
     socket.once("error", (error) => { clearTimeout(timer); reject(error); });
     socket.once("close", () => {

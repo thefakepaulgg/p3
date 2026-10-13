@@ -35,6 +35,45 @@ install -m 700 scripts/pi-telegram-notify ~/.local/bin/pi-telegram-notify
 
 Telegram replies default to off. Run `/notify replies-on` or `/notify replies-off` to control them independently from notifications. When enabled in a private chat with the bot, reply to a notification within one hour to send that reply back to the Pi session that produced it. Replies must come from the user represented by the configured private chat ID; Telegram input is passed to Pi as literal text without slash-command or prompt-template expansion. The extension remains disabled when the helper is unavailable.
 
+## Delegation evidence and recovery
+
+Routed workers now record Pi's settled execution outcome against an exact assignment, request, session, and terminal identity. Idle state or partial assistant text is not success. Successful results are persisted with SHA-256 checksums under `~/.pi/agent/state/routed-assignments/` (or the resolved `PI_CODING_AGENT_DIR`). The workflow engine uses the same private atomic artifact writer.
+
+Completion stays pending until its exact message is present in the parent conversation; requesting `pane_retention: "close"` closes the worker only after durable output and receipt. Queued completions interrupted by Escape are held for the next user prompt. Results remain readable after pane cleanup and parent restart. `subagent_control result` displays at most 12,000 characters; its `resultRef` identifies the complete artifact.
+
+`subagent` accepts explicit `files` and an opt-in `readonly` capability:
+
+```json
+{
+  "task": "Inspect the authentication flow and report source-backed findings.",
+  "description": "Authentication reconnaissance",
+  "readonly": true,
+  "files": ["docs/auth.md", "result:01234567-89ab-4cde-8fab-0123456789ab"]
+}
+```
+
+Use real result references returned by completed workers, not the example UUID. `files` is also accepted by subagent steering, `workspace_agent`, `message_agent`, and workspace resume. Small, complete UTF-8 files are embedded as submission-time evidence snapshots; larger or binary files remain canonical path/size references and can subsequently change. Missing or unreadable files reject the handoff before work starts. Attachments grant no tools or filesystem permissions.
+
+Read-only workers expose only `read`, `ls`, `find`, `grep`, and parent reporting. Writable tools, bash, delegation, and MCP tools cannot dispatch; provider extensions remain available for routed models. This is a Pi tool policy, not an OS sandbox.
+
+Subagent list/status includes `available_actions` and `nextAction`. `unknown` means identity or observation is unverified; `lost` means a coherent inventory proves the original executor absent. Neither means successful completion. Lost assignments remain unresolved until explicitly abandoned with `stop`; no replacement or side-effect replay is automatic. Stale-work attention includes one bounded diagnostic and is advisory, not proof of a hang. Finish currently running old-protocol workers before reloading Pi, and reload participating peers before using evidence attachments. Existing old worker launches do not gain correlated outcome records retroactively; they must be deliberately relaunched if more work is needed.
+
+### Durable independent branch work
+
+New `workspace_agent` launches record their objective, canonical repository/branch, checkout, and exact saved executor under the Pi agent directory's `state/branch-work/`. These records are independent of the launching primary's lifetime; existing worktrees are not guessed into records. An already recorded branch refuses a second executor.
+
+`workspace_agent_control` supports `list`, `status`, `pause`, and `resume`. `resume` requires a new explicit `message`; it never repeats the original task. A missing process may be restarted only from its verified saved Pi session, on a fresh interactive user request, after proving absence and an unoccupied matching checkout. Deleted or ambiguous checkouts are not recreated. Pause preserves the objective, session and worktree; these operations do not mean acceptance or task completion. Records are not automatically retired when a response finishes.
+
+A crash during a branch mutation preserves its lock rather than automatically stealing it. The error identifies the private lock for explicit inspection/recovery; read-only list/status remains available.
+
+### Isolated runtime smoke
+
+```sh
+npm run smoke:routing
+```
+
+This opt-in development harness requires a running Herdr session. It creates its own dedicated host tab, named isolated Herdr runtime, disposable Git fixture, and private Pi configuration/session/artifact directories. A credential-free native faux provider controls decisions while real Pi tools, Herdr panes, outcome records, and transcripts supply evidence. It checks a real read, a rejected read-only write, partial-error classification, output integrity, conversation receipt, pane cleanup, and result recovery after primary restart. Cleanup targets only its created runtime/resources and fails visibly rather than silently reporting success. It is not part of the normal test command and makes no remote model calls.
+
 ## Model routing and usage failover
 
 The router considers Haiku 5.5, Sonnet 5.5, Opus 5.5, GPT-6 Luna, and GPT-6.1 Sol. A routing classifier judges the required capability from ambiguity, dependency horizon, verification difficulty, and failure consequences; code selects an eligible provider/model. Exact, cheaply checkable edits may use small models. Ordinary UI or debugging work does not automatically require Opus. Without a classifier, a conservative local policy applies.

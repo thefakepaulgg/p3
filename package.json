@@ -34,6 +34,7 @@
   },
   "scripts": {
     "test": "./scripts/test-extensions.sh",
+    "smoke:routing": "node scripts/smoke-routing.mjs",
     "test:mcp-events": "node --experimental-strip-types --test extensions/mcp-events/tests/*.test.ts",
     "test:mcp-events:timeout": "MCP_EVENTS_LONG_TEST=1 node --experimental-strip-types --test extensions/mcp-events/tests/timeout.test.ts",
     "typecheck:mcp-events": "tsc -p extensions/mcp-events/tsconfig.json",

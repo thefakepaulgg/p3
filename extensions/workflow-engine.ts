@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { atomicWriteArtifact as atomicWrite } from "./routing/artifacts.ts";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type Component } from "@earendil-works/pi-tui";
@@ -98,12 +99,6 @@ class WorkflowOverlay implements Component {
     return [this.theme.fg("accent", this.theme.bold("Configured workflows")), ...text.slice(0, 28).map((line) => line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line), "", this.theme.fg("dim", "Escape to close · mutations remain slash commands")];
   }
   invalidate(): void {}
-}
-
-function atomicWrite(path: string, content: string): void {
-  const temp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  writeFileSync(temp, content, { encoding: "utf8", mode: 0o600 });
-  renameSync(temp, path);
 }
 
 async function gitLedger(pi: ExtensionAPI, cwd: string): Promise<GitLedger> {
