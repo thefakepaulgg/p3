@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-synthwave",
 	"vars": {
 		"hotPink": "#ff2975",
@@ -46,7 +46,6 @@
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
-		"toolText": "",
 		"toolTitle": "",
 		"toolOutput": "chromeDark",
 		"mdHeading": "neonMagenta",
@@ -62,7 +61,6 @@
 		"toolDiffAdded": "neonCyan",
 		"toolDiffRemoved": "hotPink",
 		"toolDiffContext": "chromeDark",
-		"link": "neonCyan",
 		"syntaxComment": "deepPurple",
 		"syntaxKeyword": "neonMagenta",
 		"syntaxFunction": "gold",
@@ -78,22 +76,7 @@
 		"thinkingMedium": "neonMagenta",
 		"thinkingHigh": "hotPink",
 		"thinkingXhigh": "neonCyan",
-		"bashMode": "neonCyan",
-		"statusLineBg": "darkBg",
-		"statusLineSep": 240,
-		"statusLineModel": "vaporPink",
-		"statusLinePath": "neonCyan",
-		"statusLineGitClean": "neonCyan",
-		"statusLineGitDirty": "neonOrange",
-		"statusLineContext": "electricPurple",
-		"statusLineSpend": "chrome",
-		"statusLineStaged": "neonCyan",
-		"statusLineDirty": "neonOrange",
-		"statusLineUntracked": "hotPink",
-		"statusLineOutput": "neonMagenta",
-		"statusLineCost": "vaporPink",
-		"statusLineSubagents": "hotPink",
-		"pythonMode": "gold"
+		"bashMode": "neonCyan"
 	},
 	"export": {
 		"pageBg": "#0c0c0c",

@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-dracula",
 	"vars": {
 		"background": "#282A36",
@@ -41,7 +41,6 @@
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
-		"toolText": "",
 		"toolTitle": "cyan",
 		"toolOutput": "comment",
 		"mdHeading": "purple",
@@ -57,7 +56,6 @@
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "red",
 		"toolDiffContext": "comment",
-		"link": "cyan",
 		"syntaxComment": "comment",
 		"syntaxKeyword": "pink",
 		"syntaxFunction": "green",
@@ -73,22 +71,7 @@
 		"thinkingMedium": "purple",
 		"thinkingHigh": "pink",
 		"thinkingXhigh": "orange",
-		"bashMode": "green",
-		"statusLineBg": "background",
-		"statusLineSep": "currentLine",
-		"statusLineModel": "purple",
-		"statusLinePath": "cyan",
-		"statusLineGitClean": "green",
-		"statusLineGitDirty": "orange",
-		"statusLineContext": "purple",
-		"statusLineSpend": "cyan",
-		"statusLineStaged": "green",
-		"statusLineDirty": "orange",
-		"statusLineUntracked": "pink",
-		"statusLineOutput": "pink",
-		"statusLineCost": "pink",
-		"statusLineSubagents": "purple",
-		"pythonMode": "yellow"
+		"bashMode": "green"
 	},
 	"export": {
 		"pageBg": "#1e1f29",
