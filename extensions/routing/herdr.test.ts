@@ -73,7 +73,7 @@ describe("routed worker Pi arguments", () => {
     expect(args).toContain("--session-id");
     expect(args[args.indexOf("--session-id") + 1]).toBe(assignmentId);
     expect(args[args.indexOf("--extension") + 1]).toBe(fileURLToPath(new URL("./worker-lifecycle.ts", import.meta.url)));
-    expect(args[args.indexOf("--tools") + 1]).toBe("read,ls,find,grep,message_parent");
+    expect(args[args.indexOf("--tools") + 1]).toBe("read,ls,find,grep,message_parent,ask_parent");
     expect(args).toContain("mcp__*");
     expect(args).toContain("--no-mcp");
     expect(args).not.toContain("--no-extensions");
@@ -698,13 +698,13 @@ describe("routed agent tab isolation", () => {
       return ok();
     } };
     try {
-      await expect(launchHerdrAgent(pi, "Inspect only", "Retain task", "luna", routes.luna, "/repo")).rejects.toThrow("pane w1:p2 was retained");
+      await expect(launchHerdrAgent(pi, "Inspect only", "Retain task", "luna", routes.luna, "/repo")).rejects.toThrow("herdr_socket_error: disconnected");
       expect(calls.some((args) => args.join(" ") === "tab close w1:t2")).toBe(false);
       expect(calls.some((args) => args.join(" ") === "pane close w1:p2")).toBe(false);
     } finally { restore(); }
   });
 
-  test("failed startup closes a newly owned tab", async () => {
+  test("failed startup preserves uncertain allocated resources", async () => {
     const restore = isolatedHerdrEnv();
     const calls: string[][] = [];
     const pi: any = { exec: async (_command: string, args: string[]) => {
@@ -717,7 +717,7 @@ describe("routed agent tab isolation", () => {
     } };
     try {
       await expect(launchHerdrAgent(pi, "Inspect only", "Broken task", "luna", routes.luna, "/repo")).rejects.toThrow("start_failed");
-      expect(calls.some((args) => args.join(" ") === "tab close w1:t2")).toBe(true);
+      expect(calls.some((args) => args.join(" ") === "tab close w1:t2")).toBe(false);
       expect(calls.some((args) => args.join(" ") === "pane close w1:p2")).toBe(false);
     } finally { restore(); }
   });

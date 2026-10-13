@@ -3,8 +3,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { saveAssignmentResult, writeAssignmentReceipt, resultRefForAssignment, resultPathForAssignment, askPathForAssignment, atomicWriteArtifact } from "./artifacts.ts";
+import { saveAssignmentResult, writeAssignmentReceipt, readAssignmentReceipt, resultRefForAssignment, resultPathForAssignment, askPathForAssignment, atomicWriteArtifact } from "./artifacts.ts";
 import routing from "../model-routing.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
 import { manifestPathForPane, readRoutingManifest, ROUTING_MANIFEST_VERSION, writeRoutingManifest } from "./manifest.ts";
@@ -94,6 +95,9 @@ const completedHerdrExec = (sessionPath: string, calls: string[][] = []) => {
 const sessionManager = (entries: any[] = []) => ({
   getEntries: () => entries, getSessionId: () => "session-1", getSessionDir: () => temp ?? "/tmp", getSessionFile: () => undefined,
 });
+
+const currentTask = async (control: any, ctx: any, handle: string) =>
+  (await control.execute("snapshot", { action: "list" }, undefined, undefined, ctx)).details.tasks.find((task: any) => task.handle === handle);
 
 const uiCtx = (widgets: Array<{ key: string; content: string[] | undefined }> = [], colors: string[] = []): any => ({
   hasUI: true, mode: "rpc", cwd: "/repo", sessionManager: sessionManager(),
@@ -493,22 +497,36 @@ test("Herdr completion delivers exactly one bounded custom message as a steer tu
   }
 });
 
-test("steering a completed task delivers the next completion", async () => {
+test("finished tasks reject steer; close and same-session resume deliver the next completion", async () => {
   const restoreEnv = herdrEnv();
   const tools: any[] = [];
   const lifecycle = new Map<string, Function>();
   const messages: any[] = [];
   const sessionPath = sessionWith("I am blocked pending a decision.");
   let promptCount = 0;
-  const nativeExec = completedHerdrExec(sessionPath);
+  const child = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  const workerPid = child.pid!;
+  await new Promise<void>((resolve, reject) => { child.once("error", reject); child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Fixture exit ${code}`))); });
+  const profile = [
+    { type: "session", version: 3, id: workerSessionId, timestamp: new Date().toISOString(), cwd: agentDir },
+    { type: "model_change", id: "a0000001", parentId: null, timestamp: new Date().toISOString(), provider: "openai-codex", modelId: "gpt-6-luna" },
+    { type: "thinking_level_change", id: "a0000002", parentId: "a0000001", timestamp: new Date().toISOString(), thinkingLevel: "high" },
+  ];
+  const saveTurn = (text: string) => writeFileSync(sessionPath, [...profile,
+    { type: "message", id: "response", parentId: "a0000002", timestamp: new Date().toISOString(), message: { role: "assistant", provider: "openai-codex", model: "gpt-6-luna", stopReason: "stop", content: [{ type: "text", text }] } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  saveTurn("I am blocked pending a decision.");
+  const calls: string[][] = [];
+  const nativeExec = completedHerdrExec(sessionPath, calls);
   const fake: any = {
     registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {},
     sendMessage: (message: any, options: any) => messages.push({ message, options }),
     on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
     exec: async (command: string, args: string[]) => {
       if (args.slice(0, 2).join(" ") === "agent prompt" && ++promptCount === 2) {
-        writeFileSync(sessionPath, `${sessionHeader()}\n${JSON.stringify({ type: "message", id: "response", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Completed after receiving the decision." }] } })}\n`);
+        saveTurn("Completed after receiving the decision.");
       }
+      if (args.slice(0, 2).join(" ") === "agent list") return { code: 0, stdout: JSON.stringify({ result: { agents: [] } }), stderr: "" };
       return nativeExec(command, args);
     },
   };
@@ -516,22 +534,40 @@ test("steering a completed task delivers the next completion", async () => {
     routing(fake);
     const launch = tools.find((tool) => tool.name === "subagent");
     const control = tools.find((tool) => tool.name === "subagent_control");
-    const ctx = uiCtx();
+    const ctx = uiCtx(); ctx.cwd = agentDir;
     const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna", pane_retention: "keep" }, undefined, undefined, ctx);
     for (let tick = 0; tick < 10 && messages.length < 1; tick += 1) await new Promise((done) => setTimeout(done, 40));
     expect(messages.filter((entry) => entry.message.customType === "subagent-completion")).toHaveLength(1);
 
     await lifecycle.get("message_end")?.({ message: { role: "custom", ...messages[0].message } }, ctx);
     const tracked = (await control.execute("list", { action: "list" }, undefined, undefined, ctx)).details.tasks[0];
+    const steered = await control.execute("2", { action: "steer", handle: launched.details.handle, message: "Use the user's decision and continue." }, undefined, undefined, ctx);
+    expect(steered.isError).toBe(true);
+    expect(steered.content[0].text).toContain("close its retained pane and resume");
+    expect(promptCount).toBe(1);
+    // Unit-only process-exit evidence: a real owned fixture process has exited.
+    writeAssignmentReceipt({ ...readAssignmentReceipt(tracked.assignmentId)!, workerPid });
     await withEditorAcknowledgement(tracked, async () => {
-      const steered = await control.execute("2", { action: "steer", handle: launched.details.handle, message: "Use the user's decision and continue." }, undefined, undefined, ctx);
-      expect(steered.isError).not.toBe(true);
+      const closed = await control.execute("close", { action: "close", handle: tracked.handle }, undefined, undefined, ctx);
+      expect(closed.isError).not.toBe(true);
     });
+    const resumed = await control.execute("resume", { action: "resume", handle: tracked.handle, message: "Use the user's decision and continue." }, undefined, undefined, ctx);
+    expect(resumed.isError).not.toBe(true);
+    expect(resumed.details.handle).not.toBe(tracked.handle);
+    expect(resumed.details.assignmentId).not.toBe(tracked.assignmentId);
+    const continued = await currentTask(control, ctx, resumed.details.handle);
+    expect(continued.sessionId).toBe(tracked.sessionId);
+    expect(continued.continuedFrom).toBe(tracked.handle);
+    const followUp = calls.filter((args) => args[1] === "prompt").at(-1)![3];
+    expect(followUp).toStartWith(`p3:routed-request ${resumed.details.assignmentId}\nUse the user's decision and continue.`);
+    expect(followUp).not.toContain("Inspect the implementation");
     for (let tick = 0; tick < 10 && messages.length < 2; tick += 1) await new Promise((done) => setTimeout(done, 40));
 
     const completions = messages.filter((entry) => entry.message.customType === "subagent-completion");
     expect(completions).toHaveLength(2);
     expect(completions[1].message.content).toContain("Completed after receiving the decision.");
+    expect(completions[1].message.details.handle).toBe(resumed.details.handle);
+    expect(completions[1].message.details.assignmentId).toBe(resumed.details.assignmentId);
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -662,6 +698,7 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
   const lifecycle = new Map<string, Function>();
   const calls: string[][] = [];
   const restoreEnv = herdrEnv();
+  let assignmentId: string; let requestId: string; let escaped = false;
   const fake: any = {
     registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
     on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
@@ -670,8 +707,17 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
       const key = args.slice(0, 2).join(" ");
       if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
       if (key === "pane list") return { code: 0, stdout: JSON.stringify({ result: { panes: [{ pane_id: "w1:p2" }] } }), stderr: "" };
-      if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
-      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent("working") } }), stderr: "" };
+      if (key === "tab create") {
+        assignmentId = args.find((arg) => arg.startsWith("PI_ROUTED_ASSIGNMENT_ID="))!.split("=")[1];
+        return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
+      }
+      // Unit-only native cancellation evidence, correlated to the submitted request.
+      if (key === "agent prompt") requestId = /^p3:routed-request ([0-9a-f-]{36})\n/.exec(args[3])![1];
+      if (key === "agent send-keys" && args[3] === "esc") escaped = true;
+      if (key === "agent prompt" || escaped) writeAssignmentReceipt({ version: 1, assignmentId, requestId, generation: 1,
+        sessionId: workerSessionId, sessionPath: defaultSession, paneId: "w1:p2", terminalId: "terminal-w1:p2",
+        workerPid: process.pid, outcome: escaped ? "aborted" : "running", lastActivityAt: Date.now() });
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent(escaped ? "idle" : "working") } }), stderr: "" };
       return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
     },
   };
@@ -688,8 +734,13 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
     const refusedClear = await control.execute("3", { action: "clear", handle: launched.details.handle });
     expect(refusedClear.isError).toBe(true);
     expect(refusedClear.content[0].text).toContain("Active tasks cannot be cleared");
-    await control.execute("4", { action: "stop", handle: launched.details.handle });
-    await control.execute("5", { action: "close", handle: launched.details.handle });
+    const stopped = await control.execute("4", { action: "stop", handle: launched.details.handle });
+    expect(stopped.isError).not.toBe(true);
+    const tracked = await currentTask(control, ctx, launched.details.handle);
+    await withEditorAcknowledgement(tracked, async () => {
+      const closed = await control.execute("5", { action: "close", handle: launched.details.handle }, undefined, undefined, ctx);
+      expect(closed.isError).not.toBe(true);
+    });
     expect(calls.some(args => args.join(" ") === "pane close w1:p2")).toBe(true);
     const list = await control.execute("6", { action: "list" });
     expect(list.content[0].text).toContain("pane closed");
@@ -708,6 +759,7 @@ test("stop with close aborts tracking, records the closed pane, and exposes live
   const messages: any[] = [];
   const restoreEnv = herdrEnv();
   let agentStatus = "unknown";
+  let assignmentId: string; let requestId: string; let escaped = false;
   const fake: any = {
     registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {},
     sendMessage: (message: any) => messages.push(message),
@@ -716,9 +768,18 @@ test("stop with close aborts tracking, records the closed pane, and exposes live
       calls.push(args);
       const key = args.slice(0, 2).join(" ");
       if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
-      if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
-      if (key === "agent start") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent("working") } }), stderr: "" };
-      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent(agentStatus) } }), stderr: "" };
+      if (key === "tab create") {
+        assignmentId = args.find((arg) => arg.startsWith("PI_ROUTED_ASSIGNMENT_ID="))!.split("=")[1];
+        return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
+      }
+      // Unit-only native cancellation evidence, correlated to the submitted request.
+      if (key === "agent prompt") requestId = /^p3:routed-request ([0-9a-f-]{36})\n/.exec(args[3])![1];
+      if (key === "agent send-keys" && args[3] === "esc") escaped = true;
+      if (key === "agent prompt" || escaped) writeAssignmentReceipt({ version: 1, assignmentId, requestId, generation: 1,
+        sessionId: workerSessionId, sessionPath: defaultSession, paneId: "w1:p2", terminalId: "terminal-w1:p2",
+        workerPid: process.pid, outcome: escaped ? "aborted" : "running", lastActivityAt: Date.now() });
+      if (key === "agent start") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent(escaped ? "idle" : "working") } }), stderr: "" };
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent(escaped ? "idle" : agentStatus) } }), stderr: "" };
       return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
     },
   };
@@ -732,7 +793,8 @@ test("stop with close aborts tracking, records the closed pane, and exposes live
     expect(status.content[0].text).toContain("Herdr status: unknown");
 
     agentStatus = "working";
-    await control.execute("3", { action: "stop", handle: launched.details.handle, close_pane: true }, undefined, undefined, ctx);
+    const stopped = await control.execute("3", { action: "stop", handle: launched.details.handle, close_pane: true }, undefined, undefined, ctx);
+    expect(stopped.isError).not.toBe(true);
     const list = await control.execute("4", { action: "list" }, undefined, undefined, ctx);
     expect(list.content[0].text).toContain("[stopped]");
     expect(list.content[0].text).toContain("pane closed");
@@ -855,7 +917,7 @@ const completionFixture = async (paneRetention?: "keep" | "close") => {
   const savedEntries: any[] = [];
   const sessionPath = sessionWith("Durable completed result");
   const fake: any = {
-    registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {},
+    registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: (customType: string, data: any) => savedEntries.push({ type: "custom", customType, data: structuredClone(data) }),
     on: (name: string, handler: Function) => lifecycle.set(name, handler),
     sendMessage: (message: any, options: any) => messages.push({ message, options }),
     events: { on: () => () => {}, emit: () => {} }, exec: completedHerdrExec(sessionPath, calls),
@@ -876,22 +938,25 @@ const completionFixture = async (paneRetention?: "keep" | "close") => {
 test("default pane auto-close follows matching custom message_end, not queued completion or mismatched receipts", async () => {
   const restore = herdrEnv();
   const fixture = await completionFixture();
-  const { lifecycle, messages, calls, tracked, ctx } = fixture;
+  const { control, lifecycle, messages, calls, tracked, ctx } = fixture;
   try {
     expect(messages).toHaveLength(1);
-    expect(tracked.pendingCompletion).toBe(true);
-    expect(tracked.completionNotifiedAt).toBeUndefined();
+    expect((await currentTask(control, ctx, tracked.handle)).pendingCompletion).toBe(true);
+    expect((await currentTask(control, ctx, tracked.handle)).completionNotifiedAt).toBeUndefined();
     expect(calls.some((args) => args.join(" ") === "pane close w1:p2")).toBe(false);
     const message = { role: "custom", ...messages[0].message };
     await lifecycle.get("message_end")!({ message: { ...message, details: { ...message.details, assignmentId: randomUUID() } } }, ctx);
     await lifecycle.get("message_end")!({ message: { ...message, details: { ...message.details, generation: 999 } } }, ctx);
-    expect(tracked.completionNotifiedAt).toBeUndefined();
-    await lifecycle.get("message_end")!({ message }, ctx);
-    for (let tick = 0; tick < 10 && !tracked.paneClosedAt; tick += 1) await new Promise((done) => setTimeout(done, 10));
-    expect(tracked.pendingCompletion).toBe(false);
-    expect(tracked.completionDeliveredVia).toBe("message");
-    expect(tracked.paneClosedAt).toBeNumber();
-    expect(calls.filter((args) => args.join(" ") === "pane close w1:p2")).toHaveLength(1);
+    expect((await currentTask(control, ctx, tracked.handle)).completionNotifiedAt).toBeUndefined();
+    await withEditorAcknowledgement(tracked, async () => {
+      await lifecycle.get("message_end")!({ message }, ctx);
+      for (let tick = 0; tick < 10 && !(await currentTask(control, ctx, tracked.handle)).paneClosedAt; tick += 1) await new Promise((done) => setTimeout(done, 10));
+      expect((await currentTask(control, ctx, tracked.handle)).pendingCompletion).toBe(false);
+      expect((await currentTask(control, ctx, tracked.handle)).completionDeliveredVia).toBe("message");
+      expect((await currentTask(control, ctx, tracked.handle)).paneClosedAt).toBeNumber();
+      expect(fixture.savedEntries.filter((entry: any) => entry.type === "custom" && entry.customType === "routed-task").at(-1).data.paneClosedAt).toBe((await currentTask(control, ctx, tracked.handle)).paneClosedAt);
+      expect(calls.filter((args) => args.join(" ") === "pane close w1:p2")).toHaveLength(1);
+    });
     await lifecycle.get("message_end")!({ message }, ctx);
     await lifecycle.get("agent_settled")!({}, ctx);
     expect(messages).toHaveLength(1);
@@ -903,12 +968,12 @@ test("default pane auto-close follows matching custom message_end, not queued co
 
 test("aborted queued delivery requeues once for nextTurn; matching saved transcript consumes the single receipt", async () => {
   const restore = herdrEnv();
-  const fixture = await completionFixture();
-  const { lifecycle, messages, savedEntries, tracked, ctx } = fixture;
+  const fixture = await completionFixture("keep");
+  const { control, lifecycle, messages, savedEntries, tracked, ctx } = fixture;
   try {
     expect(messages).toHaveLength(1);
     await lifecycle.get("agent_end")!({ messages: [{ role: "assistant", stopReason: "aborted" }] }, ctx);
-    expect(tracked.completionNotifiedAt).toBeUndefined();
+    expect((await currentTask(control, ctx, tracked.handle)).completionNotifiedAt).toBeUndefined();
     await lifecycle.get("agent_settled")!({}, ctx);
     expect(messages).toHaveLength(2);
     expect(messages[1].options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
@@ -916,11 +981,11 @@ test("aborted queued delivery requeues once for nextTurn; matching saved transcr
     expect(messages).toHaveLength(2);
     savedEntries.push({ type: "custom_message", ...messages[1].message, details: { ...messages[1].message.details, generation: 999 } });
     await lifecycle.get("agent_settled")!({}, ctx);
-    expect(tracked.completionNotifiedAt).toBeUndefined();
+    expect((await currentTask(control, ctx, tracked.handle)).completionNotifiedAt).toBeUndefined();
     savedEntries.push({ type: "custom_message", ...messages[1].message });
     await lifecycle.get("agent_settled")!({}, ctx);
-    expect(tracked.completionDeliveredVia).toBe("message");
-    expect(tracked.pendingCompletion).toBe(false);
+    expect((await currentTask(control, ctx, tracked.handle)).completionDeliveredVia).toBe("message");
+    expect((await currentTask(control, ctx, tracked.handle)).pendingCompletion).toBe(false);
     await lifecycle.get("agent_settled")!({}, ctx);
     expect(messages).toHaveLength(2);
   } finally {
@@ -931,14 +996,14 @@ test("aborted queued delivery requeues once for nextTurn; matching saved transcr
 
 test("durable manual result retrieval is acknowledged only by its native toolResult message_end", async () => {
   const restore = herdrEnv();
-  const { lifecycle, control, tracked, ctx } = await completionFixture();
+  const { lifecycle, control, tracked, ctx } = await completionFixture("keep");
   try {
     const result = await control.execute("read", { action: "result", handle: tracked.handle }, undefined, undefined, ctx);
     expect(result.details.durable).toBe(true);
-    expect(tracked.completionNotifiedAt).toBeUndefined();
+    expect((await currentTask(control, ctx, tracked.handle)).completionNotifiedAt).toBeUndefined();
     await lifecycle.get("message_end")!({ message: { role: "toolResult", toolName: "subagent_control", details: result.details, content: result.content } }, ctx);
-    expect(tracked.completionDeliveredVia).toBe("manual");
-    expect(tracked.pendingCompletion).toBe(false);
+    expect((await currentTask(control, ctx, tracked.handle)).completionDeliveredVia).toBe("manual");
+    expect((await currentTask(control, ctx, tracked.handle)).pendingCompletion).toBe(false);
   } finally {
     await lifecycle.get("session_shutdown")?.();
     restore();
@@ -965,8 +1030,8 @@ const editorSocketPath = (id: string) => join(tmpdir(), `p3-editor-${process.get
 const interruptionFixture = async (outcome: "aborted" | "completed" = "aborted") => {
   const restore = herdrEnv(); const tools: any[] = []; const lifecycle = new Map<string, Function>();
   const calls: string[][] = []; const messages: any[] = []; const order: string[] = [];
-  let assignmentId: string | undefined; let requestId: string | undefined; let escaped = false; let foreignAfterEsc = false;
-  const runningReceipt = () => writeAssignmentReceipt({ version: 1, assignmentId: assignmentId!, requestId: requestId!, generation: 1,
+  let assignmentId: string | undefined; let requestId: string | undefined; let escaped = false; let foreignAfterEsc = false; let generation = 0;
+  const runningReceipt = () => writeAssignmentReceipt({ version: 1, assignmentId: assignmentId!, requestId: requestId!, generation,
     sessionId: workerSessionId, sessionPath: defaultSession, paneId: "w1:p2", terminalId: "terminal-w1:p2", workerPid: process.pid,
     outcome: "running", lastActivityAt: Date.now() });
   const fake: any = {
@@ -982,14 +1047,14 @@ const interruptionFixture = async (outcome: "aborted" | "completed" = "aborted")
       }
       if (key === "agent prompt") {
         requestId = /^p3:routed-request ([0-9a-f-]{36})\n/.exec(args[3])?.[1];
-        runningReceipt(); order.push("prompt");
+        escaped = false; generation += 1; runningReceipt(); order.push("prompt");
       }
       if (key === "agent send-keys" && args[3] === "esc") {
         escaped = true; order.push("esc");
         if (outcome === "completed") {
           writeFileSync(defaultSession, `${sessionHeader()}\n${JSON.stringify({ type: "message", id: "response", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Won the completion race" }] } })}\n`);
           seedCompletion(assignmentId!, requestId!, defaultSession, "Won the completion race");
-        } else writeAssignmentReceipt({ version: 1, assignmentId: assignmentId!, requestId: requestId!, generation: 1, sessionId: workerSessionId,
+        } else writeAssignmentReceipt({ version: 1, assignmentId: assignmentId!, requestId: requestId!, generation, sessionId: workerSessionId,
           sessionPath: defaultSession, paneId: "w1:p2", terminalId: "terminal-w1:p2", workerPid: process.pid, outcome: "aborted", lastActivityAt: Date.now() });
       }
       if (key === "agent get" || key === "agent start") {
@@ -1024,18 +1089,19 @@ test("interrupt sends one Esc, verifies native settlement and idle editor before
     const originalRequest = tracked.requestId;
     await withEditorAcknowledgement(tracked, async () => {
       const result = await control.execute("interrupt", { action: "interrupt", handle: tracked.handle, message: "Use replacement direction" }, undefined, undefined, ctx);
-      expect(result.isError).not.toBe(true); expect(tracked.state).toBe("running");
+      expect(result.isError).not.toBe(true); expect((await currentTask(control, ctx, tracked.handle)).state).toBe("running");
     }, (request) => {
       expect(request.clearOwned).toBe(true); expect(request.requireIdle).toBe(true); order.push("editor-idle"); return { empty: true };
     });
     expect(calls.filter((args) => args[1] === "send-keys" && args[3] === "esc")).toHaveLength(1);
     expect(calls.filter((args) => args[1] === "prompt")).toHaveLength(2);
-    expect(tracked.requestId).not.toBe(originalRequest); expect(tracked.instructionIds).toContain(tracked.requestId);
+    const continued = await currentTask(control, ctx, tracked.handle);
+    expect(continued.requestId).not.toBe(originalRequest); expect(continued.instructionIds).toContain(continued.requestId);
     expect(order.indexOf("esc")).toBeLessThan(order.indexOf("settled-identity"));
     expect(order.indexOf("settled-identity")).toBeLessThan(order.indexOf("editor-idle"));
     expect(order.indexOf("editor-idle")).toBeLessThan(order.lastIndexOf("prompt"));
     const prompt = calls.filter((args) => args[1] === "prompt").at(-1)![3];
-    expect(prompt).toBe(`p3:routed-request ${tracked.requestId}\nUse replacement direction`);
+    expect(prompt).toBe(`p3:routed-request ${continued.requestId}\nUse replacement direction`);
     expect(prompt).not.toContain("Original bounded task");
   } finally { await fixture.shutdown(); }
 });
@@ -1049,7 +1115,8 @@ test("completion racing Esc is preserved and delivered once without editor clear
     }, () => { editorContacts += 1; return { empty: true }; });
     expect(editorContacts).toBe(0); expect(fixture.calls.filter((args) => args[1] === "prompt")).toHaveLength(1);
     expect(fixture.calls.filter((args) => args[1] === "send-keys" && args[3] === "esc")).toHaveLength(1);
-    expect(fixture.tracked.result).toBe("Won the completion race");
+    const result = await fixture.control.execute("result", { action: "result", handle: fixture.tracked.handle }, undefined, undefined, fixture.ctx);
+    expect(result.details.durable).toBe(true); expect(result.content[0].text).toContain("Won the completion race");
     const completions = fixture.messages.filter((entry) => entry.message.customType === "subagent-completion"); expect(completions).toHaveLength(1);
     await fixture.lifecycle.get("message_end")!({ message: { role: "custom", ...completions[0].message } }, fixture.ctx);
     await fixture.lifecycle.get("agent_settled")!({}, fixture.ctx);
@@ -1062,7 +1129,7 @@ test("an unowned editor acknowledgement refuses replacement after Esc rather tha
     await withEditorAcknowledgement(fixture.tracked, async () => {
       const result = await fixture.control.execute("interrupt", { action: "interrupt", handle: fixture.tracked.handle, message: "Replacement" }, undefined, undefined, fixture.ctx);
       expect(result.isError).toBe(true); expect(result.content[0].text).toContain("unowned draft");
-      expect(fixture.tracked.state).toBe("interrupted");
+      expect((await currentTask(fixture.control, fixture.ctx, fixture.tracked.handle)).state).toBe("interrupted");
     }, () => ({ error: "Worker editor contains an unowned draft; it was preserved" }));
     expect(fixture.calls.filter((args) => args[1] === "prompt")).toHaveLength(1);
   } finally { await fixture.shutdown(); }

@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { readAssignmentReceipt, saveAssignmentResult, writeAssignmentReceipt, type AssignmentOutcome, type AssignmentReceipt } from "./artifacts.ts";
+import { hasCancellationIntent, readAssignmentReceipt, saveAssignmentResult, writeAssignmentReceipt, type AssignmentOutcome, type AssignmentReceipt } from "./artifacts.ts";
 import { parseJson, runHerdr } from "./herdr.ts";
 import { readRoutingManifest } from "./manifest.ts";
 import { registerWorkerEditorGuard } from "./editor-guard.ts";
@@ -75,10 +75,15 @@ export default function routedWorkerLifecycle(pi: ExtensionAPI): void {
   pi.on("message_update", touch);
   pi.on("agent_settled", (_event, ctx: ExtensionContext) => {
     if (!ownedRun || !receipt || receipt.sessionId !== ctx.sessionManager.getSessionId()) return;
+    const entries = ctx.sessionManager.getEntries();
+    const entry = responseEntryId ? entries.find((entry) => entry.id === responseEntryId) : undefined;
+    const lastAssistant = entries.findLast((entry) => entry.type === "message" && entry.message.role === "assistant");
+    // Pi 1.0 reports an awaited-tool cancellation as error; correlate its native sentinel to our Esc intent.
+    if (outcome === "error" && entry === lastAssistant && entry?.type === "message" && entry.message.role === "assistant" &&
+      entry.message.stopReason === "error" && entry.message.errorMessage === "This operation was aborted" && hasCancellationIntent(receipt)) outcome = "aborted";
     if (outcome === "aborted") cancelAssignmentAsk(assignmentId);
     if (readPendingAssignmentAsk(assignmentId)) { touch(); return; }
     if (process.env.PI_SUBAGENT_MODE === "background") { touch(); return; }
-    const entry = responseEntryId ? ctx.sessionManager.getEntries().find((entry) => entry.id === responseEntryId) : undefined;
     const verifiedResponse = entry?.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "stop";
     const completed = outcome === "completed" && verifiedResponse && !!responseText;
     const next: AssignmentReceipt = { ...receipt, outcome: outcome === "aborted" ? "aborted" : completed ? "completed" : "error", lastActivityAt: Date.now(), responseEntryId };

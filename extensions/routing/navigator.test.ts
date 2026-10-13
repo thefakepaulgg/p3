@@ -74,7 +74,7 @@ test("focus uses pane focus so Herdr updates the attached client view", async ()
   });
   await focusManifestPane({} as any, "w1:p2");
   expect(calls).toEqual([
-    ["pane", "list", "--workspace", process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID!],
+    ["pane", "list", ...((process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID) ? ["--workspace", (process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID)!] : [])],
     ["pane", "focus", "w1:p2"],
   ]);
 });

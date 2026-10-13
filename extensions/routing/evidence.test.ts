@@ -64,7 +64,7 @@ describe("prepareEvidence", () => {
   });
 
   test("rejects empty string path", () => {
-    expect(() => prepareEvidence([""], temp)).toThrow("non-empty string");
+    expect(() => prepareEvidence([""], temp)).toThrow(/non-empty.*string/);
   });
 
   test("rejects more than 32 files", () => {

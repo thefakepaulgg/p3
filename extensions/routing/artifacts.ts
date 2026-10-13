@@ -82,3 +82,17 @@ export function readAssignmentResult(id: string, expectedHash: string): string {
     metadata.assignmentId !== id || metadata.hash !== expectedHash) throw new Error("Routed result integrity check failed");
   return text;
 }
+
+export function writeCancellationIntent(receipt: AssignmentReceipt): void {
+  atomicWriteArtifact(join(assignmentDirectory(receipt.assignmentId), "cancellation.json"), JSON.stringify({
+    assignmentId: receipt.assignmentId, requestId: receipt.requestId, generation: receipt.generation,
+    sessionId: receipt.sessionId, paneId: receipt.paneId, terminalId: receipt.terminalId, nonce: randomUUID(),
+  }));
+}
+
+export function hasCancellationIntent(receipt: AssignmentReceipt): boolean {
+  try {
+    const intent = JSON.parse(readFileSync(join(assignmentDirectory(receipt.assignmentId), "cancellation.json"), "utf8"));
+    return UUID.test(intent.nonce) && ["assignmentId", "requestId", "generation", "sessionId", "paneId", "terminalId"].every((key) => intent[key] === receipt[key as keyof AssignmentReceipt]);
+  } catch { return false; }
+}
