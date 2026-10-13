@@ -2,8 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
-import { saveAssignmentResult, writeAssignmentReceipt, resultRefForAssignment, resultPathForAssignment } from "./artifacts.ts";
+import { createServer } from "node:net";
+import { createHash, randomUUID } from "node:crypto";
+import { saveAssignmentResult, writeAssignmentReceipt, resultRefForAssignment, resultPathForAssignment, askPathForAssignment, atomicWriteArtifact } from "./artifacts.ts";
 import routing from "../model-routing.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
 import { manifestPathForPane, readRoutingManifest, ROUTING_MANIFEST_VERSION, writeRoutingManifest } from "./manifest.ts";
@@ -117,6 +118,11 @@ test("registers the simplified public surface", () => {
   const properties = tools.find((tool) => tool.name === "subagent").parameters.properties;
   expect(properties.files.type).toBe("array");
   expect(properties.readonly.type).toBe("boolean");
+  const controlProperties = tools.find((tool) => tool.name === "subagent_control").parameters.properties;
+  expect(JSON.stringify(controlProperties.action)).toContain('"resume"');
+  expect(JSON.stringify(controlProperties.action)).toContain('"interrupt"');
+  expect(JSON.stringify(controlProperties.action)).toContain('"reply"');
+  expect(controlProperties.ask_id.type).toBe("string");
   expect(properties.surface).toBeUndefined();
   expect(properties.isolation).toBeUndefined();
   expect(properties.route.type).toBe("string");
@@ -135,9 +141,15 @@ test("public subagent rejects unsupported capabilities before launch", async () 
   };
   routing(fake);
   const launch = tools.find((tool) => tool.name === "subagent");
-  await expect(launch.execute("1", { task: "Inspect", description: "Inspect task", capabilities: ["shell"] }, undefined, undefined, uiCtx())).rejects.toThrow("capabilities must contain only memory");
-  await expect(launch.execute("2", { task: "Inspect", description: "Inspect task", effort: "extreme" }, undefined, undefined, uiCtx())).rejects.toThrow("unsupported effort level extreme");
-  for (const effort of ["xhigh", "max"]) await expect(launch.execute("3", { task: "Inspect", description: "Inspect task", effort }, undefined, undefined, uiCtx())).rejects.toThrow("maximum effort is high");
+  for (const [patch, expected] of [
+    [{ capabilities: ["shell"] }, "capabilities must contain only memory"],
+    [{ effort: "extreme" }, "unsupported effort level extreme"],
+    [{ effort: "xhigh" }, "maximum effort is high"], [{ effort: "max" }, "maximum effort is high"],
+  ] as const) {
+    const result = await launch.execute("invalid", { task: "Inspect", description: "Inspect task", ...patch }, undefined, undefined, uiCtx());
+    expect(result.isError).toBe(true); expect(result.content[0].text).toContain(expected);
+    expect(result.details.error.operation).toBe("subagent");
+  }
 });
 
 test("launches an explicitly requested model outside the programmed routes", async () => {
@@ -401,7 +413,8 @@ test("every subagent uses Herdr and only overlapping owned paths conflict", asyn
     const implemented = await launch.execute("2", { task: "Implement the planned change", description: "Implement change", route: "luna" }, undefined, undefined, ctx);
     expect(implemented.details.phase).toBe("implement");
     await expect(launch.execute("3", { task: "Edit the parser", description: "Parser A", route: "luna", owned_paths: ["src/parser"] }, undefined, undefined, ctx)).resolves.toBeDefined();
-    await expect(launch.execute("4", { task: "Edit the parser tests", description: "Parser B", route: "luna", owned_paths: ["src/parser/tests"] }, undefined, undefined, ctx)).rejects.toThrow("overlapping paths");
+    const overlap = await launch.execute("4", { task: "Edit the parser tests", description: "Parser B", route: "luna", owned_paths: ["src/parser/tests"] }, undefined, undefined, ctx);
+    expect(overlap.isError).toBe(true); expect(overlap.content[0].text).toContain("overlapping paths");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -460,7 +473,7 @@ test("Herdr completion delivers exactly one bounded custom message as a steer tu
     expect(completedEntry.result).toBeUndefined();
     expect(completedEntry.notifiedStates).toEqual(["completed"]);
     expect(completedEntry.completionDeliveredVia).toBe("message");
-    expect(completedEntry.paneRetention).toBe("keep");
+    expect(completedEntry.paneRetention).toBe("close");
 
     // The widget tracks the task and then its completion.
     expect(widgets.every((entry) => entry.key === "routed-tasks")).toBe(true);
@@ -504,12 +517,16 @@ test("steering a completed task delivers the next completion", async () => {
     const launch = tools.find((tool) => tool.name === "subagent");
     const control = tools.find((tool) => tool.name === "subagent_control");
     const ctx = uiCtx();
-    const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
+    const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna", pane_retention: "keep" }, undefined, undefined, ctx);
     for (let tick = 0; tick < 10 && messages.length < 1; tick += 1) await new Promise((done) => setTimeout(done, 40));
     expect(messages.filter((entry) => entry.message.customType === "subagent-completion")).toHaveLength(1);
 
     await lifecycle.get("message_end")?.({ message: { role: "custom", ...messages[0].message } }, ctx);
-    await control.execute("2", { action: "steer", handle: launched.details.handle, message: "Use the user's decision and continue." }, undefined, undefined, ctx);
+    const tracked = (await control.execute("list", { action: "list" }, undefined, undefined, ctx)).details.tasks[0];
+    await withEditorAcknowledgement(tracked, async () => {
+      const steered = await control.execute("2", { action: "steer", handle: launched.details.handle, message: "Use the user's decision and continue." }, undefined, undefined, ctx);
+      expect(steered.isError).not.toBe(true);
+    });
     for (let tick = 0; tick < 10 && messages.length < 2; tick += 1) await new Promise((done) => setTimeout(done, 40));
 
     const completions = messages.filter((entry) => entry.message.customType === "subagent-completion");
@@ -618,7 +635,7 @@ test("manual retrieval without a matching durable tool receipt does not consume 
     const launch = tools.find((tool) => tool.name === "subagent");
     const control = tools.find((tool) => tool.name === "subagent_control");
     const ctx = uiCtx();
-    const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
+    const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna", pane_retention: "keep" }, undefined, undefined, ctx);
     // Stop the watcher, mark the task completed by hand, then consume the result manually.
     await control.execute("2", { action: "stop", handle: launched.details.handle }, undefined, undefined, ctx);
     const tracked = (await control.execute("3", { action: "list" }, undefined, undefined, ctx)).details.tasks[0];
@@ -628,7 +645,10 @@ test("manual retrieval without a matching durable tool receipt does not consume 
     expect(tracked.completionDeliveredVia).toBeUndefined();
     // Idle alone cannot establish a new completed result after steering.
     status = "idle";
-    await control.execute("5", { action: "steer", handle: launched.details.handle, message: "continue" }, undefined, undefined, ctx);
+    await withEditorAcknowledgement(tracked, async () => {
+      const steered = await control.execute("5", { action: "steer", handle: launched.details.handle, message: "continue" }, undefined, undefined, ctx);
+      expect(steered.isError).not.toBe(true);
+    });
     await new Promise((done) => setTimeout(done, 200));
     expect(messages.filter((entry) => entry.message.customType === "subagent-completion")).toHaveLength(0);
     await lifecycle.get("session_shutdown")?.();
@@ -660,12 +680,14 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
     const launch = tools.find(tool => tool.name === "subagent");
     const control = tools.find(tool => tool.name === "subagent_control");
     const ctx: any = { hasUI: true, cwd: "/repo", sessionManager: sessionManager(), modelRegistry: { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true }, ui: { setStatus: () => {}, theme: { fg: (_: string, text: string) => text } } };
-    const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
+    const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna", pane_retention: "keep" }, undefined, undefined, ctx);
     expect(launched.content[0].text).toContain("pane w1:p2");
     expect(launched.content[0].text).toContain("Do not poll");
     await control.execute("2", { action: "focus", handle: launched.details.handle });
     expect(calls.some(args => args.join(" ") === "pane focus w1:p2")).toBe(true);
-    await expect(control.execute("3", { action: "clear", handle: launched.details.handle })).rejects.toThrow("Active tasks cannot be cleared");
+    const refusedClear = await control.execute("3", { action: "clear", handle: launched.details.handle });
+    expect(refusedClear.isError).toBe(true);
+    expect(refusedClear.content[0].text).toContain("Active tasks cannot be cleared");
     await control.execute("4", { action: "stop", handle: launched.details.handle });
     await control.execute("5", { action: "close", handle: launched.details.handle });
     expect(calls.some(args => args.join(" ") === "pane close w1:p2")).toBe(true);
@@ -753,7 +775,7 @@ test("routing RPC refuses launches outside the user-facing root session", async 
     requestId: "req-no-ui", version: 1, task: "Do work", description: "Workflow step",
     owner: { kind: "workflow", runId: "run-1", stepId: "step-1", attemptId: "attempt-1" },
   });
-  expect(await reply).toEqual({ success: false, error: "routing RPC can only launch from the user-facing root Pi session" });
+  expect(await reply).toMatchObject({ success: false, error: expect.stringContaining("routing RPC can only launch from the user-facing root Pi session") });
   await lifecycle.get("session_shutdown")?.();
 });
 
@@ -825,7 +847,7 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
   }
 });
 
-const completionFixture = async (paneRetention: "keep" | "close" = "keep") => {
+const completionFixture = async (paneRetention?: "keep" | "close") => {
   const tools: any[] = [];
   const lifecycle = new Map<string, Function>();
   const messages: any[] = [];
@@ -851,9 +873,9 @@ const completionFixture = async (paneRetention: "keep" | "close" = "keep") => {
   return { control, lifecycle, messages, calls, savedEntries, tracked, ctx };
 };
 
-test("pane auto-close follows matching custom message_end, not queued completion or mismatched receipts", async () => {
+test("default pane auto-close follows matching custom message_end, not queued completion or mismatched receipts", async () => {
   const restore = herdrEnv();
-  const fixture = await completionFixture("close");
+  const fixture = await completionFixture();
   const { lifecycle, messages, calls, tracked, ctx } = fixture;
   try {
     expect(messages).toHaveLength(1);
@@ -921,4 +943,158 @@ test("durable manual result retrieval is acknowledged only by its native toolRes
     await lifecycle.get("session_shutdown")?.();
     restore();
   }
+});
+
+const withEditorAcknowledgement = async (task: any, run: () => Promise<void>, acknowledge?: (request: any) => object) => {
+  const path = editorSocketPath(task.assignmentId);
+  const server = createServer((socket) => {
+    let input = ""; socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      input += chunk; if (!input.includes("\n")) return;
+      const request = JSON.parse(input.split("\n")[0]);
+      const matches = request.assignmentId === task.assignmentId && request.handle === task.handle && request.token === task.messageToken &&
+        request.parentSessionId === task.parentSessionId && request.paneId === task.paneId && request.terminalId === task.terminalId && request.sessionId === task.sessionId;
+      socket.end(JSON.stringify(matches ? acknowledge?.(request) ?? { empty: true } : { error: "foreign identity" }) + "\n");
+    });
+  });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
+  try { await run(); } finally { await new Promise<void>((resolve) => server.close(() => resolve())); rmSync(path, { force: true }); }
+};
+const editorSocketPath = (id: string) => join(tmpdir(), `p3-editor-${process.getuid?.() ?? "local"}-${createHash("sha256").update(id).digest("hex").slice(0, 20)}.sock`);
+
+const interruptionFixture = async (outcome: "aborted" | "completed" = "aborted") => {
+  const restore = herdrEnv(); const tools: any[] = []; const lifecycle = new Map<string, Function>();
+  const calls: string[][] = []; const messages: any[] = []; const order: string[] = [];
+  let assignmentId: string | undefined; let requestId: string | undefined; let escaped = false; let foreignAfterEsc = false;
+  const runningReceipt = () => writeAssignmentReceipt({ version: 1, assignmentId: assignmentId!, requestId: requestId!, generation: 1,
+    sessionId: workerSessionId, sessionPath: defaultSession, paneId: "w1:p2", terminalId: "terminal-w1:p2", workerPid: process.pid,
+    outcome: "running", lastActivityAt: Date.now() });
+  const fake: any = {
+    registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {},
+    sendMessage: (message: any, options: any) => messages.push({ message, options }),
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
+    exec: async (_command: string, args: string[]) => {
+      calls.push(args); const key = args.slice(0, 2).join(" "); const ok = (result: unknown = {}) => ({ code: 0, stdout: JSON.stringify({ result }), stderr: "" });
+      if (key === "tab list") return ok({ tabs: [] });
+      if (key === "tab create") {
+        assignmentId = args.find((arg) => arg.startsWith("PI_ROUTED_ASSIGNMENT_ID="))?.split("=")[1];
+        return ok({ tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } });
+      }
+      if (key === "agent prompt") {
+        requestId = /^p3:routed-request ([0-9a-f-]{36})\n/.exec(args[3])?.[1];
+        runningReceipt(); order.push("prompt");
+      }
+      if (key === "agent send-keys" && args[3] === "esc") {
+        escaped = true; order.push("esc");
+        if (outcome === "completed") {
+          writeFileSync(defaultSession, `${sessionHeader()}\n${JSON.stringify({ type: "message", id: "response", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Won the completion race" }] } })}\n`);
+          seedCompletion(assignmentId!, requestId!, defaultSession, "Won the completion race");
+        } else writeAssignmentReceipt({ version: 1, assignmentId: assignmentId!, requestId: requestId!, generation: 1, sessionId: workerSessionId,
+          sessionPath: defaultSession, paneId: "w1:p2", terminalId: "terminal-w1:p2", workerPid: process.pid, outcome: "aborted", lastActivityAt: Date.now() });
+      }
+      if (key === "agent get" || key === "agent start") {
+        const agent = workerAgent(escaped ? "idle" : "working");
+        if (escaped && foreignAfterEsc) agent.terminal_id = "foreign-terminal";
+        if (escaped) order.push("settled-identity");
+        return ok({ agent });
+      }
+      return ok();
+    },
+  };
+  routing(fake); const ctx = uiCtx();
+  const control = tools.find((tool) => tool.name === "subagent_control");
+  const launch = tools.find((tool) => tool.name === "subagent");
+  const launched = await launch.execute("launch", { task: "Original bounded task", description: "Interrupt fixture", route: "luna" }, undefined, undefined, ctx);
+  const tracked = (await control.execute("list", { action: "list" }, undefined, undefined, ctx)).details.tasks[0];
+  return { control, ctx, tracked, calls, order, messages, launch, lifecycle, foreign: () => { foreignAfterEsc = true; },
+    shutdown: async () => { await lifecycle.get("session_shutdown")?.(); restore(); } };
+};
+test("bounded launches persist empty capabilities and close retention; backgrounds default to keep", async () => {
+  const fixture = await interruptionFixture();
+  try {
+    expect(fixture.tracked.capabilities).toEqual([]); expect(fixture.tracked.paneRetention).toBe("close");
+    const background = await fixture.launch.execute("background", { task: "Background observer", description: "Observer", route: "luna", mode: "background" }, undefined, undefined, fixture.ctx);
+    const tasks = (await fixture.control.execute("list", { action: "list" }, undefined, undefined, fixture.ctx)).details.tasks;
+    expect(tasks.find((task: any) => task.handle === background.details.handle).paneRetention).toBe("keep");
+  } finally { await fixture.shutdown(); }
+});
+test("interrupt sends one Esc, verifies native settlement and idle editor before replacement direction", async () => {
+  const fixture = await interruptionFixture(); const { tracked, control, ctx, calls, order } = fixture;
+  try {
+    const originalRequest = tracked.requestId;
+    await withEditorAcknowledgement(tracked, async () => {
+      const result = await control.execute("interrupt", { action: "interrupt", handle: tracked.handle, message: "Use replacement direction" }, undefined, undefined, ctx);
+      expect(result.isError).not.toBe(true); expect(tracked.state).toBe("running");
+    }, (request) => {
+      expect(request.clearOwned).toBe(true); expect(request.requireIdle).toBe(true); order.push("editor-idle"); return { empty: true };
+    });
+    expect(calls.filter((args) => args[1] === "send-keys" && args[3] === "esc")).toHaveLength(1);
+    expect(calls.filter((args) => args[1] === "prompt")).toHaveLength(2);
+    expect(tracked.requestId).not.toBe(originalRequest); expect(tracked.instructionIds).toContain(tracked.requestId);
+    expect(order.indexOf("esc")).toBeLessThan(order.indexOf("settled-identity"));
+    expect(order.indexOf("settled-identity")).toBeLessThan(order.indexOf("editor-idle"));
+    expect(order.indexOf("editor-idle")).toBeLessThan(order.lastIndexOf("prompt"));
+    const prompt = calls.filter((args) => args[1] === "prompt").at(-1)![3];
+    expect(prompt).toBe(`p3:routed-request ${tracked.requestId}\nUse replacement direction`);
+    expect(prompt).not.toContain("Original bounded task");
+  } finally { await fixture.shutdown(); }
+});
+test("completion racing Esc is preserved and delivered once without editor clearing or replacement", async () => {
+  const fixture = await interruptionFixture("completed"); let editorContacts = 0;
+  try {
+    await withEditorAcknowledgement(fixture.tracked, async () => {
+      const result = await fixture.control.execute("interrupt", { action: "interrupt", handle: fixture.tracked.handle, message: "Do not send if complete" }, undefined, undefined, fixture.ctx);
+      expect(result.isError).not.toBe(true); expect(result.content[0].text).toContain("completed before cancellation");
+      for (let tick = 0; tick < 10 && !fixture.messages.length; tick += 1) await new Promise((resolve) => setTimeout(resolve, 40));
+    }, () => { editorContacts += 1; return { empty: true }; });
+    expect(editorContacts).toBe(0); expect(fixture.calls.filter((args) => args[1] === "prompt")).toHaveLength(1);
+    expect(fixture.calls.filter((args) => args[1] === "send-keys" && args[3] === "esc")).toHaveLength(1);
+    expect(fixture.tracked.result).toBe("Won the completion race");
+    const completions = fixture.messages.filter((entry) => entry.message.customType === "subagent-completion"); expect(completions).toHaveLength(1);
+    await fixture.lifecycle.get("message_end")!({ message: { role: "custom", ...completions[0].message } }, fixture.ctx);
+    await fixture.lifecycle.get("agent_settled")!({}, fixture.ctx);
+    expect(fixture.messages.filter((entry) => entry.message.customType === "subagent-completion")).toHaveLength(1);
+  } finally { await fixture.shutdown(); }
+});
+test("an unowned editor acknowledgement refuses replacement after Esc rather than concatenating direction", async () => {
+  const fixture = await interruptionFixture();
+  try {
+    await withEditorAcknowledgement(fixture.tracked, async () => {
+      const result = await fixture.control.execute("interrupt", { action: "interrupt", handle: fixture.tracked.handle, message: "Replacement" }, undefined, undefined, fixture.ctx);
+      expect(result.isError).toBe(true); expect(result.content[0].text).toContain("unowned draft");
+      expect(fixture.tracked.state).toBe("interrupted");
+    }, () => ({ error: "Worker editor contains an unowned draft; it was preserved" }));
+    expect(fixture.calls.filter((args) => args[1] === "prompt")).toHaveLength(1);
+  } finally { await fixture.shutdown(); }
+});
+test("foreign post-Esc identity never clears an editor or submits replacement direction", async () => {
+  const fixture = await interruptionFixture(); fixture.foreign(); let editorContacts = 0;
+  try {
+    await withEditorAcknowledgement(fixture.tracked, async () => {
+      const result = await fixture.control.execute("interrupt", { action: "interrupt", handle: fixture.tracked.handle, message: "Replacement" }, undefined, undefined, fixture.ctx);
+      expect(result.isError).toBe(true);
+    }, () => { editorContacts += 1; return { empty: true }; });
+    expect(editorContacts).toBe(0); expect(fixture.calls.filter((args) => args[1] === "prompt")).toHaveLength(1);
+    expect(fixture.calls.filter((args) => args[1] === "send-keys" && args[3] === "esc")).toHaveLength(1);
+  } finally { await fixture.shutdown(); }
+});
+test("outstanding ask cannot be bypassed by steer or interrupt; reply writes to the existing awaited assignment", async () => {
+  const fixture = await interruptionFixture(); const { tracked, control, ctx } = fixture; const askId = randomUUID();
+  try {
+    atomicWriteArtifact(askPathForAssignment(tracked.assignmentId), JSON.stringify({ version: 1, id: askId, assignmentId: tracked.assignmentId,
+      requestId: tracked.requestId, parentSessionId: tracked.parentSessionId, sessionId: tracked.sessionId, paneId: tracked.paneId,
+      terminalId: tracked.terminalId, question: "Which direction?", status: "waiting", createdAt: Date.now() }));
+    for (const action of ["steer", "interrupt"]) {
+      const refused = await control.execute(action, { action, handle: tracked.handle, message: "Bypass question" }, undefined, undefined, ctx);
+      expect(refused.isError).toBe(true);
+    }
+    const stale = await control.execute("stale", { action: "reply", handle: tracked.handle, ask_id: randomUUID(), message: "Use A" }, undefined, undefined, ctx);
+    expect(stale.isError).toBe(true);
+    const reply = await control.execute("reply", { action: "reply", handle: tracked.handle, ask_id: askId, message: "Use A" }, undefined, undefined, ctx);
+    expect(reply.isError).not.toBe(true);
+    const saved = JSON.parse(readFileSync(askPathForAssignment(tracked.assignmentId), "utf8"));
+    expect(saved.status).toBe("answered"); expect(saved.reply).toBe("Use A"); expect(saved.assignmentId).toBe(tracked.assignmentId);
+    expect(fixture.calls.filter((args) => args[1] === "prompt")).toHaveLength(1);
+    expect(fixture.calls.filter((args) => args[1] === "send-keys")).toHaveLength(0);
+  } finally { await fixture.shutdown(); }
 });

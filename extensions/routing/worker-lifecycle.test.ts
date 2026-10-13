@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import workerLifecycle from "./worker-lifecycle.ts";
-import { assignmentDirectory, hashText, readAssignmentReceipt, readAssignmentResult, resultPathForAssignment } from "./artifacts.ts";
+import { assignmentDirectory, askPathForAssignment, atomicWriteArtifact, hashText, readAssignmentReceipt, readAssignmentResult, resultPathForAssignment } from "./artifacts.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
 
 const names = ["PI_CODING_AGENT_DIR", "PI_ROUTED_ASSIGNMENT_ID", "PI_ROUTED_READONLY", "PI_SUBAGENT_MODE", "HERDR_PANE_ID"] as const;
@@ -36,9 +36,10 @@ const fixture = async () => {
   const handlers = new Map<string, Function>();
   const entries: any[] = [];
   const pi: any = {
+    registerTool: () => {},
     on: (name: string, handler: Function) => handlers.set(name, handler),
     exec: async () => ({ code: 0, stderr: "", stdout: JSON.stringify({ result: { agent: { pane_id: "w1:p2", terminal_id: "terminal-2" } } }) }),
-    getAllTools: () => ["read", "ls", "find", "grep", "message_parent", "bash", "write", "codemode", "workspace_agent"].map((name) => ({ name })),
+    getAllTools: () => ["read", "ls", "find", "grep", "message_parent", "ask_parent", "bash", "write", "codemode", "workspace_agent"].map((name) => ({ name })),
     setActiveTools: (tools: string[]) => { pi.activeTools = tools; },
   };
   const ctx: any = { sessionManager: {
@@ -108,9 +109,28 @@ test("readonly workers project the native allowlist and guard extension tool cal
   process.env.PI_ROUTED_READONLY = "1";
   const { handlers, pi, ctx } = await fixture();
   handlers.get("session_start")!({}, ctx);
-  expect(pi.activeTools).toEqual(["read", "ls", "find", "grep", "message_parent"]);
+  expect(pi.activeTools).toEqual(["read", "ls", "find", "grep", "message_parent", "ask_parent"]);
   expect(await handlers.get("tool_call")!({ toolName: "read" }, ctx)).toBeUndefined();
   for (const toolName of ["bash", "write", "codemode", "workspace_agent"]) {
     expect(await handlers.get("tool_call")!({ toolName }, ctx)).toMatchObject({ block: true });
   }
 });
+
+for (const status of ["waiting", "answered"] as const) {
+  test(`pending ${status} question prevents completed settlement at a strange boundary`, async () => {
+    const { handlers, entries, ctx } = await fixture();
+    const ask = { version: 1, id: randomUUID(), assignmentId, requestId: assignmentId, parentSessionId: "parent", sessionId: assignmentId, paneId: "w1:p2", terminalId: "terminal-2", question: "Choose?", status, createdAt: Date.now(), ...(status === "answered" ? { reply: "yes", replyId: randomUUID() } : {}) };
+    atomicWriteArtifact(askPathForAssignment(assignmentId), JSON.stringify(ask));
+    const message = response();
+    entries.push({ type: "message", id: "response", message });
+    handlers.get("turn_end")!({ outcome: "completed", message, messageEntryId: "response" }, ctx);
+    handlers.get("agent_before_settle")!({ outcome: "completed" }, ctx);
+    handlers.get("agent_settled")!({}, ctx);
+    expect(readAssignmentReceipt(assignmentId)!.outcome).toBe("running");
+    expect(existsSync(resultPathForAssignment(assignmentId))).toBe(false);
+    handlers.get("agent_before_settle")!({ outcome: "aborted" }, ctx);
+    handlers.get("agent_settled")!({}, ctx);
+    expect(readAssignmentReceipt(assignmentId)!.outcome).toBe("aborted");
+    expect(JSON.parse(readFileSync(askPathForAssignment(assignmentId), "utf8")).status).toBe("cancelled");
+  });
+}

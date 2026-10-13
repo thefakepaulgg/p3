@@ -51,3 +51,11 @@ for (const state of ["unknown", "lost"] as const) {
     expect(() => validate({ ownedPaths: ["/repo/src/a/file.ts"] }, [unresolved])).toThrow("overlapping paths");
   });
 }
+
+test("continuation's new handle still respects active ownership and finished dependencies", () => {
+  const previous = task({ state: "completed", handle: "rt-original", sessionId: "saved-session", ownedPaths: ["/repo/src/a"] });
+  const followUp = task({ handle: "rt-follow-up", continuedFrom: previous.handle, sessionId: previous.sessionId, ownedPaths: previous.ownedPaths });
+  expect(() => validate({ dependsOn: [previous.handle], ownedPaths: ["/repo/src/a/file.ts"] }, [previous])).not.toThrow();
+  expect(() => validate({ ownedPaths: ["/repo/src/a/file.ts"] }, [previous, followUp])).toThrow("overlapping paths");
+  expect(() => validate({ dependsOn: [followUp.handle] }, [previous, followUp])).toThrow("requires successful completion");
+});

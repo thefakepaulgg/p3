@@ -1,21 +1,25 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { rmSync } from "node:fs";
+import { dirname, basename } from "node:path";
 import type { Server } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { classifyDelegation, classifyModelRoute, planFallback, routes, selectEligibleRoute, clampThinkingLevel, routeTier, type CapabilityTier, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./routing/policy.ts";
 import { availableTaskActions, buildCompletionMessage, canDeliverCompletion, boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, resetCompletionDelivery, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
 import { parseJson, proveTaskAbsent, readHerdrResult, runHerdr, verifyTaskAgent, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
-import { pathForResultRef, readAssignmentReceipt, readAssignmentResult } from "./routing/artifacts.ts";
+import { pathForResultRef, askPathForAssignment, readAssignmentReceipt, readAssignmentResult } from "./routing/artifacts.ts";
+import { readAssignmentAsk, readPendingAssignmentAsk, writeAssignmentReply, cancelAssignmentAsk, type AssignmentAsk } from "./routing/questions.ts";
+import { orchestrationError, orchestrationErrorResult } from "./routing/errors.ts";
+import { ensureWorkerEditor, saveRoutedInstruction } from "./routing/editor-guard.ts";
 import { prepareEvidence } from "./routing/evidence.ts";
 import { ExplicitRouteRetryGuard } from "./routing/workflow.ts";
-import { launchRoutedTask, type RoutedTaskLaunchParams } from "./routing/launch.ts";
+import { continueRoutedTask, launchRoutedTask, type RoutedTaskLaunchParams } from "./routing/launch.ts";
 import { registerRoutingRpc, type RoutingRpcResult } from "./routing/rpc.ts";
 import { emitTaskLifecycle } from "./routing/lifecycle.ts";
 import { manifestPathForPane, readRoutingManifest, restoreTaskHandle, ROUTING_MANIFEST_VERSION, taskManifestRecord, writeRoutingManifest, type RoutingManifest } from "./routing/manifest.ts";
 import { focusManifestPane, RoutedTaskWidget } from "./routing/navigator.ts";
 import { inboxPath, sendParentMessage, startParentInbox } from "./routing/messages.ts";
-import { formatEstimatedCost, sumSessionCost } from "./routing/usage.ts";
+import { formatEstimatedCost, sumSessionCost, aggregateUsageCoverage } from "./routing/usage.ts";
 import { registerIndependentAgentTools } from "./routing/independent.ts";
 import { providerIsCoolingDown, registerFailoverModels, wrappedModelRef } from "./routing/failover.ts";
 
@@ -42,7 +46,7 @@ const RoutedTaskParams = Type.Object({
     description: "Optional paths this task owns, relative to cwd unless absolute. Launch is refused only if another active task in the same tree declared overlapping paths.",
   })),
   pane_retention: Type.Optional(StringEnum(["keep", "close"] as const, {
-    description: "Herdr-only completed-pane policy. keep (default) preserves the pane for later inspection; close removes it only after persisting the result and proving receipt in the parent conversation.",
+    description: "Herdr-only completed-pane policy. close (default for bounded tasks) removes it only after persisting the result and proving receipt in the parent conversation. keep explicitly preserves it; background workers stay open.",
   })),
   files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32, description: "Explicit evidence files or durable result:<UUID> references; small UTF-8 files are snapshotted, larger files remain canonical references." })),
   readonly: Type.Optional(Type.Boolean({ description: "Restrict this worker to read/search and parent reporting; no bash, edits, writes, delegation, or MCP tools." })),
@@ -55,9 +59,10 @@ const RoutedTaskParams = Type.Object({
 });
 
 const RoutedTaskControlParams = Type.Object({
-  action: StringEnum(["list", "status", "result", "focus", "close", "clear", "steer", "stop"] as const),
+  action: StringEnum(["list", "status", "result", "focus", "close", "clear", "steer", "interrupt", "reply", "resume", "stop"] as const),
   handle: Type.Optional(Type.String({ description: "Subagent handle; required except for list" })),
-  message: Type.Optional(Type.String({ description: "Message for steer" })),
+  message: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "Explicit direction for steer/interrupt/resume, or the answer for reply. Original tasks are never replayed." })),
+  ask_id: Type.Optional(Type.String({ minLength: 1, description: "Exact outstanding question ID; required for reply." })),
   files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32, description: "Explicit evidence accompanying steer." })), 
   close_pane: Type.Optional(Type.Boolean({ description: "For Herdr stop, also close the owned pane. Default false." })),
 });
@@ -88,6 +93,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   let parentInbox: Server | undefined;
   let parentInboxPath: string | undefined;
   const completionInFlight = new Set<string>();
+  const questionInFlight = new Set<string>();
+  const controlsInFlight = new Set<string>();
   let completionHeldForPrompt = false;
 
   const routeSummary = (name: RouteName) => {
@@ -116,16 +123,19 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (!ownsManifest || !manifestPath || !activeCtx) return;
     const primary = sumSessionCost(activeCtx.sessionManager.getEntries());
     const tasks = [...taskHandles.values()].map(taskManifestRecord).filter((task): task is NonNullable<typeof task> => !!task);
-    const knownChildren = tasks.filter((task) => task.costKnown && typeof task.estimatedCost === "number");
-    const sessionTotalKnown = primary.known || knownChildren.length > 0;
-    const sessionTotal = primary.cost + knownChildren.reduce((sum, task) => sum + (task.estimatedCost ?? 0), 0);
+    const coverage = aggregateUsageCoverage(primary, tasks);
     routingManifest = {
       version: ROUTING_MANIFEST_VERSION,
       parentSessionId: activeCtx.sessionManager.getSessionId(), parentPaneId: process.env.HERDR_PANE_ID!, parentInbox: parentInboxPath,
       parentSessionPath: activeCtx.sessionManager.getSessionFile(), primaryCost: primary.cost, primaryCostKnown: primary.known,
-      sessionTotal, sessionTotalKnown, updatedAt: Date.now(), tasks,
+      sessionTotal: coverage.cost, sessionTotalKnown: coverage.known, sessionCostComplete: coverage.complete, missingCostSources: coverage.missingSources, usageScope: coverage.scope, updatedAt: Date.now(), tasks,
     };
     writeRoutingManifest(manifestPath, routingManifest);
+    // Workers retain their original env path when this exact parent session moves panes.
+    for (const path of new Set(tasks.map((task) => task.workerManifestPath).filter((path): path is string => !!path && path !== manifestPath))) {
+      if (dirname(path) !== dirname(manifestPath) || !/^routing-pane-[A-Za-z0-9_.-]+\.json$/.test(basename(path))) continue;
+      if (readRoutingManifest(path)?.parentSessionId === routingManifest.parentSessionId) writeRoutingManifest(path, routingManifest);
+    }
     manifestSignature = JSON.stringify(routingManifest);
   };
 
@@ -143,7 +153,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       targets.unshift({ handle: "parent", label: "Parent", model: "main", state: "completed", startedAt: 0, paneId: parentPaneId });
     }
     const total = formatEstimatedCost(routingManifest?.sessionTotal, routingManifest?.sessionTotalKnown);
-    if (lines.length && total) lines[0] += ` · session total ${total}`;
+    if (lines.length && total) lines[0] += ` · tracked ${total} (session+routed)${routingManifest?.sessionCostComplete === false ? ` · partial: ${routingManifest.missingCostSources ?? "?"} missing` : ""}`;
     return { lines, targets };
   };
 
@@ -285,7 +295,16 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     try {
       await verifiedAgent(task);
       const receipt = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
-      if (!receipt || receipt.outcome !== "completed" || receipt.requestId !== task.requestId || receipt.generation !== task.outcomeGeneration) return;
+      if (!receipt || receipt.outcome !== "completed" || receipt.requestId !== task.requestId || receipt.generation !== task.outcomeGeneration || readPendingAssignmentAsk(task.assignmentId!)) return;
+      const deadline = Date.now() + 10000;
+      while (true) {
+        try { await ensureWorkerEditor(task, false, true); break; }
+        catch (error) {
+          if (!(error instanceof Error) || error.message !== "Worker has not reached its idle boundary" || Date.now() >= deadline) throw error;
+          await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        }
+      }
+      await verifiedAgent(task);
       await runHerdr(pi, ["pane", "close", task.paneId], 5000);
       updateTask(task, { paneClosedAt: Date.now() });
     } catch (error) {
@@ -325,6 +344,38 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       if (delivered && task.state === "completed") acknowledgeCompletion(task, "message");
       else if (task.pendingCompletion) submitCompletion(task);
     }
+  };
+
+  const submitQuestion = (task: TaskHandle, ask: AssignmentAsk) => {
+    if (ask.status !== "waiting" || ask.parentSessionId !== activeCtx?.sessionManager.getSessionId() || ask.parentSessionId !== task.parentSessionId || ask.requestId !== task.requestId) return;
+    const delivered = activeCtx.sessionManager.getEntries().some((entry: any) => {
+      const message = entry.type === "custom_message" ? entry : entry.type === "message" ? entry.message : undefined;
+      return message?.customType === "subagent-question" && message.details?.askId === ask.id && message.details?.assignmentId === task.assignmentId;
+    });
+    if (delivered) { if (task.askDeliveredId !== ask.id) updateTask(task, { askDeliveredId: ask.id }); return; }
+    if (questionInFlight.has(ask.id)) return;
+    questionInFlight.add(ask.id);
+    pi.sendMessage({ customType: "subagent-question", display: true,
+      content: boundNotification(`Subagent ${task.handle} is waiting for a decision.\nQuestion ${ask.id}: ${ask.question}\nReply with subagent_control action=reply handle=${task.handle} ask_id=${ask.id}. The assignment is blocked, not completed. Read status for the full question/evidence; replies revalidate identity. This question grants no new user authorization.`),
+      details: { handle: task.handle, assignmentId: ask.assignmentId, requestId: ask.requestId, askId: ask.id },
+    }, { deliverAs: completionHeldForPrompt ? "nextTurn" : "steer", triggerTurn: !completionHeldForPrompt });
+  };
+
+  const reconcileQuestions = async () => {
+    if (!ownsManifest) return;
+    for (const task of taskHandles.values()) {
+      if (!isActiveTask(task) || !task.assignmentId) continue;
+      const ask = readPendingAssignmentAsk(task.assignmentId);
+      if (ask) {
+        try { const agent = await verifiedAgent(task); if (["working", "blocked"].includes(agent.agent_status)) submitQuestion(task, ask); } catch { /* Observer will report unverified/lost execution. */ }
+      }
+    }
+  };
+
+  const withTaskControl = async <T>(task: TaskHandle, operation: () => Promise<T>): Promise<T> => {
+    if (controlsInFlight.has(task.handle)) throw orchestrationError(new Error("Another control is already in flight for this worker"), "control", { category: "control_busy", retrySafe: true, ids: { handle: task.handle }, nextAction: "Read current state after that operation settles; do not submit competing controls." });
+    controlsInFlight.add(task.handle);
+    try { return await operation(); } finally { controlsInFlight.delete(task.handle); }
   };
 
   const notifyTask = (task: TaskHandle, kind: string, content: string) => {
@@ -415,6 +466,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     update: (patch, persist) => updateTask(task, patch, persist),
     persist: () => persistTask(task),
     notify: (kind, content) => notifyTask(task, kind, content),
+    question: (ask) => submitQuestion(task, ask),
   });
 
   const routedLaunch = async (params: RoutedTaskLaunchParams, ctx: ExtensionContext, owner?: unknown) => {
@@ -458,7 +510,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (ctx.hasUI !== true) throw new Error("subagent can only launch from the user-facing root Pi session");
       rememberUi(ctx);
-      return routedLaunch(params as RoutedTaskLaunchParams, ctx);
+      try { return await routedLaunch(params as RoutedTaskLaunchParams, ctx); }
+      catch (error) { return orchestrationErrorResult(error, "subagent"); }
     },
   });
 
@@ -475,7 +528,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (isActiveTask(task)) throw new Error("The task is still active; stop it before closing its pane");
     if (task.pendingCompletion) throw new Error("Result delivery is pending; retain the pane until receipt is proven");
     if (!task.paneClosedAt) {
-      await verifiedAgent(task);
+      const agent = await verifiedAgent(task);
+      if (!["idle", "done"].includes(agent.agent_status)) throw new Error("Worker is still executing or blocked; explicitly stop it before closing");
+      await ensureWorkerEditor(task, false, true);
       await runHerdr(pi, ["pane", "close", task.paneId], 5000);
       task.paneClosedAt = Date.now();
       persistTask(task);
@@ -502,6 +557,10 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   };
 
   const refreshRoutedTaskStatus = async (task: TaskHandle): Promise<string | undefined> => {
+    if (task.assignmentId) {
+      const ask = readPendingAssignmentAsk(task.assignmentId);
+      if (task.pendingAskId !== ask?.id) updateTask(task, { pendingAskId: ask?.id });
+    }
     if (!task.agentName || task.paneClosedAt) return undefined;
     try {
       const agent = await verifiedAgent(task);
@@ -513,17 +572,43 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }
   };
 
+  const waitForSettledWorker = async (task: TaskHandle, generation: number) => {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const agent = await verifiedAgent(task);
+      const receipt = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
+      if (receipt && receipt.sessionId === task.sessionId && receipt.paneId === task.paneId && receipt.terminalId === task.terminalId && receipt.generation >= generation && receipt.outcome !== "running" && ["idle", "done"].includes(agent.agent_status)) return receipt;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Worker did not reach a verified settled boundary after interruption");
+  };
+
   const stopRoutedTask = async (task: TaskHandle, closePane = false): Promise<string> => {
     if (task.state === "lost") {
       if (!await proveTaskAbsent(pi, task)) throw new Error("Original session is now present or moved; inspect before abandoning it");
+      const receipt = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
+      if (!receipt?.workerPid) throw new Error("Original process exit is unverified; inspect before abandonment");
+      try { process.kill(receipt.workerPid, 0); throw new Error("Original process is still present despite missing registry evidence"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      if (task.assignmentId && readPendingAssignmentAsk(task.assignmentId)) cancelAssignmentAsk(task.assignmentId);
       watchers.get(task.handle)?.abort();
-      updateTask(task, { state: "stopped", endedAt: Date.now() });
+      updateTask(task, { state: "stopped", pendingAskId: undefined, pendingCompletion: false, endedAt: Date.now() });
       return `Abandoned unresolved subagent ${task.handle}; no physical resources were removed or external effects rolled back`;
     }
     await verifiedAgent(task);
+    const original = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
+    if (!original) throw new Error("Worker's current assignment is unverified; cancellation cannot guess it");
     watchers.get(task.handle)?.abort();
-    await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000);
-    updateTask(task, { state: "stopped", endedAt: Date.now() });
+    try {
+      await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000);
+      await waitForSettledWorker(task, original.generation);
+      if (task.assignmentId && readPendingAssignmentAsk(task.assignmentId)) cancelAssignmentAsk(task.assignmentId);
+    } catch (error) {
+      watchHerdrTask(task);
+      throw orchestrationError(error, "stop", { stage: "cancellation_boundary", retrySafe: "unknown", ids: { handle: task.handle, paneId: task.paneId }, nextAction: "Inspect the original worker before repeating cancellation; no settled boundary or question cancellation was guessed." });
+    }
+    completionInFlight.delete(task.handle);
+    updateTask(task, { state: "stopped", pendingCompletion: false, pendingAskId: undefined, endedAt: Date.now() });
     if (closePane && task.paneId) {
       await verifiedAgent(task);
       await runHerdr(pi, ["pane", "close", task.paneId], 5000);
@@ -532,22 +617,62 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     return `Stopped subagent ${task.handle}${closePane ? " and closed its pane" : ""}; external effects were not rolled back`;
   };
 
-  const steerTask = async (task: TaskHandle, message: string, files?: string[]): Promise<void> => {
+  const steerTask = async (task: TaskHandle, message: string, files?: string[], editorPrepared = false): Promise<void> => {
     const evidence = prepareEvidence(files, task.cwd ?? activeCtx!.cwd, pathForResultRef);
+    if (task.assignmentId && readPendingAssignmentAsk(task.assignmentId)) throw new Error("Worker has a blocking question; use reply with its exact ask_id instead of steering");
+    const previous = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
+    if (!isActiveTask(task) || previous?.outcome === "completed" || previous?.outcome === "error") throw new Error("This assignment has finished; close its retained pane and resume the saved session for follow-up");
     await verifiedAgent(task);
+    if (!editorPrepared) await ensureWorkerEditor(task, task.state === "interrupted");
     watchers.get(task.handle)?.abort();
     completionInFlight.delete(task.handle);
     resetCompletionDelivery(task);
     const requestId = crypto.randomUUID();
-    updateTask(task, { requestId, state: "queued", outcomeGeneration: undefined, pendingCompletion: false, result: undefined, resultHash: undefined, resultRef: undefined, resultPath: undefined, error: undefined });
+    const prompt = [`p3:routed-request ${requestId}`, message, evidence.text].filter(Boolean).join("\n");
+    saveRoutedInstruction(task.assignmentId!, requestId, prompt);
+    updateTask(task, { requestId, instructionIds: [...(task.instructionIds ?? []), requestId].slice(-32), state: "queued", outcomeGeneration: undefined, pendingCompletion: false, result: undefined, resultHash: undefined, resultRef: undefined, resultPath: undefined, error: undefined });
     persistTask(task);
     try {
-      await runHerdr(pi, ["agent", "prompt", task.agentName!, [`p3:routed-request ${requestId}`, message, evidence.text].filter(Boolean).join("\n")], 10000);
+      await runHerdr(pi, ["agent", "prompt", task.agentName!, prompt], 10000);
       updateTask(task, { state: "running" });
     } catch (error) {
       updateTask(task, { state: "unknown", presence: "unknown", error: `Steering submission is unresolved; do not resubmit blindly: ${error instanceof Error ? error.message : String(error)}` });
-      throw error;
+      throw orchestrationError(error, "steer", { stage: "direction_submission", ids: { handle: task.handle, requestId, paneId: task.paneId, sessionId: task.sessionId }, retrySafe: "unknown", nextAction: "Inspect the original worker and submitted request before retrying; the direction may already be queued." });
     } finally { watchHerdrTask(task); }
+  };
+
+  const interruptTask = async (task: TaskHandle, message: string, files?: string[]) => {
+    prepareEvidence(files, task.cwd ?? activeCtx!.cwd, pathForResultRef);
+    if (!task.assignmentId || readPendingAssignmentAsk(task.assignmentId)) throw new Error("Reply to the outstanding question or explicitly stop it; there is no interruptible working operation");
+    const before = await verifiedAgent(task);
+    const original = readAssignmentReceipt(task.assignmentId);
+    if (before.agent_status !== "working" || !original || original.outcome !== "running") throw new Error("Worker has no verified current operation to interrupt");
+    watchers.get(task.handle)?.abort();
+    try {
+      await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000);
+      const settled = await waitForSettledWorker(task, original.generation);
+      if (settled.outcome === "completed") {
+        updateTask(task, { requestId: settled.requestId, state: "running" });
+        return "The operation completed before cancellation. Its verified result is preserved for delivery; no replacement instruction was submitted. Use resume for follow-up after cleanup.";
+      }
+      updateTask(task, { state: "interrupted" });
+      await ensureWorkerEditor(task, true, true);
+      await steerTask(task, message, files, true);
+      return `Interrupted the current operation and continued ${task.handle} with the explicit replacement direction. Prior effects were not rolled back; queued owned corrections were superseded.`;
+    } catch (error) {
+      throw orchestrationError(error, "interrupt", { stage: "interruption_boundary", ids: { handle: task.handle, paneId: task.paneId, sessionId: task.sessionId }, retrySafe: "unknown", nextAction: "Inspect the settled worker and its preserved editor before retrying; cancellation may have happened, but no unverified draft is erased or concatenated." });
+    } finally { if (isActiveTask(task)) watchHerdrTask(task); }
+  };
+
+  const replyTask = async (task: TaskHandle, askId: string, message: string, files?: string[]) => {
+    const evidence = prepareEvidence(files, activeCtx!.cwd, pathForResultRef);
+    const agent = await verifiedAgent(task);
+    if (!task.assignmentId || !task.requestId || !task.sessionId || !task.terminalId || !["working", "blocked"].includes(agent.agent_status)) throw new Error("Worker is not live and waiting for this reply");
+    let answered: AssignmentAsk;
+    try { answered = writeAssignmentReply(task.assignmentId, askId, [message, evidence.text].filter(Boolean).join("\n\n"), {
+      requestId: task.requestId, parentSessionId: activeCtx!.sessionManager.getSessionId(), sessionId: task.sessionId, paneId: task.paneId!, terminalId: task.terminalId,
+    }); } catch (error) { throw orchestrationError(error, "reply", { stage: "question_reply", ids: { handle: task.handle, askId, assignmentId: task.assignmentId }, retrySafe: (error as NodeJS.ErrnoException).code === "EEXIST" ? true : false, nextAction: "Read the exact current question/reply state; an already retained answer must not be resubmitted." }); }
+    return { text: `Recorded answer ${answered.replyId} for question ${askId}. The waiting tool resumes the same assignment; no task or prompt was replayed.`, askId, replyId: answered.replyId };
   };
 
   const clearRoutedTask = (task: TaskHandle): string => {
@@ -565,11 +690,12 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   pi.registerTool<typeof RoutedTaskControlParams, any>({
     name: "subagent_control",
     label: "Subagent Control",
-    description: "List, inspect, retrieve, focus, close, clear, steer, or stop Herdr agents launched by subagent. Completed panes remain available by default until explicitly closed; result reads hash-verified durable worker output (returned text is capped at 12,000 characters). List/status expose available_actions and nextAction; unknown identity never authorizes a mutation.",
+    description: "List, inspect, retrieve, focus, close, clear, steer, or stop Herdr agents launched by subagent. Bounded worker panes close after delivered completion unless keep was explicitly requested; resume creates a fresh generation from the exact saved session; result reads hash-verified durable worker output (returned text is capped at 12,000 characters). List/status expose available_actions and nextAction; unknown identity never authorizes a mutation.",
     promptSnippet: "Control and retrieve routed subagents",
     parameters: RoutedTaskControlParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       rememberUi(ctx);
+      try {
       if (params.action === "list") {
         const items = [...taskHandles.values()].filter((item) => !item.clearedAt).sort((a, b) => b.startedAt - a.startedAt);
         const text = items.length ? items.map((item) => `${item.handle} [${item.state}] ${item.route} — ${item.label}${item.paneClosedAt ? " · pane closed" : ""}`).join("\n") : "No subagents";
@@ -582,7 +708,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       if (params.action === "status") {
         const liveHerdrStatus = await refreshRoutedTaskStatus(task);
         const liveStatus = liveHerdrStatus ? `\nHerdr status: ${liveHerdrStatus}` : "";
-        return { content: [{ type: "text", text: `${task.handle} [${task.state}] ${task.route} ${task.model} — ${task.label}${liveStatus}${task.escalation ? `\nEscalation: ${task.escalation}` : ""}` }], details: { task: { ...task, ...taskMetadata(task), result: undefined }, ...taskMetadata(task), liveHerdrStatus } };
+        const question = task.assignmentId ? readAssignmentAsk(task.assignmentId) : undefined;
+        const questionText = question ? `\nQuestion ${question.id} [${question.status}]: ${question.question}${question.evidence ? `\nComplete evidence snapshot: ${askPathForAssignment(task.assignmentId!)}` : ""}` : "";
+        return { content: [{ type: "text", text: `${task.handle} [${task.state}] ${task.route} ${task.model} — ${task.label}${liveStatus}${questionText}${task.escalation ? `\nEscalation: ${task.escalation}` : ""}` }], details: { task: { ...task, ...taskMetadata(task), result: undefined }, ...taskMetadata(task), liveHerdrStatus, question: task.assignmentId ? readAssignmentAsk(task.assignmentId) : undefined } };
       }
 
       if (params.action === "focus") {
@@ -605,18 +733,34 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: result.text }], details: { task, ...result } };
       }
 
+      if (params.action === "resume") {
+        if (!params.message?.trim()) throw new Error("message is required for resume");
+        return await withTaskControl(task, async () => {
+          const result = await continueRoutedTask({ pi, taskHandles, workflowLaunches, routeRetryGuard, recordDecision, resolveRoute, trackTask, watchHerdrTask, manifestPath }, ctx, task, params.message!.trim(), params.files);
+          return { content: [{ type: "text", text: result.text }], details: result.details };
+        });
+      }
+      if (params.action === "reply") {
+        if (!params.ask_id || !params.message?.trim()) throw new Error("ask_id and message are required for reply");
+        return await withTaskControl(task, async () => { const result = await replyTask(task, params.ask_id!, params.message!.trim(), params.files); return { content: [{ type: "text", text: result.text }], details: result }; });
+      }
+      if (params.action === "interrupt") {
+        if (!params.message?.trim()) throw new Error("message is required for interrupt");
+        return await withTaskControl(task, async () => ({ content: [{ type: "text", text: await interruptTask(task, params.message!.trim(), params.files) }], details: { task: taskMetadata(task) } }));
+      }
       if (params.action === "steer") {
         if (!params.message?.trim()) throw new Error("message is required for steer");
-        await steerTask(task, params.message.trim(), params.files);
+        await withTaskControl(task, () => steerTask(task, params.message!.trim(), params.files));
         return { content: [{ type: "text", text: `Steered subagent ${task.handle}` }], details: { task } };
       }
 
       if (params.action === "stop") {
-        const text = await stopRoutedTask(task, params.close_pane === true);
+        const text = await withTaskControl(task, () => stopRoutedTask(task, params.close_pane === true));
         return { content: [{ type: "text", text }], details: { task } };
       }
 
       throw new Error(`Unsupported action: ${params.action}`);
+      } catch (error) { return orchestrationErrorResult(error, `subagent_control.${params.action}`, { ids: { handle: params.handle } }); }
     },
   });
 
@@ -645,13 +789,13 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       result: async (handle) => readFullRoutedTaskResult(getRoutedTask(handle)),
       steer: async (handle, message) => {
         const task = getRoutedTask(handle);
-        await steerTask(task, message);
+        await withTaskControl(task, () => steerTask(task, message));
         return taskMetadata(task);
       },
       list: async () => [...taskHandles.values()].map(taskMetadata),
       stop: async (handle, closePane) => {
         const task = getRoutedTask(handle);
-        await stopRoutedTask(task, closePane);
+        await withTaskControl(task, () => stopRoutedTask(task, closePane));
         return taskMetadata(task);
       },
     });
@@ -672,7 +816,20 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   };
 
   const runRoutedCommandAction = async (action: string, task: TaskHandle, ctx: ExtensionContext) => {
-    if (action === "focus") ctx.ui.notify(await focusRoutedPane(task), "info");
+    if (["resume", "reply", "interrupt"].includes(action)) {
+      const ask = task.assignmentId ? readPendingAssignmentAsk(task.assignmentId) : undefined;
+      if (action === "reply" && !ask) throw new Error("No outstanding question is available to reply to");
+      const instruction = await ctx.ui.editor(action === "reply" ? `Reply to ${ask!.question}` : action === "resume" ? "Explicit follow-up for the saved session" : "Replacement direction after interrupting the current operation");
+      if (!instruction?.trim()) return;
+      if (instruction.length > 20000) throw new Error("Instruction exceeds 20,000 characters");
+      await withTaskControl(task, async () => {
+        if (action === "resume") {
+          const result = await continueRoutedTask({ pi, taskHandles, workflowLaunches, routeRetryGuard, recordDecision, resolveRoute, trackTask, watchHerdrTask, manifestPath }, ctx, task, instruction.trim());
+          ctx.ui.notify(result.text, "info");
+        } else if (action === "reply") ctx.ui.notify((await replyTask(task, ask!.id, instruction.trim())).text, "info");
+        else ctx.ui.notify(await interruptTask(task, instruction.trim()), "info");
+      });
+    } else if (action === "focus") ctx.ui.notify(await focusRoutedPane(task), "info");
     else if (action === "result") {
       const result = await readRoutedTaskResult(task);
       ctx.ui.notify(boundNotification(result.text), "info");
@@ -680,15 +837,15 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     else if (action === "clear") ctx.ui.notify(clearRoutedTask(task), "info");
     else if (action === "stop") {
       if (!isActiveTask(task)) throw new Error(`${task.label} is already ${task.state}`);
-      ctx.ui.notify(await stopRoutedTask(task, true), "info");
+      ctx.ui.notify(await withTaskControl(task, () => stopRoutedTask(task, true)), "info");
     }
     else throw new Error(`Unknown subagents action: ${action}`);
   };
 
   pi.registerCommand("subagents", {
-    description: "Open, inspect, stop, close, or clear a subagent",
+    description: "Inspect, reply, interrupt, resume a saved worker, or stop/close/clear it",
     getArgumentCompletions: (prefix) => {
-      const actions = ["focus", "result", "stop", "close", "clear"];
+      const actions = ["focus", "result", "reply", "interrupt", "resume", "stop", "close", "clear"];
       const separator = prefix.indexOf(" ");
       if (separator < 0) {
         const matches = actions.filter((action) => action.startsWith(prefix.toLowerCase()));
@@ -719,11 +876,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         let action: string | undefined;
         if (trimmed) {
           const [verb, ...queryParts] = trimmed.split(/\s+/);
-          const aliases: Record<string, string> = { open: "focus", focus: "focus", show: "result", view: "result", result: "result", close: "close", clear: "clear", remove: "clear", stop: "stop", kill: "stop" };
+          const aliases: Record<string, string> = { open: "focus", focus: "focus", show: "result", view: "result", result: "result", close: "close", clear: "clear", remove: "clear", stop: "stop", kill: "stop", reply: "reply", interrupt: "interrupt", resume: "resume" };
           action = aliases[verb.toLowerCase()];
-          if (!action) throw new Error("Usage: /subagents [focus|result|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
+          if (!action) throw new Error("Usage: /subagents [focus|result|reply|interrupt|resume|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
           if (!queryParts.length) {
-            if (action !== "clear") throw new Error("Usage: /subagents [focus|result|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
+            if (action !== "clear") throw new Error("Usage: /subagents [focus|result|reply|interrupt|resume|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
             const finished = listedTasks().filter((item) => !isActiveTask(item));
             if (!finished.length) { ctx.ui.notify("No finished subagents to clear", "info"); return; }
             const retainedPanes = finished.filter((item) => item.paneId && !item.paneClosedAt).length;
@@ -750,6 +907,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
           const allowed = availableTaskActions(task);
           if (allowed.includes("focus")) actions.push({ label: "Open pane", action: "focus" });
           if (allowed.includes("result")) actions.push({ label: "Show result", action: "result" });
+          if (allowed.includes("reply")) actions.push({ label: "Reply to question", action: "reply" });
+          if (allowed.includes("interrupt")) actions.push({ label: "Interrupt and redirect", action: "interrupt" });
+          if (allowed.includes("resume")) actions.push({ label: "Resume saved session", action: "resume" });
           if (allowed.includes("stop")) actions.push({ label: "Stop and close pane", action: "stop" });
           if (allowed.includes("close")) actions.push({ label: "Close pane", action: "close" });
           if (allowed.includes("clear")) actions.push({ label: "Clear from list", action: "clear" });
@@ -760,7 +920,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         }
         await runRoutedCommandAction(action, task, ctx);
       } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        const failure = orchestrationError(error, "subagents");
+        ctx.ui.notify(`${failure.message}\n${failure.detail.nextAction}`, "error");
       }
     },
   });
@@ -915,9 +1076,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }
 
     if (!ownsManifest) return;
-    completionInFlight.clear();
+    completionInFlight.clear(); questionInFlight.clear();
     completionHeldForPrompt = false;
-    reconcileCompletions();
+    reconcileCompletions(); await reconcileQuestions();
     for (const task of taskHandles.values()) {
       if (isActiveTask(task) && task.agentName) watchHerdrTask(task);
       else if (task.completionNotifiedAt) void closeAfterReceipt(task);
@@ -945,6 +1106,12 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
 
   pi.on("message_end", async (event) => {
     const message = event.message as any;
+    if (message.role === "custom" && message.customType === "subagent-question") {
+      const task = taskHandles.get(message.details?.handle);
+      if (task && task.assignmentId === message.details?.assignmentId && task.pendingAskId === message.details?.askId) {
+        questionInFlight.delete(message.details.askId); updateTask(task, { askDeliveredId: message.details.askId });
+      }
+    }
     if (message.role === "custom" && message.customType === "subagent-completion") {
       const task = taskHandles.get(message.details?.handle);
       if (task?.state === "completed" && task.assignmentId === message.details?.assignmentId && task.requestId === message.details?.requestId && task.outcomeGeneration === message.details?.generation) acknowledgeCompletion(task, "message");
@@ -957,9 +1124,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   });
   pi.on("agent_end", (event) => {
     const aborted = event.messages.some((message: any) => message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error" && /aborted/i.test(message.errorMessage ?? "")));
-    if (aborted) { completionInFlight.clear(); completionHeldForPrompt = true; }
+    if (aborted) { completionInFlight.clear(); questionInFlight.clear(); completionHeldForPrompt = true; }
   });
-  pi.on("agent_settled", () => { reconcileCompletions(); });
+  pi.on("agent_settled", async () => { reconcileCompletions(); await reconcileQuestions(); });
   pi.on("before_agent_start", () => { completionHeldForPrompt = false; });
 
   pi.on("model_select", async (_event, ctx) => {

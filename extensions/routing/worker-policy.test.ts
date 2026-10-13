@@ -3,7 +3,7 @@ import { READONLY_WORKER_TOOLS, workerPolicyArgs, registerReadonlyWorkerPolicy }
 
 describe("READONLY_WORKER_TOOLS", () => {
   test("contains the expected read-only tools", () => {
-    expect(READONLY_WORKER_TOOLS).toEqual(["read", "ls", "find", "grep", "message_parent"]);
+    expect(READONLY_WORKER_TOOLS).toEqual(["read", "ls", "find", "grep", "message_parent", "ask_parent"]);
   });
 
   test("is frozen / readonly at runtime", () => {

@@ -8,15 +8,24 @@ export interface ManifestTask {
   handle: string;
   assignmentId?: string;
   parentSessionId?: string;
+  workerManifestPath?: string;
   requestId?: string;
   minimumGeneration?: number;
   outcomeGeneration?: number;
   sessionId?: string;
   terminalId?: string;
+  workerPid?: number;
   resultRef?: string;
   resultPath?: string;
   resultHash?: string;
   readonly?: boolean;
+  capabilities?: Array<"memory">;
+  continuedFrom?: string;
+  instructionIds?: string[];
+  pendingAskId?: string;
+  askDeliveredId?: string;
+  usageStartOffset?: number;
+  costComplete?: boolean;
   lastActivityAt?: number;
   presence?: TaskHandle["presence"];
   pendingCompletion?: boolean;
@@ -61,6 +70,9 @@ export interface RoutingManifest {
   parentSessionPath?: string;
   primaryCost?: number;
   primaryCostKnown?: boolean;
+  sessionCostComplete?: boolean;
+  missingCostSources?: number;
+  usageScope?: "session+routed";
   sessionTotal?: number;
   sessionTotalKnown?: boolean;
   updatedAt: number;
@@ -73,9 +85,10 @@ export const manifestPathForPane = (sessionDir: string, paneId: string) =>
 export function restoreTaskHandle(task: ManifestTask): TaskHandle {
   return {
     handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, messageToken: task.messageToken,
-    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
-    sessionId: task.sessionId, terminalId: task.terminalId, resultRef: task.resultRef, resultPath: task.resultPath,
-    resultHash: task.resultHash, readonly: task.readonly, lastActivityAt: task.lastActivityAt, presence: task.presence,
+    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, workerManifestPath: task.workerManifestPath, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
+    sessionId: task.sessionId, terminalId: task.terminalId, workerPid: task.workerPid, resultRef: task.resultRef, resultPath: task.resultPath,
+    resultHash: task.resultHash, readonly: task.readonly, capabilities: task.capabilities, continuedFrom: task.continuedFrom, instructionIds: task.instructionIds,
+    pendingAskId: task.pendingAskId, askDeliveredId: task.askDeliveredId, usageStartOffset: task.usageStartOffset, costComplete: task.costComplete, lastActivityAt: task.lastActivityAt, presence: task.presence,
     pendingCompletion: task.pendingCompletion,
     route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit ?? false,
     target: task.target ?? "herdr", model: task.model, thinking: task.thinking ?? "medium",
@@ -92,9 +105,10 @@ export function taskManifestRecord(task: TaskHandle): ManifestTask | undefined {
   if (!task.agentName || !task.paneId) return undefined;
   return {
     handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, messageToken: task.messageToken,
-    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
-    sessionId: task.sessionId, terminalId: task.terminalId, resultRef: task.resultRef, resultPath: task.resultPath,
-    resultHash: task.resultHash, readonly: task.readonly, lastActivityAt: task.lastActivityAt, presence: task.presence,
+    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, workerManifestPath: task.workerManifestPath, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
+    sessionId: task.sessionId, terminalId: task.terminalId, workerPid: task.workerPid, resultRef: task.resultRef, resultPath: task.resultPath,
+    resultHash: task.resultHash, readonly: task.readonly, capabilities: task.capabilities, continuedFrom: task.continuedFrom, instructionIds: task.instructionIds,
+    pendingAskId: task.pendingAskId, askDeliveredId: task.askDeliveredId, usageStartOffset: task.usageStartOffset, costComplete: task.costComplete, lastActivityAt: task.lastActivityAt, presence: task.presence,
     pendingCompletion: task.pendingCompletion,
     route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit, target: task.target,
     model: task.model, thinking: task.thinking, state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,

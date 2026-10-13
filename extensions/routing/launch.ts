@@ -7,6 +7,8 @@ import { prepareEvidence } from "./evidence.ts";
 import { pathForResultRef } from "./artifacts.ts";
 import { classifyRoute, routingClassifierConfig } from "./classifier.ts";
 import { launchHerdrAgent, type HerdrLaunch, type RoutedWorkerCapability } from "./herdr.ts";
+import { validateContinuation, withSessionStartLock } from "./continuation.ts";
+import { orchestrationError, OrchestrationError } from "./errors.ts";
 import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkflowLaunch, type TaskPhase } from "./workflow.ts";
 
 export interface RoutedTaskLaunchParams {
@@ -104,19 +106,24 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   const route = routePlan.config;
   const handle = newHandle();
   const tracked: TaskHandle = {
-    handle, assignmentId: randomUUID(), parentSessionId: ctx.sessionManager.getSessionId(), minimumGeneration: 1, readonly: params.readonly,
+    handle, assignmentId: randomUUID(), parentSessionId: ctx.sessionManager.getSessionId(), workerManifestPath: deps.manifestPath, minimumGeneration: 1, readonly: params.readonly, capabilities: params.capabilities ?? [],
     route: routeName, fallbackFrom: routePlan.fallbackFrom, routeExplicit: params.route !== undefined,
     target: "herdr", model: `${route.provider}/${route.model}`, thinking: route.thinking, label: description,
     cwd, phase, dependsOn, ownedPaths, owner: params.owner, background: background || undefined, state: "queued", startedAt: Date.now(),
-    messageToken: randomUUID(), paneRetention: params.pane_retention ?? "keep",
-    transitions: 0, notifiedStates: [], usageOffset: 0, estimatedCost: 0, costKnown: false,
+    messageToken: randomUUID(), paneRetention: params.pane_retention ?? (background ? "keep" : "close"),
+    transitions: 0, notifiedStates: [], usageStartOffset: 0, usageOffset: 0, estimatedCost: 0, costKnown: false, costComplete: false,
   };
   tracked.requestId = tracked.assignmentId;
+  tracked.instructionIds = [tracked.requestId!];
   deps.trackTask(tracked);
   let launched: HerdrLaunch;
   try {
     launched = await launchHerdrAgent(deps.pi, prompt, description, routeName, route, cwd, undefined, deps.manifestPath, params.capabilities, background, {
       assignmentId: tracked.assignmentId, readonly: params.readonly,
+      onAllocated: (launch) => {
+        Object.assign(tracked, { agentName: launch.agent, paneId: launch.paneId, tabId: launch.tabId, sessionId: launch.sessionId, sessionPath: launch.sessionPath });
+        deps.trackTask(tracked);
+      },
       onStarted: (launch) => {
         Object.assign(tracked, { agentName: launch.agent, paneId: launch.paneId, tabId: launch.tabId,
           terminalId: launch.terminalId, sessionId: launch.sessionId, sessionPath: launch.sessionPath });
@@ -127,11 +134,11 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
     deps.trackTask(tracked);
     deps.watchHerdrTask(tracked);
   } catch (error) {
-    if (tracked.paneId) {
+    if (tracked.paneId && !(error instanceof OrchestrationError && error.detail.rollbackOccurred)) {
       tracked.state = "unknown"; tracked.presence = "unknown";
       tracked.error = error instanceof Error ? error.message : String(error);
       deps.trackTask(tracked); deps.watchHerdrTask(tracked);
-      throw new Error(`Launch outcome is unresolved for ${handle}: ${tracked.error}. Inspect this handle; do not repeat the assignment.`);
+      throw orchestrationError(error, "subagent", { ids: { handle, assignmentId: tracked.assignmentId }, retrySafe: "unknown", nextAction: `Launch outcome is unresolved for ${handle}. Inspect this exact handle before repeating the assignment.` });
     }
     tracked.state = "failed"; tracked.error = error instanceof Error ? error.message : String(error); deps.trackTask(tracked);
     throw error;
@@ -158,4 +165,45 @@ export async function launchRoutedTask(deps: LaunchDependencies, ctx: ExtensionC
   deps.workflowLaunches.set(key, pending);
   try { return await pending; }
   finally { if (deps.workflowLaunches.get(key) === pending) deps.workflowLaunches.delete(key); }
+}
+
+/** A continuation is a new assignment/handle, never a second writer on an existing one. */
+export async function continueRoutedTask(deps: LaunchDependencies, ctx: ExtensionContext, previous: TaskHandle, message: string, files?: string[]): Promise<RoutedTaskLaunchResult> {
+  if (!message?.trim() || message.length > MAX_TASK_LENGTH) throw new Error("Continuation requires a bounded explicit follow-up instruction");
+  const evidence = prepareEvidence(files, ctx.cwd, pathForResultRef);
+  const initial = await validateContinuation(deps.pi, ctx, previous, deps.taskHandles.values());
+  return withSessionStartLock(initial.path, async () => {
+    const saved = await validateContinuation(deps.pi, ctx, previous, deps.taskHandles.values());
+    const active = [...deps.taskHandles.values()].filter((task) => !task.background && isActiveTask(task)).length;
+    if (active >= 4) throw new Error("Herdr subagent concurrency limit reached (4 active tasks)");
+    validateWorkflowLaunch({ cwd: saved.cwd, dependsOn: [], ownedPaths: previous.ownedPaths ?? [], tasks: deps.taskHandles.values() });
+    const assignmentId = randomUUID();
+    const tracked: TaskHandle = {
+      handle: newHandle(), assignmentId, requestId: assignmentId, parentSessionId: ctx.sessionManager.getSessionId(), workerManifestPath: deps.manifestPath, continuedFrom: previous.handle,
+      minimumGeneration: 1, instructionIds: [assignmentId], route: `${saved.model.provider}/${saved.model.modelId}`, routeExplicit: previous.routeExplicit,
+      target: "herdr", model: `${saved.model.provider}/${saved.model.modelId}`, thinking: saved.thinking, label: previous.label,
+      cwd: saved.cwd, phase: previous.phase, ownedPaths: previous.ownedPaths, readonly: previous.readonly, capabilities: previous.capabilities,
+      state: "queued", startedAt: Date.now(), sessionId: saved.id, sessionPath: saved.path, messageToken: randomUUID(), paneRetention: "close",
+      transitions: 0, notifiedStates: [], usageStartOffset: saved.bytes, usageOffset: saved.bytes, estimatedCost: 0, costKnown: true, costComplete: true,
+    };
+    deps.trackTask(tracked);
+    const route: Route = { label: previous.label, provider: saved.model.provider, model: saved.model.modelId, thinking: saved.thinking, purpose: "Saved-session continuation" };
+    try {
+      const launched = await launchHerdrAgent(deps.pi, [message.trim(), evidence.text].filter(Boolean).join("\n\n"), previous.label, tracked.route, route, saved.cwd,
+        undefined, deps.manifestPath, previous.capabilities, false, { assignmentId, readonly: previous.readonly, continuation: { path: saved.path, id: saved.id },
+          onAllocated: (launch) => { Object.assign(tracked, { agentName: launch.agent, paneId: launch.paneId, tabId: launch.tabId }); deps.trackTask(tracked); },
+          onStarted: (launch) => { Object.assign(tracked, { terminalId: launch.terminalId }); deps.trackTask(tracked); },
+        });
+      tracked.state = "running"; deps.trackTask(tracked); deps.watchHerdrTask(tracked);
+      return { text: `Continued ${previous.handle} as ${tracked.handle} in a fresh pane ${launched.paneId}, using its saved Pi session/model/working directory. Only the explicit follow-up was submitted; the original task was not replayed.`,
+        details: { handle: tracked.handle, continuedFrom: previous.handle, assignmentId, ...launched, model: tracked.model, thinking: tracked.thinking, files: evidence.files }, task: tracked };
+    } catch (error) {
+      const ambiguous = tracked.paneId && !(error instanceof OrchestrationError && error.detail.rollbackOccurred);
+      tracked.state = ambiguous ? "unknown" : "failed";
+      tracked.presence = ambiguous ? "unknown" : undefined;
+      tracked.error = error instanceof Error ? error.message : String(error);
+      deps.trackTask(tracked); if (ambiguous) deps.watchHerdrTask(tracked);
+      throw orchestrationError(error, "resume", { ids: { handle: tracked.handle, sessionId: saved.id, assignmentId }, nextAction: `Inspect ${tracked.handle} before another continuation; no original task or tool was replayed.` });
+    }
+  });
 }
