@@ -93,7 +93,7 @@ describe("bounded completion message", () => {
   const long = "R".repeat(9000);
 
   test("excerpts the cached result and points at the full copy", () => {
-    const completed = task({ state: "completed", paneId: "w1:p2", resultChars: long.length });
+    const completed = task({ state: "completed", paneId: "w1:p2", paneRetention: "keep", resultChars: long.length });
     const message = buildCompletionMessage(completed, long);
     expect(message.length).toBeLessThanOrEqual(NOTIFICATION_LIMIT);
     expect(message).toContain("subagent_control action=result handle=rt-test");
@@ -185,4 +185,33 @@ test("queued completion is not delivered and retains its pane controls until rec
   expect(availableTaskActions(pending)).not.toContain("close");
   expect(taskNextAction(pending)).toContain("awaits receipt");
   expect(telemetryRecord(pending).pendingCompletion).toBe(true);
+});
+
+test("telemetry and task metadata preserve exact continuation and pending question profile", () => {
+  const tracked = task({ capabilities: [], readonly: true, workerPid: 1234, continuedFrom: "rt-original", instructionIds: ["request-1", "request-2"],
+    pendingAskId: "ask-1", askDeliveredId: "ask-1", usageStartOffset: 4096, costComplete: false });
+  for (const record of [telemetryRecord(tracked), taskMetadata(tracked)]) {
+    expect(record.capabilities).toEqual([]); expect(record.readonly).toBe(true); expect(record.workerPid).toBe(1234);
+    expect(record.continuedFrom).toBe("rt-original"); expect(record.instructionIds).toEqual(["request-1", "request-2"]);
+    expect(record.pendingAskId).toBe("ask-1"); expect(record.askDeliveredId).toBe("ask-1");
+    expect(record.usageStartOffset).toBe(4096); expect(record.costComplete).toBe(false);
+  }
+});
+test("closed delivered task offers explicit same-session resume only with a saved profile", () => {
+  const completed = task({ state: "completed", completionNotifiedAt: 3, paneClosedAt: 4, sessionPath: "/saved.jsonl", sessionId: "saved-session", capabilities: [] });
+  expect(availableTaskActions(completed)).toContain("resume");
+  expect(availableTaskActions({ ...completed, capabilities: undefined })).not.toContain("resume");
+  expect(availableTaskActions({ ...completed, pendingCompletion: true })).not.toContain("resume");
+  expect(availableTaskActions({ ...completed, pendingAskId: "ask-1" })).not.toContain("resume");
+});
+test("a waiting question offers reply and stop, never a steer or interrupt bypass", () => {
+  const waiting = task({ pendingAskId: "ask-1" });
+  expect(availableTaskActions(waiting)).toEqual(expect.arrayContaining(["reply", "stop"]));
+  expect(availableTaskActions(waiting)).not.toContain("steer"); expect(availableTaskActions(waiting)).not.toContain("interrupt");
+  expect(taskNextAction(waiting)).toContain("ask_id");
+});
+test("completion message distinguishes close-on-receipt from explicit keep", () => {
+  const completed = task({ state: "completed", paneId: "w1:p2", paneRetention: "close" });
+  expect(buildCompletionMessage(completed, "done")).not.toContain("retained for inspection");
+  expect(buildCompletionMessage({ ...completed, paneRetention: "keep" }, "done")).toContain("retained for inspection");
 });

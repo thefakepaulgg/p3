@@ -13,15 +13,24 @@ export interface TaskHandle {
   handle: string;
   assignmentId?: string;
   parentSessionId?: string;
+  workerManifestPath?: string;
   requestId?: string;
   minimumGeneration?: number;
   outcomeGeneration?: number;
   sessionId?: string;
   terminalId?: string;
+  workerPid?: number;
   resultRef?: string;
   resultPath?: string;
   resultHash?: string;
   readonly?: boolean;
+  capabilities?: Array<"memory">;
+  continuedFrom?: string;
+  instructionIds?: string[];
+  pendingAskId?: string;
+  askDeliveredId?: string;
+  usageStartOffset?: number;
+  costComplete?: boolean;
   lastActivityAt?: number;
   presence?: "live" | "unknown" | "lost";
   pendingCompletion?: boolean;
@@ -106,8 +115,9 @@ const boundedOwner = (owner?: TaskOwner): TaskOwner | undefined => owner?.kind =
 
 export function taskMetadata(task: TaskHandle): Record<string, unknown> {
   return {
-    handle: task.handle, assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, requestId: task.requestId, sessionId: task.sessionId, terminalId: task.terminalId,
-    resultRef: task.resultRef, resultPath: task.resultPath, resultHash: task.resultHash, readonly: task.readonly,
+    handle: task.handle, assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, workerManifestPath: task.workerManifestPath, requestId: task.requestId, sessionId: task.sessionId, terminalId: task.terminalId, workerPid: task.workerPid,
+    resultRef: task.resultRef, resultPath: task.resultPath, resultHash: task.resultHash, readonly: task.readonly, capabilities: task.capabilities, continuedFrom: task.continuedFrom, instructionIds: task.instructionIds,
+    pendingAskId: task.pendingAskId, askDeliveredId: task.askDeliveredId, usageStartOffset: task.usageStartOffset, costComplete: task.costComplete,
     minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
     lastActivityAt: task.lastActivityAt, presence: task.presence, pendingCompletion: task.pendingCompletion,
     available_actions: availableTaskActions(task), nextAction: taskNextAction(task),
@@ -183,7 +193,7 @@ export function buildCompletionMessage(task: TaskHandle, result: string): string
   if (task.resultRef) lines.push(`Evidence: ${task.resultRef}`);
   if (task.fallbackFrom) lines.push(`Fallback: ${task.fallbackFrom} was unavailable; used ${task.route}.`);
   if (task.escalation) lines.push(`Escalation: ${truncate(task.escalation, 240)}`);
-  if (task.paneId) lines.push(task.paneClosedAt ? `Pane ${task.paneId} was closed.` : `Pane ${task.paneId} is retained for inspection.`);
+  if (task.paneId) lines.push(task.paneClosedAt ? `Pane ${task.paneId} was closed.` : task.paneRetention === "close" ? `Pane ${task.paneId} will close after receipt; the saved session remains available for resume.` : `Pane ${task.paneId} is retained for inspection.`);
   return boundNotification(lines.join("\n"));
 }
 
@@ -203,14 +213,17 @@ export const isActiveTask = (task: Pick<TaskHandle, "state">) => ACTIVE_STATES.i
 export function availableTaskActions(task: TaskHandle): string[] {
   const actions = ["status"];
   if (task.resultHash || task.result !== undefined) actions.push("result");
+  const canResume = !isActiveTask(task) && !task.pendingCompletion && !task.pendingAskId && !!task.sessionPath && !!task.sessionId && !!task.capabilities;
+  if (canResume && (task.paneClosedAt || task.presence === "lost")) actions.push("resume");
   if (task.presence === "unknown" || task.state === "unknown") return actions;
   if (task.state === "lost") return [...actions, "stop"];
   if (task.presence === "lost") return [...actions, "clear"];
   if (task.paneId && !task.paneClosedAt) actions.push("focus");
-  if (isActiveTask(task)) actions.push("steer", "stop");
+  if (task.pendingAskId) actions.push("reply", "stop");
+  else if (isActiveTask(task)) actions.push("steer", "stop", ...(task.state === "running" ? ["interrupt"] : []));
   else {
     actions.push("clear");
-    if (task.paneId && !task.paneClosedAt && !task.pendingCompletion) actions.push("close", "steer");
+    if (task.paneId && !task.paneClosedAt && !task.pendingCompletion) actions.push("close");
   }
   return actions;
 }
@@ -222,7 +235,9 @@ export function taskNextAction(task: TaskHandle): string {
   if (task.pendingCompletion) return "The result is durable and awaits receipt in the parent conversation; do not repeat the assignment.";
   if (task.state === "interrupted") return "Resume deliberately with steer, or stop when abandoning this assignment.";
   if (task.state === "failed") return "Inspect execution failure and any external effects; do not treat partial text as a result or blindly replay tools.";
-  if (task.state === "blocked") return "Supply the missing decision with steer; this is not a new assignment.";
+  if (task.pendingAskId) return "Reply to the exact outstanding ask_id; the worker is waiting inside the same assignment, not completed.";
+  if (task.state === "blocked") return "Inspect the blocking condition; do not start another assignment.";
+  if (task.paneClosedAt && task.sessionPath) return "Read the saved result or use resume with an explicit follow-up to continue this exact Pi session in a fresh pane.";
   return isActiveTask(task) ? "Allow work to progress; use controls only when the assignment changes or evidence calls for recovery." : "Read the durable result or close the retained pane when no longer needed.";
 }
 
@@ -295,9 +310,10 @@ export function formatTaskWidget(tasks: Iterable<TaskWidgetItem>, now = Date.now
 
 export function telemetryRecord(task: TaskHandle): Record<string, unknown> {
   return {
-    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
-    sessionId: task.sessionId, terminalId: task.terminalId, resultRef: task.resultRef, resultPath: task.resultPath,
-    resultHash: task.resultHash, readonly: task.readonly, lastActivityAt: task.lastActivityAt, presence: task.presence,
+    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, workerManifestPath: task.workerManifestPath, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
+    sessionId: task.sessionId, terminalId: task.terminalId, workerPid: task.workerPid, resultRef: task.resultRef, resultPath: task.resultPath,
+    resultHash: task.resultHash, readonly: task.readonly, capabilities: task.capabilities, continuedFrom: task.continuedFrom, instructionIds: task.instructionIds,
+    pendingAskId: task.pendingAskId, askDeliveredId: task.askDeliveredId, usageStartOffset: task.usageStartOffset, costComplete: task.costComplete, lastActivityAt: task.lastActivityAt, presence: task.presence,
     pendingCompletion: task.pendingCompletion, messageToken: task.messageToken,
     handle: task.handle, route: task.route, fallbackFrom: task.fallbackFrom,
     routeExplicit: task.routeExplicit, target: task.target, model: task.model, thinking: task.thinking,

@@ -1,25 +1,45 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readAssignmentReceipt, saveAssignmentResult, writeAssignmentReceipt, type AssignmentOutcome, type AssignmentReceipt } from "./artifacts.ts";
 import { parseJson, runHerdr } from "./herdr.ts";
+import { readRoutingManifest } from "./manifest.ts";
+import { registerWorkerEditorGuard } from "./editor-guard.ts";
 import { registerReadonlyWorkerPolicy } from "./worker-policy.ts";
+import { cancelAssignmentAsk, readPendingAssignmentAsk, registerAssignmentQuestions } from "./questions.ts";
 
 export default function routedWorkerLifecycle(pi: ExtensionAPI): void {
   const assignmentId = process.env.PI_ROUTED_ASSIGNMENT_ID;
   if (!assignmentId) return;
+  registerWorkerEditorGuard(pi, assignmentId);
+  registerAssignmentQuestions(pi, assignmentId);
   registerReadonlyWorkerPolicy(pi);
   let receipt: AssignmentReceipt | undefined;
   let outcome: AssignmentOutcome | undefined;
   let responseEntryId: string | undefined;
   let responseText = "";
   let lastWrite = 0;
+  let ownedRun = true;
+  const resolved = () => {
+    const previous = readAssignmentReceipt(assignmentId);
+    const owner = readRoutingManifest(process.env.PI_ROUTING_MANIFEST)?.tasks.find((task) => task.assignmentId === assignmentId);
+    return previous?.outcome === "completed" || previous?.outcome === "error" || owner && ["completed", "failed", "stopped", "abandoned"].includes(owner.state);
+  };
+  pi.on("input", (event, ctx) => {
+    if (event.source !== "interactive" || !resolved()) return;
+    ctx.ui.setEditorText(event.text);
+    ctx.ui.notify("This worker assignment has finished. Its draft was preserved; use the parent's resume control for a new generation.", "warning");
+    return { action: "handled" };
+  });
+  pi.on("tool_call", () => !ownedRun ? { block: true, terminate: true, reason: "This worker has no active assignment; continue its saved session through the parent." } : undefined);
 
   const publish = () => { if (receipt) { writeAssignmentReceipt(receipt); lastWrite = Date.now(); } };
   const touch = () => {
-    if (!receipt || receipt.outcome !== "running") return;
+    if (!ownedRun || !receipt || receipt.outcome !== "running") return;
     receipt.lastActivityAt = Date.now();
     if (Date.now() - lastWrite >= 1000) publish();
   };
   pi.on("agent_start", async (_event, ctx) => {
+    ownedRun = !resolved();
+    if (!ownedRun) return;
     const paneId = process.env.HERDR_PANE_ID;
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (!paneId || !sessionPath) throw new Error("Routed worker requires a persisted Pi session and exact pane identity");
@@ -30,30 +50,33 @@ export default function routedWorkerLifecycle(pi: ExtensionAPI): void {
     receipt = {
       version: 1, assignmentId, requestId: previous?.requestId ?? assignmentId, generation: (previous?.generation ?? 0) + 1,
       sessionId: ctx.sessionManager.getSessionId(), sessionPath, paneId, terminalId: agent.terminal_id,
-      outcome: "running", lastActivityAt: Date.now(),
+      outcome: "running", workerPid: process.pid, lastActivityAt: Date.now(),
     };
     outcome = undefined; responseEntryId = undefined; responseText = "";
     publish();
   });
   pi.on("message_start", (event) => {
-    if (event.message.role !== "user" || !receipt) return;
+    if (!ownedRun || event.message.role !== "user" || !receipt) return;
     const text = typeof event.message.content === "string" ? event.message.content : event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
     const request = /^p3:routed-request ([0-9a-f-]{36})\n/.exec(text)?.[1];
     if (request) { receipt.requestId = request; receipt.outcome = "running"; publish(); }
   });
   pi.on("turn_end", (event) => {
+    if (!ownedRun) return;
     touch();
     outcome = event.outcome;
     if (event.message.role !== "assistant") return;
     responseEntryId = event.messageEntryId;
     responseText = event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
   });
-  pi.on("agent_before_settle", (event) => { outcome = event.outcome; });
+  pi.on("agent_before_settle", (event) => { if (ownedRun) outcome = event.outcome; });
   pi.on("tool_execution_start", touch);
   pi.on("tool_execution_end", touch);
   pi.on("message_update", touch);
   pi.on("agent_settled", (_event, ctx: ExtensionContext) => {
-    if (!receipt || receipt.sessionId !== ctx.sessionManager.getSessionId()) return;
+    if (!ownedRun || !receipt || receipt.sessionId !== ctx.sessionManager.getSessionId()) return;
+    if (outcome === "aborted") cancelAssignmentAsk(assignmentId);
+    if (readPendingAssignmentAsk(assignmentId)) { touch(); return; }
     if (process.env.PI_SUBAGENT_MODE === "background") { touch(); return; }
     const entry = responseEntryId ? ctx.sessionManager.getEntries().find((entry) => entry.id === responseEntryId) : undefined;
     const verifiedResponse = entry?.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "stop";

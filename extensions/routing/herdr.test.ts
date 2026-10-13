@@ -34,7 +34,8 @@ afterEach(() => {
 afterEach(() => { if (temp) rmSync(temp, { recursive: true, force: true }); temp = undefined; });
 
 describe("completed pane retention", () => {
-  test("keeps by default", () => expect(shouldCloseCompletedPane()).toBe(false));
+  test("bounded tasks close by default", () => expect(shouldCloseCompletedPane()).toBe(true));
+  test("explicit keep retains pane", () => expect(shouldCloseCompletedPane("keep")).toBe(false));
   test("explicit close removes pane", () => expect(shouldCloseCompletedPane("close")).toBe(true));
 });
 
@@ -76,6 +77,16 @@ describe("routed worker Pi arguments", () => {
     expect(args).toContain("mcp__*");
     expect(args).toContain("--no-mcp");
     expect(args).not.toContain("--no-extensions");
+  });
+
+  test("continuation opens the saved session path rather than minting a session id", () => {
+    const assignmentId = randomUUID();
+    const args = buildRoutedWorkerPiArgs("Follow up", route("openai-codex", "gpt-6-luna", "high"), [], true, assignmentId, { path: "/saved/owned.jsonl", id: "saved-session" });
+    expect(args[args.indexOf("--session") + 1]).toBe("/saved/owned.jsonl");
+    expect(args).not.toContain("--session-id");
+    expect(args[args.indexOf("--model") + 1]).toBe("openai-codex/gpt-6-luna");
+    expect(args[args.indexOf("--thinking") + 1]).toBe("high");
+    expect(args).toContain("--no-mcp");
   });
 
   test("automatic workers use the wrapper and clamp legacy above-high effort", () => {

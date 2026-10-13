@@ -34,6 +34,7 @@ export interface AssignmentReceipt {
   sessionPath: string;
   paneId: string;
   terminalId: string;
+  workerPid?: number;
   outcome: AssignmentOutcome;
   lastActivityAt: number;
   responseEntryId?: string;
@@ -41,6 +42,7 @@ export interface AssignmentReceipt {
   error?: string;
 }
 
+export const askPathForAssignment = (id: string) => join(assignmentDirectory(id), "ask.json");
 export const resultPathForAssignment = (id: string) => join(assignmentDirectory(id), "output.md");
 export const resultRefForAssignment = (id: string) => { assignmentDirectory(id); return `result:${id}`; };
 export const pathForResultRef = (ref: string) => ref.startsWith("result:") && UUID.test(ref.slice(7)) ? resultPathForAssignment(ref.slice(7)) : undefined;

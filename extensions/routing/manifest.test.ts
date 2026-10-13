@@ -60,3 +60,23 @@ test("restores exact executor, request, durable result and pending receipt conte
   expect(saved.completionNotifiedAt).toBeUndefined();
   expect(restoreTaskHandle(taskManifestRecord(saved)!)).toEqual(saved);
 });
+
+test("round-trips continuation, question delivery, process and usage boundaries without dropping empty capabilities", () => {
+  const profile = restoreTaskHandle({
+    handle: "rt-follow-up", label: "Follow-up", agentName: "worker", paneId: "w1:p2", route: "luna",
+    model: "openai-codex/gpt-6-luna", thinking: "high", state: "running", startedAt: 1,
+    parentSessionId: "parent", sessionId: "saved-session", sessionPath: "/saved.jsonl", terminalId: "native-terminal", workerPid: 1234,
+    capabilities: [], readonly: true, continuedFrom: "rt-original", instructionIds: ["11111111-1111-4111-8111-111111111111"],
+    pendingAskId: "22222222-2222-4222-8222-222222222222", askDeliveredId: "22222222-2222-4222-8222-222222222222",
+    usageStartOffset: 4096, costComplete: false, paneRetention: "close",
+  });
+  const record = taskManifestRecord(profile)!;
+  expect(record.capabilities).toEqual([]); expect(record.workerPid).toBe(1234);
+  expect(record.continuedFrom).toBe("rt-original"); expect(record.instructionIds).toEqual(profile.instructionIds);
+  expect(record.pendingAskId).toBe(profile.pendingAskId); expect(record.askDeliveredId).toBe(profile.askDeliveredId);
+  expect(record.usageStartOffset).toBe(4096); expect(record.costComplete).toBe(false);
+  const path = join(temp, "continued-manifest.json");
+  writeRoutingManifest(path, { version: ROUTING_MANIFEST_VERSION, parentSessionId: "parent", parentPaneId: "w1:p1", updatedAt: 1, tasks: [record] });
+  const restored = restoreTaskHandle(readRoutingManifest(path)!.tasks[0]);
+  expect(restored).toEqual(profile);
+});

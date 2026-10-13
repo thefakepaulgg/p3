@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { registerRoutingRpc, ROUTING_RPC_CHANNELS, type EventBus } from "./rpc.ts";
 import { ROUTING_RPC_VERSION } from "./state.ts";
+import { orchestrationError } from "./errors.ts";
 
 const bus = () => {
   const listeners = new Map<string, Set<(data: unknown) => void>>();
@@ -37,6 +38,7 @@ test("versioned routing RPC preserves launch/status/result/stop parity and owner
     status: async (handle) => { calls.push(["status", handle]); return { handle, state: "running", result: undefined }; },
     result: async (handle) => { calls.push(["result", handle]); return { handle, result: "full routed result", available: true }; },
     stop: async (handle, closePane) => { calls.push(["stop", { handle, closePane }]); return { handle, state: "stopped" }; },
+    steer: async () => ({}), list: async () => [],
   });
 
   expect((await request(events, ROUTING_RPC_CHANNELS.ping, {})).data).toEqual({ version: ROUTING_RPC_VERSION });
@@ -64,13 +66,16 @@ test("routing RPC validates launch parameters before invoking the handler", asyn
   const registration = registerRoutingRpc(events, {
     launch: async () => { launches += 1; return { text: "", details: {} }; },
     status: async () => ({}), result: async () => ({ handle: "", result: "", available: false }), stop: async () => ({}),
+    steer: async () => ({}), list: async () => [],
   });
   const invalidSurface = await request(events, ROUTING_RPC_CHANNELS.launch, { task: "x", description: "step", surface: "bogus" });
   const invalidIsolation = await request(events, ROUTING_RPC_CHANNELS.launch, { task: "x", description: "step", isolation: "worktree" });
   const invalidCapability = await request(events, ROUTING_RPC_CHANNELS.launch, { task: "x", description: "step", capabilities: ["shell"] });
   expect(invalidSurface.success).toBe(false);
   expect(invalidIsolation.success).toBe(false);
-  expect(invalidCapability).toEqual({ success: false, error: "capabilities must contain only memory" });
+  expect(invalidCapability).toMatchObject({ success: false, error: "capabilities must contain only memory",
+    errorDetails: { operation: ROUTING_RPC_CHANNELS.launch, category: "invalid_request", stage: "validation", retrySafe: true },
+  });
   expect(launches).toBe(0);
   registration.unsubscribe();
 });
@@ -80,10 +85,39 @@ test("routing RPC replies with bounded protocol failures", async () => {
   const registration = registerRoutingRpc(events, {
     launch: async () => { throw new Error("should not launch"); },
     status: async () => ({}), result: async () => ({ handle: "", result: "", available: false }), stop: async () => ({}),
+    steer: async () => ({}), list: async () => [],
   });
   const unsupported = await request(events, ROUTING_RPC_CHANNELS.ping, { version: 99 });
-  expect(unsupported).toEqual({ success: false, error: "Unsupported routing RPC version: 99" });
+  expect(unsupported).toMatchObject({ success: false, error: "Unsupported routing RPC version: 99",
+    errorDetails: { operation: ROUTING_RPC_CHANNELS.ping, category: "invalid_request", stage: "validation", retrySafe: true },
+  });
   const missingHandle = await request(events, ROUTING_RPC_CHANNELS.status, {});
-  expect(missingHandle).toEqual({ success: false, error: "handle is required" });
+  expect(missingHandle).toMatchObject({ success: false, error: "handle is required",
+    errorDetails: { operation: ROUTING_RPC_CHANNELS.status, category: "invalid_request", stage: "validation", retrySafe: true },
+  });
+  registration.unsubscribe();
+});
+
+test("routing RPC emits structured handler details alongside the original error string", async () => {
+  const events = bus();
+  const failure = orchestrationError(new Error("launch failed; cleanup failed too"), "launch", {
+    stage: "cleanup", ids: { paneId: "pane-1", handle: "rt-1" },
+    primary: { message: "launch failed" }, cleanup: { message: "cleanup failed too" },
+    rollbackOccurred: false, retryAttempted: true, retrySafe: false,
+  });
+  const registration = registerRoutingRpc(events, {
+    launch: async () => { throw failure; },
+    status: async () => { throw new Error("status failed verbatim"); },
+    result: async () => ({ handle: "", result: "", available: false }),
+    stop: async () => ({}), steer: async () => ({}), list: async () => [],
+  });
+  const launched = await request(events, ROUTING_RPC_CHANNELS.launch, { task: "x", description: "step" });
+  expect(launched).toEqual({ success: false, error: failure.message,
+    errorDetails: { ...failure.detail, operation: ROUTING_RPC_CHANNELS.launch },
+  });
+  const status = await request(events, ROUTING_RPC_CHANNELS.status, { handle: "rt-1" });
+  expect(status).toMatchObject({ success: false, error: "status failed verbatim",
+    errorDetails: { operation: ROUTING_RPC_CHANNELS.status, category: "operation_failed", retrySafe: "unknown" },
+  });
   registration.unsubscribe();
 });

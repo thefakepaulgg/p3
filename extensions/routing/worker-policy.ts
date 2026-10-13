@@ -4,7 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * Tools permitted in a read-only worker. Kept minimal: read the codebase, report back.
  * message_parent lets the worker escalate to its orchestrating primary.
  */
-export const READONLY_WORKER_TOOLS: readonly string[] = Object.freeze(["read", "ls", "find", "grep", "message_parent"]);
+export const READONLY_WORKER_TOOLS: readonly string[] = Object.freeze(["read", "ls", "find", "grep", "message_parent", "ask_parent"]);
 
 /**
  * Build CLI arguments that restrict a Pi worker to the given tool policy.
