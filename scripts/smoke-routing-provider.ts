@@ -55,7 +55,7 @@ function decide(model: string, messages: any[]) {
   if (boundary) {
     if (!callResult(messages, "subagent")) {
       const kind = text(boundary).split(" ")[1];
-      return call("subagent", { task: `P3_SMOKE_OBJECTIVE ${kind}: execute only this fixture objective.`, description: `smoke ${kind}`, route: kind.includes("STREAM") ? "smoke-stream/stream" : `smoke-routing/${kind === "ASK" ? "ask" : kind === "RESUME" ? "worker" : "hold"}`, readonly: kind === "ASK" || kind === "RESUME" || kind === "AUTO", pane_retention: kind === "RESUME" ? "close" : "keep" });
+      return call("subagent", { task: `P3_SMOKE_OBJECTIVE ${kind}: execute only this fixture objective.`, description: `smoke ${kind}`, route: kind === "AUTO" ? "auto" : kind.includes("STREAM") ? "smoke-stream/stream" : `smoke-routing/${kind === "ASK" ? "ask" : kind === "RESUME" ? "worker" : "hold"}`, readonly: kind === "ASK" || kind === "RESUME" || kind === "AUTO", pane_retention: kind === "RESUME" ? "close" : "keep" });
     }
     return fauxAssistantMessage("P3_SMOKE_CASE_READY");
   }
