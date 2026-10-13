@@ -102,7 +102,7 @@ describe("malformed records", () => {
   });
 
   test("write rejects record with wrong version", () => {
-    expect(() => writeBranchWork(makeRecord({ version: 2 as any }))).toThrow(/version/);
+    expect(() => writeBranchWork(makeRecord({ version: 2 as any }))).toThrow(/Invalid branch-work record/);
   });
 
   test("write rejects record with missing executor fields", () => {
@@ -112,7 +112,7 @@ describe("malformed records", () => {
   });
 
   test("write rejects record with invalid status", () => {
-    expect(() => writeBranchWork(makeRecord({ status: "completed" as any }))).toThrow(/status/);
+    expect(() => writeBranchWork(makeRecord({ status: "completed" as any }))).toThrow(/Invalid branch-work record/);
   });
 
   test("read rejects record with repo mismatch", () => {

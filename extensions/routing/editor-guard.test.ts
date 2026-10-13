@@ -40,7 +40,7 @@ afterEach(() => {
   for (const key of envNames) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
 });
 const taskFixture = (): TaskHandle => ({
-  handle: "rt-editor", assignmentId: randomUUID(), messageToken: randomUUID(), parentSessionId: "parent-session",
+  handle: "rt-editor", agentName: "editor-worker", assignmentId: randomUUID(), messageToken: randomUUID(), parentSessionId: "parent-session",
   paneId: "w1:p2", terminalId: "terminal-2", sessionId: randomUUID(), route: "luna", routeExplicit: true,
   target: "herdr", model: "openai-codex/gpt-6-luna", thinking: "high", label: "Editor worker", state: "running",
   startedAt: 1, transitions: 0, notifiedStates: [], capabilities: [], instructionIds: [first, second],

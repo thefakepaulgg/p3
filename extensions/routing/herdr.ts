@@ -1,4 +1,4 @@
-import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -529,7 +529,7 @@ export async function launchHerdrAgent(pi: ExtensionAPI, task: string, descripti
     const info = parseJson(await runHerdr(pi, ["agent", "get", agent], 5000), "started worker identity")?.result?.agent;
     const sessionPath = info?.agent_session?.value;
     const launch: HerdrLaunch = { agent, paneId, tabId, route: routeName, terminalId: info?.terminal_id, sessionPath, sessionId: readHerdrSessionId(sessionPath) ?? options.continuation?.id ?? options.assignmentId };
-    if (options.continuation && (launch.sessionId !== options.continuation.id || sessionPath !== options.continuation.path)) throw new Error("Continuation started with conflicting saved-session identity");
+    if (options.continuation && (launch.sessionId !== options.continuation.id || (!sessionPath || realpathSync(sessionPath) !== realpathSync(options.continuation.path)))) throw new Error("Continuation started with conflicting saved-session identity");
     options.onStarted?.(launch);
     const contract = background
       ? "Background contract: you are a long-lived background subagent. The parent agent never receives your output automatically and may later read your latest reply, so end each turn with a short current-status summary. Own only this assignment; do not delegate. Use notify_user (Telegram) only when the user must act or when something important finished."

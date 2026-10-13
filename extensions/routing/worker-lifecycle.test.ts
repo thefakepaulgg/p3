@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import workerLifecycle from "./worker-lifecycle.ts";
-import { assignmentDirectory, askPathForAssignment, atomicWriteArtifact, hashText, readAssignmentReceipt, readAssignmentResult, resultPathForAssignment } from "./artifacts.ts";
+import { writeCancellationIntent, assignmentDirectory, askPathForAssignment, atomicWriteArtifact, hashText, readAssignmentReceipt, readAssignmentResult, resultPathForAssignment } from "./artifacts.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
 
 const names = ["PI_CODING_AGENT_DIR", "PI_ROUTED_ASSIGNMENT_ID", "PI_ROUTED_READONLY", "PI_SUBAGENT_MODE", "HERDR_PANE_ID"] as const;
@@ -37,7 +37,10 @@ const fixture = async () => {
   const entries: any[] = [];
   const pi: any = {
     registerTool: () => {},
-    on: (name: string, handler: Function) => handlers.set(name, handler),
+    on: (name: string, handler: Function) => {
+      const previous = handlers.get(name);
+      handlers.set(name, previous ? (...args: any[]) => { const before = previous(...args); const after = handler(...args); return after ?? before; } : handler);
+    },
     exec: async () => ({ code: 0, stderr: "", stdout: JSON.stringify({ result: { agent: { pane_id: "w1:p2", terminal_id: "terminal-2" } } }) }),
     getAllTools: () => ["read", "ls", "find", "grep", "message_parent", "ask_parent", "bash", "write", "codemode", "workspace_agent"].map((name) => ({ name })),
     setActiveTools: (tools: string[]) => { pi.activeTools = tools; },
@@ -54,6 +57,7 @@ const response = (text = "Verified result", stopReason = "stop") => ({ role: "as
 
 test("native completed observations persist nonempty matching hash artifacts only at agent_settled", async () => {
   const { handlers, entries, ctx } = await fixture();
+  writeCancellationIntent(readAssignmentReceipt(assignmentId)!);
   const message = response();
   entries.push({ type: "message", id: "response", message });
   handlers.get("turn_end")!({ outcome: "completed", message, messageEntryId: "response" }, ctx);
@@ -134,3 +138,63 @@ for (const status of ["waiting", "answered"] as const) {
     expect(JSON.parse(readFileSync(askPathForAssignment(assignmentId), "utf8")).status).toBe("cancelled");
   });
 }
+
+test("finished inspection worker preserves a new human draft and never overwrites its result", async () => {
+  const { handlers, entries, ctx } = await fixture();
+  const message = response("Original immutable output");
+  entries.push({ type: "message", id: "response", message });
+  handlers.get("turn_end")!({ message, messageEntryId: "response" }, ctx);
+  handlers.get("agent_before_settle")!({ outcome: "completed" }, ctx);
+  handlers.get("agent_settled")!({}, ctx);
+  const original = readAssignmentReceipt(assignmentId)!;
+  let draft = "";
+  ctx.ui = { setEditorText: (text: string) => { draft = text; }, notify: () => {} };
+  expect(handlers.get("input")!({ source: "interactive", text: "Unsubmitted follow-up" }, ctx)).toEqual({ action: "handled" });
+  expect(draft).toBe("Unsubmitted follow-up");
+  await handlers.get("agent_start")!({}, ctx);
+  expect(await handlers.get("tool_call")!({ toolName: "write" }, ctx)).toMatchObject({ block: true, terminate: true });
+  const unwanted = response("Must not replace the original output");
+  entries.push({ type: "message", id: "unowned-response", message: unwanted });
+  handlers.get("turn_end")!({ message: unwanted, messageEntryId: "unowned-response" }, ctx);
+  handlers.get("agent_before_settle")!({ outcome: "completed" }, ctx);
+  handlers.get("agent_settled")!({}, ctx);
+  expect(readAssignmentReceipt(assignmentId)).toEqual(original);
+  expect(readAssignmentResult(assignmentId, original.resultHash!)).toBe("Original immutable output");
+});
+
+for (const scenario of [
+  { name: "correlated native tool abort", errorMessage: "This operation was aborted", intent: true, expected: "aborted" },
+  { name: "uncorrelated abort sentinel", errorMessage: "This operation was aborted", intent: false, expected: "error" },
+  { name: "ordinary error after Esc", errorMessage: "Controlled provider failure", intent: true, expected: "error" },
+  { name: "abort-looking provider text", errorMessage: "Request aborted by upstream policy", intent: true, expected: "error" },
+]) {
+  test(`${scenario.name} uses persisted native evidence, never partial output`, async () => {
+    const { handlers, entries, ctx } = await fixture();
+    if (scenario.intent) writeCancellationIntent(readAssignmentReceipt(assignmentId)!);
+    const message = { ...response("Partial text is not a result", "error"), errorMessage: scenario.errorMessage };
+    entries.push({ type: "message", id: "abort-entry", message });
+    handlers.get("turn_end")!({ outcome: "error", message, messageEntryId: "abort-entry" }, ctx);
+    handlers.get("agent_before_settle")!({ outcome: "error" }, ctx);
+    handlers.get("agent_settled")!({}, ctx);
+    expect(readAssignmentReceipt(assignmentId)!.outcome).toBe(scenario.expected);
+    expect(existsSync(resultPathForAssignment(assignmentId))).toBe(false);
+  });
+}
+
+test("a cancellation intent never leaks into the next native generation", async () => {
+  const { handlers, entries, ctx } = await fixture();
+  writeCancellationIntent(readAssignmentReceipt(assignmentId)!);
+  const abort = { ...response("", "error"), errorMessage: "This operation was aborted" };
+  entries.push({ type: "message", id: "first-abort", message: abort });
+  handlers.get("turn_end")!({ outcome: "error", message: abort, messageEntryId: "first-abort" }, ctx);
+  handlers.get("agent_before_settle")!({ outcome: "error" }, ctx);
+  handlers.get("agent_settled")!({}, ctx);
+  expect(readAssignmentReceipt(assignmentId)!.outcome).toBe("aborted");
+  await handlers.get("agent_start")!({}, ctx);
+  entries.push({ type: "message", id: "second-error", message: abort });
+  handlers.get("turn_end")!({ outcome: "error", message: abort, messageEntryId: "second-error" }, ctx);
+  handlers.get("agent_before_settle")!({ outcome: "error" }, ctx);
+  handlers.get("agent_settled")!({}, ctx);
+  expect(readAssignmentReceipt(assignmentId)!.generation).toBe(2);
+  expect(readAssignmentReceipt(assignmentId)!.outcome).toBe("error");
+});

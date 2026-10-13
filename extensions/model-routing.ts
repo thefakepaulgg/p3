@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { classifyDelegation, classifyModelRoute, planFallback, routes, selectEligibleRoute, clampThinkingLevel, routeTier, type CapabilityTier, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./routing/policy.ts";
 import { availableTaskActions, buildCompletionMessage, canDeliverCompletion, boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, resetCompletionDelivery, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
 import { parseJson, proveTaskAbsent, readHerdrResult, runHerdr, verifyTaskAgent, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
-import { pathForResultRef, askPathForAssignment, readAssignmentReceipt, readAssignmentResult } from "./routing/artifacts.ts";
+import { pathForResultRef, askPathForAssignment, readAssignmentReceipt, readAssignmentResult, writeCancellationIntent } from "./routing/artifacts.ts";
 import { readAssignmentAsk, readPendingAssignmentAsk, writeAssignmentReply, cancelAssignmentAsk, type AssignmentAsk } from "./routing/questions.ts";
 import { orchestrationError, orchestrationErrorResult } from "./routing/errors.ts";
 import { ensureWorkerEditor, saveRoutedInstruction } from "./routing/editor-guard.ts";
@@ -263,7 +263,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     const previous = task.state;
     Object.assign(task, patch);
     task.escalation = recommendEscalation(task);
-    if (persist && (previous !== task.state || patch.error !== undefined || patch.resultChars !== undefined || patch.model !== undefined || patch.thinking !== undefined)) persistTask(task);
+    if (persist && (previous !== task.state || patch.error !== undefined || patch.resultChars !== undefined || patch.model !== undefined || patch.thinking !== undefined || patch.paneClosedAt !== undefined || "pendingAskId" in patch || "askDeliveredId" in patch)) persistTask(task);
     if (previous !== task.state) emitTaskLifecycle(pi.events, task);
     syncManifest();
     refreshWidget();
@@ -600,6 +600,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (!original) throw new Error("Worker's current assignment is unverified; cancellation cannot guess it");
     watchers.get(task.handle)?.abort();
     try {
+      writeCancellationIntent(original);
       await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000);
       await waitForSettledWorker(task, original.generation);
       if (task.assignmentId && readPendingAssignmentAsk(task.assignmentId)) cancelAssignmentAsk(task.assignmentId);
@@ -649,6 +650,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (before.agent_status !== "working" || !original || original.outcome !== "running") throw new Error("Worker has no verified current operation to interrupt");
     watchers.get(task.handle)?.abort();
     try {
+      writeCancellationIntent(original);
       await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000);
       const settled = await waitForSettledWorker(task, original.generation);
       if (settled.outcome === "completed") {
