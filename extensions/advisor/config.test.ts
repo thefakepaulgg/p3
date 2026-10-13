@@ -29,12 +29,18 @@ test("accepts a configured cross-provider advisor and bounded budgets", () => {
     maxOutputTokens: 2_000,
     maxCallsPerRun: 1,
     timeoutMs: 45_000,
-    thinkingLevel: "xhigh",
+    thinkingLevel: "high",
   });
   expect(warnings).toEqual([]);
   expect(config.enabled).toBe(false);
   expect(config.fallbackModels).toEqual(["openai/gpt-5.6-sol"]);
   expect(config.contextTokenBudget).toBe(16_000);
   expect(config.timeoutMs).toBe(45_000);
-  expect(config.thinkingLevel).toBe("xhigh");
+  expect(config.thinkingLevel).toBe("high");
+});
+
+test("rejects thinking levels above the High ceiling", () => {
+  const { config, warnings } = parseAdvisorConfig({ thinkingLevel: "xhigh" });
+  expect(config.thinkingLevel).toBe("high");
+  expect(warnings).toEqual(["thinkingLevel is invalid (maximum is high); using high"]);
 });
