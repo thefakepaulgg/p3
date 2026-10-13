@@ -1051,6 +1051,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (ownsManifest) {
       for (const task of taskHandles.values()) {
         if (task.costComplete !== false || !task.sessionPath) continue;
+        if (!isActiveTask(task) && (task.usageOffset ?? 0) <= (task.usageStartOffset ?? 0)) continue;
         const usage = readIncrementalUsage(task.sessionPath, { sessionPath: task.sessionPath, offset: task.usageOffset ?? 0,
           cost: task.estimatedCost ?? 0, costKnown: task.costKnown ?? false, complete: false },
           { startOffset: task.usageStartOffset ?? 0, ...(!isActiveTask(task) ? { endOffset: task.usageOffset ?? 0 } : {}) });

@@ -1174,7 +1174,7 @@ test("outstanding ask cannot be bypassed by steer or interrupt; reply writes to 
   } finally { await fixture.shutdown(); }
 });
 
-test("reopening a parent corrects pessimistic coverage on a finished zero-charge worker", async () => {
+for (const observed of [true, false]) test(`reopening a parent ${observed ? "corrects zero-charge coverage" : "preserves unobserved terminal coverage"}`, async () => {
   const restore = herdrEnv();
   const lifecycle = new Map<string, Function>();
   const tools: any[] = [];
@@ -1183,7 +1183,7 @@ test("reopening a parent corrects pessimistic coverage on a finished zero-charge
   writeFileSync(path, `${sessionHeader()}\n${JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "error", usage: { cost: { total: 0 } }, content: [] } })}\n`);
   const tracked = { handle: "rt-old-coverage", assignmentId: randomUUID(), parentSessionId: "session-1", agentName: "old-worker", paneId: "w1:p2", route: "openai/gpt-5.4",
     model: "openai/gpt-5.4", state: "failed", label: "Old failed worker", startedAt: Date.now(), sessionPath: path,
-    usageStartOffset: 0, usageOffset: Buffer.byteLength(readFileSync(path, "utf8")), estimatedCost: 0, costKnown: true, costComplete: false };
+    usageStartOffset: 0, usageOffset: observed ? Buffer.byteLength(readFileSync(path, "utf8")) : 0, estimatedCost: 0, costKnown: observed, costComplete: false };
   const ctx = uiCtx(widgets);
   ctx.sessionManager = sessionManager([{ type: "custom", customType: "routed-task", data: tracked }]);
   const fake: any = { registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
@@ -1191,8 +1191,8 @@ test("reopening a parent corrects pessimistic coverage on a finished zero-charge
   try {
     routing(fake); await lifecycle.get("session_start")!({}, ctx);
     const list = await tools.find((tool) => tool.name === "subagent_control").execute("list", { action: "list" }, undefined, undefined, ctx);
-    expect(list.details.tasks[0].costComplete).toBe(true);
+    expect(list.details.tasks[0].costComplete).toBe(observed);
     expect(list.details.tasks[0].estimatedCost).toBe(0);
-    expect(widgets.at(-1).content.join("\n")).not.toContain("missing");
+    expect(widgets.at(-1).content.join("\n").includes("missing")).toBe(!observed);
   } finally { await lifecycle.get("session_shutdown")?.(); restore(); }
 });
