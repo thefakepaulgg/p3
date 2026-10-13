@@ -373,7 +373,7 @@ export function watchHerdrTask(options: {
         if (task.pendingAskId !== ask?.id) update({ pendingAskId: ask?.id });
         const updateUsage = (path?: string) => {
           const usage = readIncrementalUsage(path, { sessionPath: task.sessionPath, offset: task.usageOffset ?? 0, cost: task.estimatedCost ?? 0,
-            costKnown: task.costKnown ?? false, complete: task.costComplete, model: task.model, thinking: task.thinking });
+            costKnown: task.costKnown ?? false, complete: task.costComplete, model: task.model, thinking: task.thinking }, { startOffset: task.usageStartOffset ?? 0 });
           if (usage.changed) update({ sessionPath: usage.sessionPath, usageOffset: usage.offset, estimatedCost: usage.cost,
             costKnown: usage.costKnown, costComplete: usage.complete, ...(usage.model ? { model: usage.model } : {}), ...(usage.thinking ? { thinking: usage.thinking } : {}) }, false);
         };

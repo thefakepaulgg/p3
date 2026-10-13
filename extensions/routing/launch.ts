@@ -76,7 +76,7 @@ const ownerKey = (owner?: TaskOwner): string | undefined => owner?.kind === "wor
 
 async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionContext, input: RoutedTaskLaunchParams, owner?: unknown): Promise<RoutedTaskLaunchResult> {
   validateRoutedTaskLaunchParams(input);
-  const params = { ...input, owner: normalizeTaskOwner(owner ?? input.owner) };
+  const params = { ...input, route: input.route?.trim() === "auto" ? undefined : input.route, owner: normalizeTaskOwner(owner ?? input.owner) };
   const task = params.task.trim();
   const description = params.description.trim();
   const brief = `${description}\n${task}`;
@@ -111,7 +111,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
     target: "herdr", model: `${route.provider}/${route.model}`, thinking: route.thinking, label: description,
     cwd, phase, dependsOn, ownedPaths, owner: params.owner, background: background || undefined, state: "queued", startedAt: Date.now(),
     messageToken: randomUUID(), paneRetention: params.pane_retention ?? (background ? "keep" : "close"),
-    transitions: 0, notifiedStates: [], usageStartOffset: 0, usageOffset: 0, estimatedCost: 0, costKnown: false, costComplete: false,
+    transitions: 0, notifiedStates: [], usageStartOffset: 0, usageOffset: 0, estimatedCost: 0, costKnown: false,
   };
   tracked.requestId = tracked.assignmentId;
   tracked.instructionIds = [tracked.requestId!];

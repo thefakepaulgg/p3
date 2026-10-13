@@ -55,7 +55,7 @@ function decide(model: string, messages: any[]) {
   if (boundary) {
     if (!callResult(messages, "subagent")) {
       const kind = text(boundary).split(" ")[1];
-      return call("subagent", { task: `P3_SMOKE_OBJECTIVE ${kind}: execute only this fixture objective.`, description: `smoke ${kind}`, route: kind.includes("STREAM") ? "smoke-stream/stream" : `smoke-routing/${kind === "ASK" ? "ask" : kind === "RESUME" ? "worker" : "hold"}`, readonly: kind === "ASK" || kind === "RESUME", pane_retention: kind === "RESUME" ? "close" : "keep" });
+      return call("subagent", { task: `P3_SMOKE_OBJECTIVE ${kind}: execute only this fixture objective.`, description: `smoke ${kind}`, route: kind.includes("STREAM") ? "smoke-stream/stream" : `smoke-routing/${kind === "ASK" ? "ask" : kind === "RESUME" ? "worker" : "hold"}`, readonly: kind === "ASK" || kind === "RESUME" || kind === "AUTO", pane_retention: kind === "RESUME" ? "close" : "keep" });
     }
     return fauxAssistantMessage("P3_SMOKE_CASE_READY");
   }
@@ -109,7 +109,7 @@ export default function smokeProvider(pi: ExtensionAPI) {
   });
   pi.on("message_end", (event: any) => {
     // Nonzero synthetic fake-provider costs make duplicate historical billing observable.
-    if (event.message.role === "assistant" && ["smoke-routing", "smoke-stream"].includes(event.message.provider)) event.message.usage.cost.total = 1;
+    if (event.message.role === "assistant" && ["smoke-routing", "smoke-stream", "openai-codex"].includes(event.message.provider)) event.message.usage.cost.total = 1;
   });
   pi.on("agent_start", (_e, ctx) => trace("agent_start", { session: ctx.sessionManager.getSessionId() }));
   pi.on("agent_settled", (_e, ctx) => trace("agent_settled", { session: ctx.sessionManager.getSessionId(), editor: ctx.ui.getEditorText() }));
@@ -137,6 +137,13 @@ export default function smokeProvider(pi: ExtensionAPI) {
   const response = (context: any, _options: any, _state: any, model: any) => { faux.appendResponses([response]); trace("provider", { model: model.id, users: context.messages.filter((m: any) => m.role === "user").map(text) }); return decide(model.id, context.messages); };
   faux.setResponses([response]);
   pi.registerProvider(faux.provider);
+  const automatic = fauxProvider({ provider: "openai-codex", api: "smoke-auto-api", models: [{ id: "gpt-6.1-sol", reasoning: false, input: ["text"] }] });
+  const autoResponse = (context: any) => {
+    automatic.appendResponses([autoResponse]);
+    trace("auto_provider", { users: context.messages.filter((m: any) => m.role === "user").map(text) });
+    return decide("worker", context.messages);
+  };
+  automatic.setResponses([autoResponse]); pi.registerProvider(automatic.provider);
   const streaming = fauxProvider({ provider: "smoke-stream", api: "smoke-stream-api", models: [{ id: "stream", reasoning: false, input: ["text"] }], tokensPerSecond: 80 });
   const streamResponse = (context: any) => {
     streaming.appendResponses([streamResponse]);

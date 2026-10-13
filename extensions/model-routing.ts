@@ -19,7 +19,7 @@ import { emitTaskLifecycle } from "./routing/lifecycle.ts";
 import { manifestPathForPane, readRoutingManifest, restoreTaskHandle, ROUTING_MANIFEST_VERSION, taskManifestRecord, writeRoutingManifest, type RoutingManifest } from "./routing/manifest.ts";
 import { focusManifestPane, RoutedTaskWidget } from "./routing/navigator.ts";
 import { inboxPath, sendParentMessage, startParentInbox } from "./routing/messages.ts";
-import { formatEstimatedCost, sumSessionCost, aggregateUsageCoverage } from "./routing/usage.ts";
+import { formatEstimatedCost, sumSessionCost, aggregateUsageCoverage, readIncrementalUsage } from "./routing/usage.ts";
 import { registerIndependentAgentTools } from "./routing/independent.ts";
 import { providerIsCoolingDown, registerFailoverModels, wrappedModelRef } from "./routing/failover.ts";
 
@@ -31,7 +31,7 @@ const RouteParams = Type.Object({
 const RoutedTaskParams = Type.Object({
   task: Type.String({ minLength: 1, description: "Self-contained assignment for the subagent" }),
   description: Type.String({ minLength: 3, maxLength: 80, description: "Short task label" }),
-  route: Type.Optional(Type.String({ minLength: 1, description: "Model override. Omit it: capability routing chooses Haiku/Luna for exact bounded work (including tiny implementation), Sonnet/Sol for standard work, and Opus/Sol for strong work. It considers ambiguity, horizon, checkability and consequences, then actual availability and current-provider preference. Set it only when the user named a model for this specific task." })),
+  route: Type.Optional(Type.String({ minLength: 1, description: "Model override. Omit it or use auto for automatic task routing: capability routing chooses Haiku/Luna for exact bounded work (including tiny implementation), Sonnet/Sol for standard work, and Opus/Sol for strong work. It considers ambiguity, horizon, checkability and consequences, then actual availability and current-provider preference. Set it only when the user named a model for this specific task." })),
   effort: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high"] as const, {
     description: "Reasoning effort override. Omit for the route default unless the user asked for an effort level for this specific task.",
   })),
@@ -1046,6 +1046,16 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         if (!seenTasks.has(task.handle) && !taskHandles.has(task.handle) && typeof task.route === "string" && task.route) {
           taskHandles.set(task.handle, restoreTaskHandle(task));
         }
+      }
+    }
+    if (ownsManifest) {
+      for (const task of taskHandles.values()) {
+        if (task.costComplete !== false || !task.sessionPath) continue;
+        const usage = readIncrementalUsage(task.sessionPath, { sessionPath: task.sessionPath, offset: task.usageOffset ?? 0,
+          cost: task.estimatedCost ?? 0, costKnown: task.costKnown ?? false, complete: false },
+          { startOffset: task.usageStartOffset ?? 0, ...(!isActiveTask(task) ? { endOffset: task.usageOffset ?? 0 } : {}) });
+        Object.assign(task, { usageOffset: usage.offset, estimatedCost: usage.cost, costKnown: usage.costKnown, costComplete: usage.complete });
+        if (usage.changed) persistTask(task);
       }
     }
     if (parentInbox) { parentInbox.close(); parentInbox = undefined; }
