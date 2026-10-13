@@ -130,7 +130,7 @@ export default function smokeProvider(pi: ExtensionAPI) {
         throw new Error("Controlled held tool cancelled");
       }
       trace("hold_release");
-      return { content: [{ type: "text", text: "Released owned fixture gate" }] };
+      return { content: [{ type: "text", text: "Released owned fixture gate" }], details: {} };
     }
   });
   const faux = fauxProvider({ provider: "smoke-routing", api: "smoke-routing-api", models: ["root", "worker", "error", "ask", "hold"].map((id) => ({ id, reasoning: false, input: ["text"] })) });
