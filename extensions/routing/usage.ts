@@ -23,7 +23,7 @@ const messageCost = (entry: any): number | undefined => {
 };
 
 /** Read complete newly appended JSONL records without consuming a partial trailing line. */
-export function readIncrementalUsage(path: string | undefined, previous: UsageCursor): UsageRead {
+export function readIncrementalUsage(path: string | undefined, previous: UsageCursor, window: { startOffset?: number; endOffset?: number } = {}): UsageRead {
   if (!path) return { ...previous, complete: false, changed: previous.complete !== false };
   const sameSession = previous.sessionPath === path;
   let offset = sameSession ? previous.offset : 0;
@@ -40,7 +40,11 @@ export function readIncrementalUsage(path: string | undefined, previous: UsageCu
   let fd: number | undefined;
   try {
     fd = openSync(path, "r");
-    const size = fstatSync(fd).size;
+    const size = Math.min(fstatSync(fd).size, window.endOffset ?? Infinity);
+    if (sameSession && complete === false && size >= (window.startOffset ?? 0)) {
+      // Recheck incomplete observations: startup/unavailable files are not permanently missing charges.
+      offset = window.startOffset ?? 0; cost = 0; costKnown = false; complete = true;
+    }
     if (size < offset) { offset = 0; cost = 0; costKnown = false; complete = true; model = undefined; thinking = undefined; }
     if (size === offset) {
       if (complete) costKnown = true;

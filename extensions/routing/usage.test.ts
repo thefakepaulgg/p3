@@ -145,3 +145,40 @@ test("aggregate coverage reports unknown and unverifiable sources rather than ad
   expect(aggregateUsageCoverage({ cost: 0, known: false, complete: false }, [slice(0, 100, 0.2)]))
     .toEqual({ cost: 0.2, known: true, complete: false, missingSources: 1, scope: "session+routed" });
 });
+
+test("a pessimistic initialized cursor recovers complete coverage from valid records", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "routing-usage-")), "session.jsonl");
+  writeFileSync(path, `${message(0)}\n${message(0.2)}\n`);
+  const usage = readIncrementalUsage(path, { sessionPath: path, offset: 0, cost: 0, costKnown: false, complete: false });
+  expect(usage).toMatchObject({ cost: 0.2, costKnown: true, complete: true });
+  expect(aggregateUsageCoverage(primaryUsage, [{ sessionPath: path, usageStartOffset: 0, usageOffset: usage.offset, estimatedCost: usage.cost, costKnown: usage.costKnown, costComplete: usage.complete }]).missingSources).toBe(0);
+});
+
+test("a temporarily absent usage file recovers without double charging", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "routing-usage-")), "session.jsonl");
+  const absent = readIncrementalUsage(path, { sessionPath: path, offset: 0, cost: 0, costKnown: false });
+  expect(absent.complete).toBe(false);
+  writeFileSync(path, `${message(0.2)}\n`);
+  const recovered = readIncrementalUsage(path, absent);
+  expect(recovered).toMatchObject({ cost: 0.2, costKnown: true, complete: true });
+  expect(readIncrementalUsage(path, recovered).cost).toBe(0.2);
+});
+
+test("rechecking incomplete continuation coverage excludes historical charges", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "routing-usage-")), "session.jsonl");
+  const historical = `${message(1)}\n`;
+  writeFileSync(path, `${historical}${message(0.2)}\n`);
+  const startOffset = Buffer.byteLength(historical);
+  const usage = readIncrementalUsage(path, { sessionPath: path, offset: startOffset, cost: 0, costKnown: false, complete: false }, { startOffset });
+  expect(usage).toMatchObject({ cost: 0.2, costKnown: true, complete: true });
+  expect(readIncrementalUsage(path, usage, { startOffset }).cost).toBe(0.2);
+});
+
+test("restored terminal coverage rechecks only its original completed byte window", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "routing-usage-")), "session.jsonl");
+  const original = `${message(0.2)}\n`;
+  const endOffset = Buffer.byteLength(original);
+  writeFileSync(path, `${original}${message(0.3)}\n`);
+  const usage = readIncrementalUsage(path, { sessionPath: path, offset: endOffset, cost: 0.2, costKnown: true, complete: false }, { endOffset });
+  expect(usage).toMatchObject({ offset: endOffset, cost: 0.2, costKnown: true, complete: true });
+});

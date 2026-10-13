@@ -222,8 +222,16 @@ test("automatic launches use the routing classifier configured in Pi settings; e
     expect(classified).toEqual(["openai/gpt-6-luna"]);
     expect(automatic.details.decision.tier).toBe("small");
     expect(automatic.details.decision.rationale).toContain("openai/gpt-6-luna selected small");
+    ctx.modelRegistry.getAll = () => [{ provider: "openai", id: "auto" }, { provider: "openai-codex", id: "auto" }];
+    const auto = await launch.execute("auto", { task: "Rename the field exactly as specified", description: "Rename field with auto", route: "auto" }, undefined, undefined, ctx);
+    expect(auto.isError).not.toBe(true);
+    expect(classified).toEqual(["openai/gpt-6-luna", "openai/gpt-6-luna"]);
+    expect(auto.details.model).toBe(automatic.details.model);
+    expect(auto.content[0].text).toContain("Policy selected");
+    const listed = await tools.find((tool) => tool.name === "subagent_control").execute("list", { action: "list" }, undefined, undefined, ctx);
+    expect(listed.details.tasks.find((task: any) => task.handle === auto.details.handle).routeExplicit).toBe(false);
     await launch.execute("2", { task: "Inspect the change", description: "Inspect change", route: "sol" }, undefined, undefined, ctx);
-    expect(classified).toHaveLength(1);
+    expect(classified).toHaveLength(2);
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -1164,4 +1172,27 @@ test("outstanding ask cannot be bypassed by steer or interrupt; reply writes to 
     expect(fixture.calls.filter((args) => args[1] === "prompt")).toHaveLength(1);
     expect(fixture.calls.filter((args) => args[1] === "send-keys")).toHaveLength(0);
   } finally { await fixture.shutdown(); }
+});
+
+test("reopening a parent corrects pessimistic coverage on a finished zero-charge worker", async () => {
+  const restore = herdrEnv();
+  const lifecycle = new Map<string, Function>();
+  const tools: any[] = [];
+  const widgets: any[] = [];
+  const path = sessionWith("Failed worker with reported zero charge");
+  writeFileSync(path, `${sessionHeader()}\n${JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "error", usage: { cost: { total: 0 } }, content: [] } })}\n`);
+  const tracked = { handle: "rt-old-coverage", assignmentId: randomUUID(), parentSessionId: "session-1", agentName: "old-worker", paneId: "w1:p2", route: "openai/gpt-5.4",
+    model: "openai/gpt-5.4", state: "failed", label: "Old failed worker", startedAt: Date.now(), sessionPath: path,
+    usageStartOffset: 0, usageOffset: Buffer.byteLength(readFileSync(path, "utf8")), estimatedCost: 0, costKnown: true, costComplete: false };
+  const ctx = uiCtx(widgets);
+  ctx.sessionManager = sessionManager([{ type: "custom", customType: "routed-task", data: tracked }]);
+  const fake: any = { registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} }, exec: completedHerdrExec("/nonexistent") };
+  try {
+    routing(fake); await lifecycle.get("session_start")!({}, ctx);
+    const list = await tools.find((tool) => tool.name === "subagent_control").execute("list", { action: "list" }, undefined, undefined, ctx);
+    expect(list.details.tasks[0].costComplete).toBe(true);
+    expect(list.details.tasks[0].estimatedCost).toBe(0);
+    expect(widgets.at(-1).content.join("\n")).not.toContain("missing");
+  } finally { await lifecycle.get("session_shutdown")?.(); restore(); }
 });

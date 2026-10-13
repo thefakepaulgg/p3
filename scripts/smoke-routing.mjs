@@ -267,6 +267,22 @@ for (const module of ["node:http", "node:https"]) { const api = require(module);
     assert.ok(!failedHistory.some((entry) => entry.type === "custom_message" && entry.customType === "subagent-completion" && entry.details?.assignmentId === failedId));
     });
     // Boundary cases run independently even when the baseline reports a production blocker.
+    await check("literal auto uses policy and complete usage is not missing", async () => {
+      const { session, launch } = await launchCase("AUTO");
+      const task = await completed(session, launch.assignmentId);
+      assert.equal(task.routeExplicit, false);
+      assert.equal(task.route, "sol");
+      assert.equal(task.model, "openai-codex/gpt-6.1-sol");
+      assert.equal(task.costKnown, true); assert.equal(task.costComplete, true);
+      assert.ok(task.estimatedCost > 0);
+      const snapshot = await manifest(session);
+      assert.equal(snapshot.missingCostSources, 0); assert.equal(snapshot.sessionCostComplete, true);
+      const receipt = await receiptFor(launch.assignmentId);
+      const child = await entries(receipt.sessionPath);
+      assert.ok(correlatedResult(child, "read"), "Automatic worker did not execute the actual read");
+      assert.ok((await traceFor(launch.assignmentId)).some(event => event.event === "auto_provider"));
+    });
+
     await check("durable ask/reply stays in same awaited tool", async () => {
       const { session, launch } = await launchCase("ASK");
       const id = launch.assignmentId;
