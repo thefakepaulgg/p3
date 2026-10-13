@@ -128,7 +128,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       version: ROUTING_MANIFEST_VERSION,
       parentSessionId: activeCtx.sessionManager.getSessionId(), parentPaneId: process.env.HERDR_PANE_ID!, parentInbox: parentInboxPath,
       parentSessionPath: activeCtx.sessionManager.getSessionFile(), primaryCost: primary.cost, primaryCostKnown: primary.known,
-      sessionTotal: coverage.cost, sessionTotalKnown: coverage.known, sessionCostComplete: coverage.complete, missingCostSources: coverage.missingSources, usageScope: coverage.scope, updatedAt: Date.now(), tasks,
+      sessionTotal: coverage.cost, sessionTotalKnown: coverage.known, sessionCostComplete: coverage.complete, missingCostSources: coverage.missingSources, pendingCostSources: coverage.pendingSources, usageScope: coverage.scope, updatedAt: Date.now(), tasks,
     };
     writeRoutingManifest(manifestPath, routingManifest);
     // Workers retain their original env path when this exact parent session moves panes.
@@ -153,7 +153,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       targets.unshift({ handle: "parent", label: "Parent", model: "main", state: "completed", startedAt: 0, paneId: parentPaneId });
     }
     const total = formatEstimatedCost(routingManifest?.sessionTotal, routingManifest?.sessionTotalKnown);
-    if (lines.length && total) lines[0] += ` · tracked ${total} (session+routed)${routingManifest?.sessionCostComplete === false ? ` · partial: ${routingManifest.missingCostSources ?? "?"} missing` : ""}`;
+    if (lines.length && total) {
+      const missing = routingManifest?.missingCostSources ?? 0;
+      const pending = routingManifest?.pendingCostSources ?? 0;
+      lines[0] += ` · tracked ${total} (chat + subagents)${missing ? ` · partial usage: ${missing} missing` : ""}${pending ? " · usage pending" : ""}`;
+    }
     return { lines, targets };
   };
 

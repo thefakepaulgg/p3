@@ -121,16 +121,16 @@ const slice = (start: number, end: number, cost: number) => ({
 
 test("aggregate coverage includes disjoint same-session continuations", () => {
   expect(aggregateUsageCoverage(primaryUsage, [slice(0, 100, 0.2), slice(100, 200, 0.3)]))
-    .toEqual({ cost: 1.5, known: true, complete: true, missingSources: 0, scope: "session+routed" });
+    .toEqual({ cost: 1.5, known: true, complete: true, missingSources: 0, pendingSources: 0, scope: "session+routed" });
   expect(aggregateUsageCoverage({ cost: 0, known: true, complete: true }, [slice(0, 0, 0)]))
-    .toEqual({ cost: 0, known: true, complete: true, missingSources: 0, scope: "session+routed" });
+    .toEqual({ cost: 0, known: true, complete: true, missingSources: 0, pendingSources: 0, scope: "session+routed" });
 });
 
 test("aggregate coverage excludes overlapping and duplicate slices", () => {
   expect(aggregateUsageCoverage(primaryUsage, [slice(0, 100, 0.2), slice(0, 100, 0.2)]))
-    .toEqual({ cost: 1.2, known: true, complete: false, missingSources: 1, scope: "session+routed" });
+    .toEqual({ cost: 1.2, known: true, complete: false, missingSources: 1, pendingSources: 0, scope: "session+routed" });
   expect(aggregateUsageCoverage(primaryUsage, [slice(0, 100, 0.2), slice(50, 150, 0.3)]))
-    .toEqual({ cost: 1.2, known: true, complete: false, missingSources: 1, scope: "session+routed" });
+    .toEqual({ cost: 1.2, known: true, complete: false, missingSources: 1, pendingSources: 0, scope: "session+routed" });
 });
 
 test("aggregate coverage reports unknown and unverifiable sources rather than adding zero", () => {
@@ -139,11 +139,11 @@ test("aggregate coverage reports unknown and unverifiable sources rather than ad
     { estimatedCost: 0.3, costKnown: true, costComplete: true },
     { ...slice(0, 100, 0.2), costComplete: false },
     { ...slice(100, 200, 0.3), usageStartOffset: undefined },
-  ])).toEqual({ cost: 1.2, known: true, complete: false, missingSources: 4, scope: "session+routed" });
+  ])).toEqual({ cost: 1.2, known: true, complete: false, missingSources: 4, pendingSources: 0, scope: "session+routed" });
   expect(aggregateUsageCoverage({ cost: 0, known: false, complete: false }, []))
-    .toEqual({ cost: 0, known: false, complete: false, missingSources: 1, scope: "session+routed" });
+    .toEqual({ cost: 0, known: false, complete: false, missingSources: 1, pendingSources: 0, scope: "session+routed" });
   expect(aggregateUsageCoverage({ cost: 0, known: false, complete: false }, [slice(0, 100, 0.2)]))
-    .toEqual({ cost: 0.2, known: true, complete: false, missingSources: 1, scope: "session+routed" });
+    .toEqual({ cost: 0.2, known: true, complete: false, missingSources: 1, pendingSources: 0, scope: "session+routed" });
 });
 
 test("a pessimistic initialized cursor recovers complete coverage from valid records", () => {
@@ -181,4 +181,23 @@ test("restored terminal coverage rechecks only its original completed byte windo
   writeFileSync(path, `${original}${message(0.3)}\n`);
   const usage = readIncrementalUsage(path, { sessionPath: path, offset: endOffset, cost: 0.2, costKnown: true, complete: false }, { endOffset });
   expect(usage).toMatchObject({ offset: endOffset, cost: 0.2, costKnown: true, complete: true });
+});
+
+for (const state of ["queued", "running"] as const) test(`${state} worker usage is pending before its first observation`, () => {
+  const usage = aggregateUsageCoverage(primaryUsage, [{ state, usageStartOffset: 0, usageOffset: 0, costKnown: false }]);
+  expect(usage).toMatchObject({ cost: 1, known: true, complete: false, missingSources: 0, pendingSources: 1 });
+});
+
+test("observed gaps and failed unobserved workers remain missing, not pending", () => {
+  expect(aggregateUsageCoverage(primaryUsage, [{ state: "running", costKnown: false, costComplete: false }]))
+    .toMatchObject({ missingSources: 1, pendingSources: 0 });
+  expect(aggregateUsageCoverage(primaryUsage, [{ state: "failed", usageStartOffset: 0, usageOffset: 0, costKnown: false }]))
+    .toMatchObject({ missingSources: 1, pendingSources: 0 });
+});
+
+test("pending usage and an actual gap remain separate when both exist", () => {
+  expect(aggregateUsageCoverage(primaryUsage, [
+    { state: "queued", costKnown: false, usageStartOffset: 0, usageOffset: 0 },
+    { ...slice(0, 100, 0.2), state: "running", costComplete: false },
+  ])).toMatchObject({ cost: 1.2, complete: false, missingSources: 1, pendingSources: 1 });
 });

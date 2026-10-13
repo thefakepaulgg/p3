@@ -1196,3 +1196,29 @@ for (const observed of [true, false]) test(`reopening a parent ${observed ? "cor
     expect(widgets.at(-1).content.join("\n").includes("missing")).toBe(!observed);
   } finally { await lifecycle.get("session_shutdown")?.(); restore(); }
 });
+
+for (const scenario of [
+  { state: "queued", costComplete: undefined, costKnown: false, missing: false, pending: true },
+  { state: "running", costComplete: undefined, costKnown: false, missing: false, pending: true },
+  { state: "failed", costComplete: false, costKnown: false, missing: true, pending: false },
+  { state: "running", costComplete: false, costKnown: true, missing: true, pending: false },
+  { state: "completed", costComplete: true, costKnown: true, missing: false, pending: false },
+]) test(`usage widget distinguishes ${scenario.state} / ${String(scenario.costComplete)} coverage`, async () => {
+  const restore = herdrEnv();
+  temp = mkdtempSync(join(tmpdir(), "routing-usage-widget-"));
+  const path = join(temp, "child-manifest.json");
+  process.env.PI_ROUTING_MANIFEST = path; process.env.HERDR_PANE_ID = "w1:p2";
+  writeRoutingManifest(path, { version: ROUTING_MANIFEST_VERSION, parentSessionId: "parent", parentPaneId: "w1:p1", updatedAt: 1,
+    sessionTotal: 1, sessionTotalKnown: true, sessionCostComplete: scenario.costComplete === true, missingCostSources: scenario.missing ? 1 : 0, pendingCostSources: scenario.pending ? 1 : 0,
+    tasks: [{ handle: "rt-widget", label: "Worker", agentName: "worker", paneId: "w1:p2", route: "sol", model: "model", state: scenario.state as any, startedAt: Date.now() }] });
+  const handlers = new Map<string, Function>(); const widgets: any[] = [];
+  const fake: any = { registerVirtualModel: () => {}, registerTool: () => {}, registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
+    on: (name: string, handler: Function) => handlers.set(name, handler), events: { on: () => () => {}, emit: () => {} } };
+  try {
+    routing(fake); await handlers.get("session_start")!({}, uiCtx(widgets));
+    const title = widgets.at(-1).content[0];
+    expect(title).toContain("chat + subagents"); expect(title).not.toContain("session+routed");
+    expect(title.includes("usage pending")).toBe(scenario.pending);
+    expect(title.includes("missing")).toBe(scenario.missing);
+  } finally { await handlers.get("session_shutdown")?.(); delete process.env.PI_ROUTING_MANIFEST; restore(); }
+});
