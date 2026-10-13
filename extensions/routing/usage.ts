@@ -1,4 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import type { TaskState } from "./state.ts";
 import type { ThinkingLevel } from "./policy.ts";
 
 export interface UsageCursor {
@@ -101,6 +102,7 @@ export function aggregateUsageCoverage(
   primary: { cost: number; known: boolean; complete: boolean },
   tasks: Iterable<{
     handle?: string;
+    state?: TaskState;
     sessionPath?: string;
     usageStartOffset?: number;
     usageOffset?: number;
@@ -108,11 +110,12 @@ export function aggregateUsageCoverage(
     costKnown?: boolean;
     costComplete?: boolean;
   }>,
-): { cost: number; known: boolean; complete: boolean; missingSources: number; scope: "session+routed" } {
+): { cost: number; known: boolean; complete: boolean; missingSources: number; pendingSources: number; scope: "session+routed" } {
   let known = primary.known && Number.isFinite(primary.cost) && primary.cost >= 0;
   let cost = known ? primary.cost : 0;
   let complete = known && primary.complete;
   let missingSources = complete ? 0 : 1;
+  let pendingSources = 0;
   const windows = new Map<string, Array<{ start: number; end: number }>>();
   for (const task of tasks) {
     const start = task.usageStartOffset;
@@ -129,9 +132,14 @@ export function aggregateUsageCoverage(
       && typeof task.estimatedCost === "number" && Number.isFinite(task.estimatedCost) && task.estimatedCost >= 0
       && (start !== end || task.estimatedCost === 0);
     if (proven) { cost += task.estimatedCost!; known = true; }
-    if (!proven || task.costComplete !== true) { complete = false; missingSources++; }
+    if (!proven || task.costComplete !== true) {
+      complete = false;
+      const pending = (task.state === "queued" || task.state === "running") && task.costKnown !== true
+        && task.costComplete === undefined && (end ?? 0) === (start ?? 0);
+      if (pending) pendingSources++; else missingSources++;
+    }
   }
-  return { cost, known, complete, missingSources, scope: "session+routed" };
+  return { cost, known, complete, missingSources, pendingSources, scope: "session+routed" };
 }
 
 export function formatEstimatedCost(cost: number | undefined, known = cost !== undefined): string | undefined {

@@ -72,6 +72,7 @@ export interface RoutingManifest {
   primaryCostKnown?: boolean;
   sessionCostComplete?: boolean;
   missingCostSources?: number;
+  pendingCostSources?: number;
   usageScope?: "session+routed";
   sessionTotal?: number;
   sessionTotalKnown?: boolean;
