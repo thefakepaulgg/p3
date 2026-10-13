@@ -6,6 +6,20 @@ export const ROUTING_MANIFEST_VERSION = "pi-routing/v1" as const;
 
 export interface ManifestTask {
   handle: string;
+  assignmentId?: string;
+  parentSessionId?: string;
+  requestId?: string;
+  minimumGeneration?: number;
+  outcomeGeneration?: number;
+  sessionId?: string;
+  terminalId?: string;
+  resultRef?: string;
+  resultPath?: string;
+  resultHash?: string;
+  readonly?: boolean;
+  lastActivityAt?: number;
+  presence?: TaskHandle["presence"];
+  pendingCompletion?: boolean;
   label: string;
   agentName: string;
   paneId: string;
@@ -59,6 +73,10 @@ export const manifestPathForPane = (sessionDir: string, paneId: string) =>
 export function restoreTaskHandle(task: ManifestTask): TaskHandle {
   return {
     handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, messageToken: task.messageToken,
+    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
+    sessionId: task.sessionId, terminalId: task.terminalId, resultRef: task.resultRef, resultPath: task.resultPath,
+    resultHash: task.resultHash, readonly: task.readonly, lastActivityAt: task.lastActivityAt, presence: task.presence,
+    pendingCompletion: task.pendingCompletion,
     route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit ?? false,
     target: task.target ?? "herdr", model: task.model, thinking: task.thinking ?? "medium",
     state: task.state, startedAt: task.startedAt, endedAt: task.endedAt, cwd: task.cwd, phase: task.phase,
@@ -74,6 +92,10 @@ export function taskManifestRecord(task: TaskHandle): ManifestTask | undefined {
   if (!task.agentName || !task.paneId) return undefined;
   return {
     handle: task.handle, label: task.label, agentName: task.agentName, paneId: task.paneId, tabId: task.tabId, messageToken: task.messageToken,
+    assignmentId: task.assignmentId, parentSessionId: task.parentSessionId, requestId: task.requestId, minimumGeneration: task.minimumGeneration, outcomeGeneration: task.outcomeGeneration,
+    sessionId: task.sessionId, terminalId: task.terminalId, resultRef: task.resultRef, resultPath: task.resultPath,
+    resultHash: task.resultHash, readonly: task.readonly, lastActivityAt: task.lastActivityAt, presence: task.presence,
+    pendingCompletion: task.pendingCompletion,
     route: task.route, fallbackFrom: task.fallbackFrom, routeExplicit: task.routeExplicit, target: task.target,
     model: task.model, thinking: task.thinking, state: task.state, startedAt: task.startedAt, endedAt: task.endedAt,
     cwd: task.cwd, phase: task.phase, dependsOn: task.dependsOn, ownedPaths: task.ownedPaths,

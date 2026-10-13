@@ -1,7 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { saveAssignmentResult, writeAssignmentReceipt, resultRefForAssignment, resultPathForAssignment } from "./artifacts.ts";
 import routing from "../model-routing.ts";
 import { setHerdrTestTransportForTests } from "./herdr.ts";
 import { manifestPathForPane, readRoutingManifest, ROUTING_MANIFEST_VERSION, writeRoutingManifest } from "./manifest.ts";
@@ -14,6 +16,30 @@ setHerdrTestTransportForTests(async (pi: any, args, timeout) => {
 });
 
 let temp: string | undefined;
+let agentDir: string;
+let previousAgentDir: string | undefined;
+let defaultSession: string;
+const workerSessionId = "worker-session";
+const sessionHeader = () => JSON.stringify({ type: "session", version: 3, id: workerSessionId, timestamp: new Date().toISOString(), cwd: "/repo" });
+beforeEach(() => {
+  previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  agentDir = mkdtempSync(join(tmpdir(), "routing-ext-agent-"));
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  defaultSession = join(agentDir, "worker.jsonl");
+  writeFileSync(defaultSession, `${sessionHeader()}\n`);
+});
+afterEach(() => {
+  rmSync(agentDir, { recursive: true, force: true });
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+});
+const workerAgent = (status: string, sessionPath = defaultSession, paneId = "w1:p2") => ({
+  pane_id: paneId, terminal_id: `terminal-${paneId}`, agent_status: status, interactive_ready: true, agent_session: { value: sessionPath },
+});
+const seedCompletion = (assignmentId: string, requestId: string, sessionPath: string, text: string, generation = 1) => {
+  const resultHash = saveAssignmentResult(requestId, generation, workerSessionId, "response", text);
+  writeAssignmentReceipt({ version: 1, assignmentId, requestId, generation, sessionId: workerSessionId, sessionPath,
+    paneId: "w1:p2", terminalId: "terminal-w1:p2", outcome: "completed", lastActivityAt: Date.now(), responseEntryId: "response", resultHash });
+};
 afterEach(() => { if (temp) rmSync(temp, { recursive: true, force: true }); temp = undefined; });
 
 const herdrEnv = () => {
@@ -32,20 +58,36 @@ const herdrEnv = () => {
 const sessionWith = (text: string) => {
   temp = mkdtempSync(join(tmpdir(), "routing-ext-"));
   const file = join(temp, "session.jsonl");
-  writeFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`);
+  writeFileSync(file, `${sessionHeader()}\n${JSON.stringify({ type: "message", id: "response", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] } })}\n`);
   return file;
 };
 
-/** Fake Herdr CLI that reports a finished agent whose transcript holds `result`. */
-const completedHerdrExec = (sessionPath: string, calls: string[][] = []) => async (_command: string, args: string[]) => {
-  calls.push(args);
-  const key = args.slice(0, 2).join(" ");
-  if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
-  if (key === "pane list") return { code: 0, stdout: JSON.stringify({ result: { panes: [{ pane_id: "w1:p2" }] } }), stderr: "" };
-  if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
-  if (key === "agent start") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "working" } } }), stderr: "" };
-  if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "idle", agent_session: { value: sessionPath } } } }), stderr: "" };
-  return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
+/** Unit-only native outcome evidence; smoke transports must never seed success. */
+const completedHerdrExec = (sessionPath: string, calls: string[][] = []) => {
+  let assignmentId: string | undefined;
+  let generation = 0;
+  return async (_command: string, args: string[]) => {
+    calls.push(args);
+    const key = args.slice(0, 2).join(" ");
+    const ok = (result: unknown = {}) => ({ code: 0, stdout: JSON.stringify({ result }), stderr: "" });
+    if (key === "tab list") return ok({ tabs: [] });
+    if (key === "pane list") return ok({ panes: [{ pane_id: "w1:p2" }] });
+    if (key === "tab create") {
+      assignmentId = args.find((arg) => arg.startsWith("PI_ROUTED_ASSIGNMENT_ID="))?.split("=")[1];
+      return ok({ tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } });
+    }
+    if (key === "agent prompt" && assignmentId && sessionPath !== "/nonexistent") {
+      const requestId = /^p3:routed-request ([0-9a-f-]{36})\n/.exec(args[3]!)?.[1];
+      if (requestId) {
+        const messages = readFileSync(sessionPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+        const response = messages.findLast((entry) => entry.type === "message" && entry.message.role === "assistant");
+        seedCompletion(assignmentId, requestId, sessionPath, response.message.content.map((part: any) => part.text ?? "").join("\n"), ++generation);
+      }
+    }
+    if (key === "agent start") return ok({ agent: workerAgent("working", sessionPath === "/nonexistent" ? defaultSession : sessionPath) });
+    if (key === "agent get") return ok({ agent: workerAgent("idle", sessionPath === "/nonexistent" ? defaultSession : sessionPath) });
+    return ok();
+  };
 };
 
 const sessionManager = (entries: any[] = []) => ({
@@ -71,8 +113,10 @@ test("registers the simplified public surface", () => {
     events: { on: () => () => {}, emit: () => {} }, exec: async () => ({ code: 0, stdout: "{}", stderr: "" }),
   };
   routing(fake);
-  expect(tools.map((tool) => tool.name)).toEqual(["workspace_agent", "message_agent", "message_parent", "subagent", "subagent_control", "model_route"]);
+  expect(tools.map((tool) => tool.name)).toEqual(["workspace_agent", "workspace_agent_control", "peer_connection", "message_agent", "peer_inbox", "peer_message_status", "message_parent", "subagent", "subagent_control", "model_route"]);
   const properties = tools.find((tool) => tool.name === "subagent").parameters.properties;
+  expect(properties.files.type).toBe("array");
+  expect(properties.readonly.type).toBe("boolean");
   expect(properties.surface).toBeUndefined();
   expect(properties.isolation).toBeUndefined();
   expect(properties.route.type).toBe("string");
@@ -110,7 +154,7 @@ test("launches an explicitly requested model outside the programmed routes", asy
       const key = args.slice(0, 2).join(" ");
       if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
       if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
-      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "working" } } }), stderr: "" };
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent("working") } }), stderr: "" };
       return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
     },
   };
@@ -130,7 +174,7 @@ test("launches an explicitly requested model outside the programmed routes", asy
     expect(startArgs).toContain("openai-codex/gpt-6-astra");
     expect(startArgs).toContain("high");
     expect(startArgs).not.toContain("--no-extensions");
-    expect(startArgs).toContain("subagent,subagent_control,model_route,workflow_control,pr_subscribe,pr_unsubscribe");
+    expect(startArgs).toContain("subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
@@ -250,9 +294,11 @@ test("restores routed tasks when reopening the same Pi session", async () => {
   const restoreEnv = herdrEnv();
   temp = mkdtempSync(join(tmpdir(), "routing-restart-"));
   const path = manifestPathForPane(temp, "w1:p1");
+  const assignmentId = randomUUID();
+  const resultHash = saveAssignmentResult(assignmentId, 1, workerSessionId, "response", "Full restored result");
   writeRoutingManifest(path, {
     version: ROUTING_MANIFEST_VERSION, parentSessionId: "session-1", parentPaneId: "w1:p1", updatedAt: 1,
-    tasks: [{ handle: "rt-old", label: "Retained worker", agentName: "worker", paneId: "w1:p2", route: "sol", model: "openai-codex/gpt-6-sol", state: "completed", startedAt: 1, endedAt: 2 }],
+    tasks: [{ handle: "rt-old", label: "Retained worker", agentName: "worker", paneId: "w1:p2", route: "sol", model: "openai-codex/gpt-6-sol", state: "completed", startedAt: 1, endedAt: 2, assignmentId, requestId: assignmentId, sessionId: workerSessionId, terminalId: "terminal-w1:p2", resultHash, resultRef: resultRefForAssignment(assignmentId), resultPath: resultPathForAssignment(assignmentId), outcomeGeneration: 1, completionNotifiedAt: 2, completionDeliveredVia: "message" }],
   });
   const tools: any[] = [];
   const lifecycle = new Map<string, Function>();
@@ -268,6 +314,9 @@ test("restores routed tasks when reopening the same Pi session", async () => {
     await lifecycle.get("session_start")?.({}, ctx);
     const list = await tools.find((tool) => tool.name === "subagent_control").execute("1", { action: "list" }, undefined, undefined, ctx);
     expect(list.content[0].text).toContain("rt-old [completed]");
+    const result = await tools.find((tool) => tool.name === "subagent_control").execute("2", { action: "result", handle: "rt-old" }, undefined, undefined, ctx);
+    expect(result.content[0].text).toBe("Full restored result");
+    expect(result.details.durable).toBe(true);
     await lifecycle.get("session_shutdown")?.();
     expect(readRoutingManifest(path)?.tasks[0]?.handle).toBe("rt-old");
   } finally {
@@ -338,14 +387,14 @@ test("every subagent uses Herdr and only overlapping owned paths conflict", asyn
         const next = ++pane + 1;
         return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: `w1:t${next}` }, root_pane: { pane_id: `w1:p${next}` } } }), stderr: "" };
       }
-      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "working" } } }), stderr: "" };
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent("working", defaultSession, `w1:p${pane + 1}`) } }), stderr: "" };
       return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
     },
   };
   try {
     routing(fake);
     const launch = tools.find(tool => tool.name === "subagent");
-    const ctx: any = { hasUI: true, cwd: "/repo", modelRegistry: { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true }, ui: { setStatus: () => {}, theme: { fg: (_: string, text: string) => text } } };
+    const ctx: any = { hasUI: true, cwd: "/repo", sessionManager: sessionManager(), modelRegistry: { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true }, ui: { setStatus: () => {}, theme: { fg: (_: string, text: string) => text } } };
     const planned = await launch.execute("1", { task: "Create the implementation plan", description: "Plan change", route: "sol" }, undefined, undefined, ctx);
     expect(planned.details.agent).toMatch(/^r-/);
     expect(planned.details.phase).toBe("plan");
@@ -393,6 +442,8 @@ test("Herdr completion delivers exactly one bounded custom message as a steer tu
     expect(delivered.message.content).toContain(`subagent_control action=result handle=${launched.details.handle}`);
     expect(delivered.message.details.kind).toBe("completed");
 
+    await lifecycle.get("message_end")?.({ message: { role: "custom", ...delivered.message } }, ctx);
+
     // The full result stays retrievable, and reading it does not add another turn.
     const cached = await control.execute("2", { action: "result", handle: launched.details.handle }, undefined, undefined, ctx);
     expect(cached.content[0].text).toContain("Implemented the bounded slice.");
@@ -436,22 +487,16 @@ test("steering a completed task delivers the next completion", async () => {
   const messages: any[] = [];
   const sessionPath = sessionWith("I am blocked pending a decision.");
   let promptCount = 0;
+  const nativeExec = completedHerdrExec(sessionPath);
   const fake: any = {
     registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {},
     sendMessage: (message: any, options: any) => messages.push({ message, options }),
     on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
-    exec: async (_command: string, args: string[]) => {
-      const key = args.slice(0, 2).join(" ");
-      if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
-      if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
-      if (key === "agent start") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "working" } } }), stderr: "" };
-      if (key === "agent prompt") {
-        promptCount += 1;
-        if (promptCount === 2) writeFileSync(sessionPath, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Completed after receiving the decision." }] } })}\n`);
-        return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
+    exec: async (command: string, args: string[]) => {
+      if (args.slice(0, 2).join(" ") === "agent prompt" && ++promptCount === 2) {
+        writeFileSync(sessionPath, `${sessionHeader()}\n${JSON.stringify({ type: "message", id: "response", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Completed after receiving the decision." }] } })}\n`);
       }
-      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "idle", agent_session: { value: sessionPath } } } }), stderr: "" };
-      return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
+      return nativeExec(command, args);
     },
   };
   try {
@@ -463,6 +508,7 @@ test("steering a completed task delivers the next completion", async () => {
     for (let tick = 0; tick < 10 && messages.length < 1; tick += 1) await new Promise((done) => setTimeout(done, 40));
     expect(messages.filter((entry) => entry.message.customType === "subagent-completion")).toHaveLength(1);
 
+    await lifecycle.get("message_end")?.({ message: { role: "custom", ...messages[0].message } }, ctx);
     await control.execute("2", { action: "steer", handle: launched.details.handle, message: "Use the user's decision and continue." }, undefined, undefined, ctx);
     for (let tick = 0; tick < 10 && messages.length < 2; tick += 1) await new Promise((done) => setTimeout(done, 40));
 
@@ -523,7 +569,7 @@ test("replayed completion claims are not delivered twice after reload", async ()
   const widgets: Array<{ key: string; content: string[] | undefined }> = [];
   const replayed = {
     handle: "rt-replay", route: "luna", routeExplicit: false, target: "herdr",
-    model: "openai-codex/gpt-6-luna", thinking: "high", label: "Replayed task", state: "running",
+    model: "openai-codex/gpt-6-luna", thinking: "high", label: "Replayed task", state: "completed", endedAt: Date.now() - 1000,
     startedAt: Date.now() - 5000, agentName: "r-replay", paneId: "w1:p2", paneRetention: "keep",
     transitions: 1, notifiedStates: ["completed"], completionNotifiedAt: Date.now() - 1000, completionDeliveredVia: "message",
   };
@@ -548,7 +594,7 @@ test("replayed completion claims are not delivered twice after reload", async ()
   }
 });
 
-test("manual result retrieval consumes the single completion slot", async () => {
+test("manual retrieval without a matching durable tool receipt does not consume delivery", async () => {
   const restoreEnv = herdrEnv();
   const tools: any[] = [];
   const lifecycle = new Map<string, Function>();
@@ -563,7 +609,7 @@ test("manual result retrieval consumes the single completion slot", async () => 
       const key = args.slice(0, 2).join(" ");
       if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
       if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
-      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: status, agent_session: { value: sessionPath } } } }), stderr: "" };
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent(status, sessionPath) } }), stderr: "" };
       return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
     },
   };
@@ -578,9 +624,9 @@ test("manual result retrieval consumes the single completion slot", async () => 
     const tracked = (await control.execute("3", { action: "list" }, undefined, undefined, ctx)).details.tasks[0];
     Object.assign(tracked, { state: "completed", endedAt: Date.now(), result: "Manual read result body", resultChars: 23 });
     const first = await control.execute("4", { action: "result", handle: launched.details.handle }, undefined, undefined, ctx);
-    expect(first.details.consumedManually).toBe(true);
-    expect(tracked.completionDeliveredVia).toBe("manual");
-    // A later watcher transition can no longer announce the same completion.
+    expect(first.details.consumedManually).toBe(false);
+    expect(tracked.completionDeliveredVia).toBeUndefined();
+    // Idle alone cannot establish a new completed result after steering.
     status = "idle";
     await control.execute("5", { action: "steer", handle: launched.details.handle, message: "continue" }, undefined, undefined, ctx);
     await new Promise((done) => setTimeout(done, 200));
@@ -605,7 +651,7 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
       if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
       if (key === "pane list") return { code: 0, stdout: JSON.stringify({ result: { panes: [{ pane_id: "w1:p2" }] } }), stderr: "" };
       if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
-      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "working" } } }), stderr: "" };
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent("working") } }), stderr: "" };
       return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
     },
   };
@@ -613,7 +659,7 @@ test("retained Herdr panes can be focused and explicitly closed", async () => {
     routing(fake);
     const launch = tools.find(tool => tool.name === "subagent");
     const control = tools.find(tool => tool.name === "subagent_control");
-    const ctx: any = { hasUI: true, cwd: "/repo", modelRegistry: { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true }, ui: { setStatus: () => {}, theme: { fg: (_: string, text: string) => text } } };
+    const ctx: any = { hasUI: true, cwd: "/repo", sessionManager: sessionManager(), modelRegistry: { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true }, ui: { setStatus: () => {}, theme: { fg: (_: string, text: string) => text } } };
     const launched = await launch.execute("1", { task: "Inspect the implementation", description: "Inspect change", route: "luna" }, undefined, undefined, ctx);
     expect(launched.content[0].text).toContain("pane w1:p2");
     expect(launched.content[0].text).toContain("Do not poll");
@@ -649,8 +695,8 @@ test("stop with close aborts tracking, records the closed pane, and exposes live
       const key = args.slice(0, 2).join(" ");
       if (key === "tab list") return { code: 0, stdout: JSON.stringify({ result: { tabs: [] } }), stderr: "" };
       if (key === "tab create") return { code: 0, stdout: JSON.stringify({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }), stderr: "" };
-      if (key === "agent start") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: "working" } } }), stderr: "" };
-      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: { agent_status: agentStatus } } }), stderr: "" };
+      if (key === "agent start") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent("working") } }), stderr: "" };
+      if (key === "agent get") return { code: 0, stdout: JSON.stringify({ result: { agent: workerAgent(agentStatus) } }), stderr: "" };
       return { code: 0, stdout: JSON.stringify({ result: {} }), stderr: "" };
     },
   };
@@ -722,7 +768,7 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
   const replayed = {
     handle: "rt-stored", route: "sol", routeExplicit: true, target: "herdr",
     model: "openai-codex/gpt-6-sol", thinking: "medium", label: "Stored agent", state: "completed",
-    startedAt: Date.now() - 60_000, endedAt: Date.now() - 30_000, agentName: "r-stored", paneId: "w1:p9", paneRetention: "keep",
+    startedAt: Date.now() - 60_000, endedAt: Date.now() - 30_000, agentName: "r-stored", paneId: "w1:p9", terminalId: "terminal-w1:p9", sessionId: workerSessionId, paneRetention: "keep",
     transitions: 2, notifiedStates: ["completed"], completionNotifiedAt: Date.now() - 30_000, completionDeliveredVia: "message",
   };
   const fake: any = {
@@ -731,7 +777,7 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
     on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
     exec: async (_command: string, args: string[]) => {
       calls.push(args);
-      const result = args.slice(0, 2).join(" ") === "pane list" ? { panes: [{ pane_id: "w1:p9" }] } : {};
+      const result = args.slice(0, 2).join(" ") === "pane list" ? { panes: [{ pane_id: "w1:p9" }] } : args.slice(0, 2).join(" ") === "agent get" ? { agent: workerAgent("idle", defaultSession, "w1:p9") } : {};
       return { code: 0, stdout: JSON.stringify({ result }), stderr: "" };
     },
   };
@@ -776,5 +822,103 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
+  }
+});
+
+const completionFixture = async (paneRetention: "keep" | "close" = "keep") => {
+  const tools: any[] = [];
+  const lifecycle = new Map<string, Function>();
+  const messages: any[] = [];
+  const calls: string[][] = [];
+  const savedEntries: any[] = [];
+  const sessionPath = sessionWith("Durable completed result");
+  const fake: any = {
+    registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {},
+    on: (name: string, handler: Function) => lifecycle.set(name, handler),
+    sendMessage: (message: any, options: any) => messages.push({ message, options }),
+    events: { on: () => () => {}, emit: () => {} }, exec: completedHerdrExec(sessionPath, calls),
+  };
+  routing(fake);
+  const ctx = uiCtx();
+  ctx.sessionManager = sessionManager(savedEntries);
+  await lifecycle.get("session_start")!({}, ctx);
+  const control = tools.find((tool) => tool.name === "subagent_control");
+  const launched = await tools.find((tool) => tool.name === "subagent").execute("launch", {
+    task: "Inspect implementation", description: "Receipt task", route: "luna", pane_retention: paneRetention,
+  }, undefined, undefined, ctx);
+  for (let tick = 0; tick < 10 && !messages.some((entry) => entry.message.customType === "subagent-completion"); tick += 1) await new Promise((done) => setTimeout(done, 40));
+  const tracked = (await control.execute("list", { action: "list" }, undefined, undefined, ctx)).details.tasks.find((task: any) => task.handle === launched.details.handle);
+  return { control, lifecycle, messages, calls, savedEntries, tracked, ctx };
+};
+
+test("pane auto-close follows matching custom message_end, not queued completion or mismatched receipts", async () => {
+  const restore = herdrEnv();
+  const fixture = await completionFixture("close");
+  const { lifecycle, messages, calls, tracked, ctx } = fixture;
+  try {
+    expect(messages).toHaveLength(1);
+    expect(tracked.pendingCompletion).toBe(true);
+    expect(tracked.completionNotifiedAt).toBeUndefined();
+    expect(calls.some((args) => args.join(" ") === "pane close w1:p2")).toBe(false);
+    const message = { role: "custom", ...messages[0].message };
+    await lifecycle.get("message_end")!({ message: { ...message, details: { ...message.details, assignmentId: randomUUID() } } }, ctx);
+    await lifecycle.get("message_end")!({ message: { ...message, details: { ...message.details, generation: 999 } } }, ctx);
+    expect(tracked.completionNotifiedAt).toBeUndefined();
+    await lifecycle.get("message_end")!({ message }, ctx);
+    for (let tick = 0; tick < 10 && !tracked.paneClosedAt; tick += 1) await new Promise((done) => setTimeout(done, 10));
+    expect(tracked.pendingCompletion).toBe(false);
+    expect(tracked.completionDeliveredVia).toBe("message");
+    expect(tracked.paneClosedAt).toBeNumber();
+    expect(calls.filter((args) => args.join(" ") === "pane close w1:p2")).toHaveLength(1);
+    await lifecycle.get("message_end")!({ message }, ctx);
+    await lifecycle.get("agent_settled")!({}, ctx);
+    expect(messages).toHaveLength(1);
+  } finally {
+    await lifecycle.get("session_shutdown")?.();
+    restore();
+  }
+});
+
+test("aborted queued delivery requeues once for nextTurn; matching saved transcript consumes the single receipt", async () => {
+  const restore = herdrEnv();
+  const fixture = await completionFixture();
+  const { lifecycle, messages, savedEntries, tracked, ctx } = fixture;
+  try {
+    expect(messages).toHaveLength(1);
+    await lifecycle.get("agent_end")!({ messages: [{ role: "assistant", stopReason: "aborted" }] }, ctx);
+    expect(tracked.completionNotifiedAt).toBeUndefined();
+    await lifecycle.get("agent_settled")!({}, ctx);
+    expect(messages).toHaveLength(2);
+    expect(messages[1].options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+    await lifecycle.get("agent_settled")!({}, ctx);
+    expect(messages).toHaveLength(2);
+    savedEntries.push({ type: "custom_message", ...messages[1].message, details: { ...messages[1].message.details, generation: 999 } });
+    await lifecycle.get("agent_settled")!({}, ctx);
+    expect(tracked.completionNotifiedAt).toBeUndefined();
+    savedEntries.push({ type: "custom_message", ...messages[1].message });
+    await lifecycle.get("agent_settled")!({}, ctx);
+    expect(tracked.completionDeliveredVia).toBe("message");
+    expect(tracked.pendingCompletion).toBe(false);
+    await lifecycle.get("agent_settled")!({}, ctx);
+    expect(messages).toHaveLength(2);
+  } finally {
+    await lifecycle.get("session_shutdown")?.();
+    restore();
+  }
+});
+
+test("durable manual result retrieval is acknowledged only by its native toolResult message_end", async () => {
+  const restore = herdrEnv();
+  const { lifecycle, control, tracked, ctx } = await completionFixture();
+  try {
+    const result = await control.execute("read", { action: "result", handle: tracked.handle }, undefined, undefined, ctx);
+    expect(result.details.durable).toBe(true);
+    expect(tracked.completionNotifiedAt).toBeUndefined();
+    await lifecycle.get("message_end")!({ message: { role: "toolResult", toolName: "subagent_control", details: result.details, content: result.content } }, ctx);
+    expect(tracked.completionDeliveredVia).toBe("manual");
+    expect(tracked.pendingCompletion).toBe(false);
+  } finally {
+    await lifecycle.get("session_shutdown")?.();
+    restore();
   }
 });

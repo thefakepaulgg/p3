@@ -43,3 +43,11 @@ describe("workflow guards", () => {
   test("ignores finished tasks and other trees", () => expect(() => validate({ ownedPaths: ["/repo/src/a"] }, [task({ state: "completed", ownedPaths: ["/repo/src/a"] }), task({ cwd: "/other", ownedPaths: ["/repo/src/a"] })])).not.toThrow());
   test("normalizes relative ownership paths", () => expect(normalizeOwnedPaths("/repo", ["src/b", "src/a", "src/a"])).toEqual(["/repo/src/a", "/repo/src/b"]));
 });
+
+for (const state of ["unknown", "lost"] as const) {
+  test(`${state} tasks retain owned paths and cannot satisfy dependencies`, () => {
+    const unresolved = task({ state, ownedPaths: ["/repo/src/a"] });
+    expect(() => validate({ dependsOn: [unresolved.handle] }, [unresolved])).toThrow("requires successful completion");
+    expect(() => validate({ ownedPaths: ["/repo/src/a/file.ts"] }, [unresolved])).toThrow("overlapping paths");
+  });
+}

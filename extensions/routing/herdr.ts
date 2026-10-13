@@ -1,7 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { readAssignmentReceipt, readAssignmentResult, resultPathForAssignment, resultRefForAssignment } from "./artifacts.ts";
+import { workerPolicyArgs } from "./worker-policy.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { clampThinkingLevel, type Route } from "./policy.ts";
 import { buildCompletionMessage, buildInterruptedMessage, COMPLETION_KIND, isActiveTask, type TaskHandle } from "./state.ts";
@@ -9,7 +12,7 @@ import { readIncrementalUsage } from "./usage.ts";
 
 export type RoutedWorkerCapability = "memory";
 
-export interface HerdrLaunch { agent: string; paneId: string; tabId: string; route: string }
+export interface HerdrLaunch { agent: string; paneId: string; tabId: string; route: string; terminalId?: string; sessionId?: string; sessionPath?: string }
 
 export const ROUTED_TAB_MAX_PANES = 4;
 const ROUTED_TAB_LABEL = "Subagents";
@@ -51,12 +54,14 @@ const splitDirection = (rect?: { width?: number; height?: number }) => {
   return width >= 120 && width >= height * 2 ? "right" : "down";
 };
 
-export async function allocateRoutedAgentPane(pi: ExtensionAPI, cwd: string, manifestPath?: string, background = false): Promise<PaneAllocation> {
+export async function allocateRoutedAgentPane(pi: ExtensionAPI, cwd: string, manifestPath?: string, background = false, assignmentId?: string, readonly = false): Promise<PaneAllocation> {
   return withAllocationLock(async () => {
     const { workspaceId, rootTabId } = rootContext();
     const manifestEnv = [
       ...(manifestPath ? ["--env", `PI_ROUTING_MANIFEST=${manifestPath}`] : []),
       ...(background ? ["--env", "PI_SUBAGENT_MODE=background"] : []),
+      ...(assignmentId ? ["--env", `PI_ROUTED_ASSIGNMENT_ID=${assignmentId}`] : []),
+      ...(readonly ? ["--env", "PI_ROUTED_READONLY=1"] : []),
     ];
     const base = routedTabBaseLabel(rootTabId);
     const listed = parseJson(await runHerdr(pi, ["tab", "list", "--workspace", workspaceId], 5000), "herdr tab list");
@@ -245,6 +250,7 @@ export function herdrSocketRequestForArgs(args: string[]): HerdrSocketRequest {
         tokens: metadataTokens(args),
       },
     };
+    case "agent list": return { method: "agent.list", params: {} };
     case "agent get": return { method: "agent.get", params: { target } };
     case "agent focus": return { method: "agent.focus", params: { target } };
     case "agent read": return { method: "agent.read", params: { target, source: (option(args, "--source") ?? "recent-unwrapped").replaceAll("-", "_"), lines: Number(option(args, "--lines") ?? 80), format: "text", strip_ansi: true }, textResult: (response) => String(response?.result?.read?.text ?? "") };
@@ -310,6 +316,34 @@ export const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((res
   signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
 });
 
+export function readHerdrSessionId(path?: string): string | undefined {
+  if (!path) return undefined;
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const buffer = Buffer.alloc(4096);
+    const count = readSync(fd, buffer, 0, buffer.length, 0);
+    const header = JSON.parse(buffer.toString("utf8", 0, count).split("\n", 1)[0]);
+    return header.type === "session" && typeof header.id === "string" ? header.id : undefined;
+  } catch { return undefined; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
+/** A name or pane alone does not establish control of the original executor. */
+export function verifyTaskAgent(task: TaskHandle, agent: any): void {
+  if (!task.terminalId || agent?.pane_id !== task.paneId || agent.terminal_id !== task.terminalId) throw new Error("Worker terminal identity is unverified or replaced");
+  const sessionId = readHerdrSessionId(agent?.agent_session?.value);
+  if (!sessionId || (task.sessionId && sessionId !== task.sessionId)) throw new Error("Worker Pi session identity is unverified or replaced");
+  if (!task.sessionId) task.sessionId = sessionId;
+}
+
+export async function proveTaskAbsent(pi: ExtensionAPI, task: TaskHandle): Promise<boolean> {
+  if (!task.paneId || !task.terminalId || !task.sessionId) throw new Error("Original executor identity is incomplete; absence is unverified");
+  const agents = parseJson(await runHerdr(pi, ["agent", "list"], 5000), "herdr agent inventory")?.result?.agents;
+  if (!Array.isArray(agents)) throw new Error("Agent inventory is incomplete; absence is unverified");
+  return !agents.some((agent: any) => agent.pane_id === task.paneId || agent.terminal_id === task.terminalId || readHerdrSessionId(agent.agent_session?.value) === task.sessionId);
+}
+
 export function watchHerdrTask(options: {
   pi: ExtensionAPI;
   task: TaskHandle;
@@ -319,93 +353,94 @@ export function watchHerdrTask(options: {
   persist: () => void;
   notify: (kind: string, content: string) => void;
 }): void {
-  const { pi, task, watchers, update, persist, notify, baselineResult = "" } = options;
+  const { pi, task, watchers, update, notify } = options;
   const controller = new AbortController();
+  watchers.get(task.handle)?.abort();
   watchers.set(task.handle, controller);
   void (async () => {
-    let sawWorking = false;
-    let blockedNotified = false;
-    // A restarted watcher must not re-announce an interrupt that was already reported.
-    let interruptNotified = task.state === "interrupted";
-    let advisoryNotified = false;
-    let consecutivePollErrors = 0;
-    const advisoryAt = Date.now() + 30 * 60_000;
-    const shouldWatch = () => !controller.signal.aborted && isActiveTask(task);
-    while (shouldWatch()) {
+    let errors = 0;
+    let staleEpisode: number | undefined;
+    let interruptedGeneration: number | undefined;
+    const watching = () => !controller.signal.aborted && isActiveTask(task);
+    while (watching()) {
       try {
+        const receipt = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
+        if (receipt && !task.sessionId && task.sessionPath === receipt.sessionPath && readHerdrSessionId(receipt.sessionPath) === receipt.sessionId) update({ sessionId: receipt.sessionId });
+        if (receipt && receipt.requestId === task.requestId && receipt.generation >= (task.minimumGeneration ?? 1)) {
+          if (receipt.paneId !== task.paneId || receipt.terminalId !== task.terminalId || receipt.sessionId !== task.sessionId) throw new Error("Assignment outcome identity conflicts with the launched executor");
+          update({ lastActivityAt: receipt.lastActivityAt, outcomeGeneration: receipt.generation }, false);
+          if (!task.background && receipt.outcome === "completed") {
+            if (!receipt.resultHash || !receipt.responseEntryId) throw new Error("Successful assignment lacks durable response evidence");
+            const result = readAssignmentResult(receipt.requestId, receipt.resultHash);
+            const metadata = JSON.parse(readFileSync(join(resultPathForAssignment(receipt.requestId), "..", "metadata.json"), "utf8"));
+            if (metadata.sessionId !== receipt.sessionId || metadata.generation !== receipt.generation || metadata.responseEntryId !== receipt.responseEntryId) throw new Error("Result artifact belongs to another execution generation");
+            if (!watching()) return;
+            update({ state: "completed", endedAt: Date.now(), resultChars: result.length, result,
+              resultRef: resultRefForAssignment(receipt.requestId), resultPath: resultPathForAssignment(receipt.requestId), resultHash: receipt.resultHash });
+            notify(COMPLETION_KIND, buildCompletionMessage(task, result));
+            return;
+          }
+          if (!task.background && receipt.outcome === "error") {
+            update({ state: "failed", endedAt: Date.now(), error: receipt.error ?? "Pi execution failed" });
+            notify("failed", `Subagent ${task.handle} failed: ${receipt.error ?? "Pi execution failed"}. Partial assistant text is not a successful result. Inspect external effects before continuing.`);
+            return;
+          }
+          if (!task.background && receipt.outcome === "aborted" && interruptedGeneration !== receipt.generation) {
+            interruptedGeneration = receipt.generation;
+            update({ state: "interrupted" });
+            notify(`interrupted#${receipt.generation}`, buildInterruptedMessage(task, ""));
+          }
+        }
         const agent = parseJson(await runHerdr(pi, ["agent", "get", task.agentName!], 5000), "herdr agent get")?.result?.agent;
-        if (!shouldWatch()) return;
-        const status = agent?.agent_status as string | undefined;
-        const sessionPath = agent?.agent_session?.value as string | undefined;
-        // Background tasks never complete, so skip re-reading their ever-growing session log.
-        const { result, aborted } = task.background ? { result: "", aborted: false } : readHerdrTurn(sessionPath);
-        const usage = readIncrementalUsage(sessionPath, {
-          sessionPath: task.sessionPath,
-          offset: task.usageOffset ?? 0,
-          cost: task.estimatedCost ?? 0,
-          costKnown: task.costKnown ?? false,
-          model: task.model,
-          thinking: task.thinking,
+        if (!watching()) return;
+        verifyTaskAgent(task, agent);
+        const status = String(agent.agent_status);
+        const usage = readIncrementalUsage(agent.agent_session?.value, {
+          sessionPath: task.sessionPath, offset: task.usageOffset ?? 0, cost: task.estimatedCost ?? 0,
+          costKnown: task.costKnown ?? false, model: task.model, thinking: task.thinking,
         });
-        if (usage.changed) update({ sessionPath: usage.sessionPath, usageOffset: usage.offset, estimatedCost: usage.cost, costKnown: usage.costKnown, ...(usage.model ? { model: usage.model } : {}), ...(usage.thinking ? { thinking: usage.thinking } : {}) }, usage.model !== task.model || usage.thinking !== task.thinking);
-        consecutivePollErrors = 0;
-        const settled = (status === "idle" || status === "done") && (sawWorking || (!!result && result !== baselineResult));
-        if (status === "working") { sawWorking = true; blockedNotified = false; interruptNotified = false; update({ state: "running" }, task.state !== "running"); }
-        else if (status === "blocked") {
-          update({ state: "blocked" }, task.state !== "blocked");
-          if (!blockedNotified) {
-            blockedNotified = true;
-            const episode = (task.blockedEpisodes ?? 0) + 1;
-            update({ blockedEpisodes: episode }, false);
-            notify(`blocked#${episode}`, `Subagent ${task.handle} is blocked (${task.label}). ${task.escalation ?? "Inspect or steer the agent."}`);
-          }
-        } else if (task.background) {
-          // Background subagents idle between self-triggered turns; idle is not completion.
-          if (task.state !== "running") update({ state: "running" });
-        } else if (settled && aborted) {
-          // Esc in the pane is not completion: keep watching so a resumed turn can still complete.
-          if (!interruptNotified) {
-            interruptNotified = true;
-            const episode = (task.interruptedEpisodes ?? 0) + 1;
-            update({ state: "interrupted", interruptedEpisodes: episode });
-            notify(`interrupted#${episode}`, buildInterruptedMessage(task, result));
-          }
-        } else if (settled) {
-          update({ state: "completed", endedAt: Date.now(), resultChars: result.length, result });
-          if (shouldCloseCompletedPane(task.paneRetention) && task.paneId && !task.paneClosedAt) {
-            const closed = await runHerdr(pi, ["pane", "close", task.paneId], 5000).then(() => true).catch(() => false);
-            if (closed) update({ paneClosedAt: Date.now() }, false);
-          }
-          notify(COMPLETION_KIND, buildCompletionMessage(task, result));
-          return;
+        if (usage.changed) update({ sessionPath: usage.sessionPath, usageOffset: usage.offset, estimatedCost: usage.cost,
+          costKnown: usage.costKnown, ...(usage.model ? { model: usage.model } : {}), ...(usage.thinking ? { thinking: usage.thinking } : {}) }, false);
+        errors = 0;
+        const state = status === "blocked" ? "blocked" : status === "working" || task.background ? "running" : receipt && receipt.requestId === task.requestId && receipt.outcome === "aborted" ? "interrupted" : "unknown";
+        update({ state, presence: "live" }, task.state !== state || task.presence !== "live");
+        if (state === "blocked") notify(`blocked#${receipt?.generation ?? 0}`, `Subagent ${task.handle} is blocked; supply the missing decision with steer.`);
+        const activity = receipt?.lastActivityAt ?? task.startedAt;
+        if (state === "running" && Date.now() - activity >= 10 * 60_000 && staleEpisode !== activity) {
+          staleEpisode = activity;
+          const evidence = await runHerdr(pi, ["agent", "read", task.agentName!, "--source", "recent-unwrapped", "--lines", "20"], 2000).catch(() => "Live diagnostic unavailable");
+          if (!watching()) return;
+          notify(`stale#${receipt?.generation ?? 0}`, `Subagent ${task.handle} has no execution progress for ten minutes. This is not proof of a hang. Current bounded evidence:\n${evidence.slice(-600)}\nUse existing evidence first; do not repeat diagnostic reads merely to poll.`);
         }
       } catch (error) {
-        if (!shouldWatch()) return;
+        if (!watching()) return;
         const message = error instanceof Error ? error.message : String(error);
-        if (/agent_not_found/.test(message)) { update({ state: "abandoned", endedAt: Date.now(), error: message }); notify("abandoned", `Subagent ${task.handle} disappeared before completion. ${task.escalation ?? ""}`); return; }
-        consecutivePollErrors += 1;
+        errors++;
+        let lost = false;
+        if (/agent_not_found/.test(message)) {
+          try {
+            lost = await proveTaskAbsent(pi, task);
+          } catch { /* Unavailable inventory does not prove absence. */ }
+        }
+        update({ state: lost ? "lost" : "unknown", presence: lost ? "lost" : "unknown", error: message }, task.state !== (lost ? "lost" : "unknown"));
+        notify(lost ? "lost" : "unknown", `Subagent ${task.handle}: ${lost ? "the original executor is proven absent" : "runtime identity cannot be verified"}. Work remains unresolved. No replacement or tool replay was started. ${message.slice(0, 200)}`);
       }
-      if (!task.background && !advisoryNotified && Date.now() >= advisoryAt) {
-        advisoryNotified = true;
-        task.escalation = "The Herdr task has run for more than 30 minutes; it remains watched and was not stopped.";
-        persist();
-        notify("long-running", `Subagent ${task.handle} is still running after 30 minutes. It remains active and monitored in pane ${task.paneId}.`);
-      }
-      const pollDelay = consecutivePollErrors === 0 ? 1000 : Math.min(10_000, 1000 * 2 ** Math.min(consecutivePollErrors, 4));
-      await sleep(pollDelay, controller.signal);
+      await sleep(errors ? Math.min(10000, 1000 * 2 ** Math.min(errors, 4)) : 1000, controller.signal);
     }
   })().finally(() => { if (watchers.get(task.handle) === controller) watchers.delete(task.handle); });
 }
 
 const HERDR_AGENT_READY_TIMEOUT_MS = 30_000;
 
-export function buildRoutedWorkerPiArgs(description: string, route: Route, _capabilities: RoutedWorkerCapability[] = []): string[] {
+export function buildRoutedWorkerPiArgs(description: string, route: Route, _capabilities: RoutedWorkerCapability[] = [], readonly = false, assignmentId?: string): string[] {
   return [
     // PR subscriptions belong to the root session.
-    "--exclude-tools", "subagent,subagent_control,model_route,workflow_control,pr_subscribe,pr_unsubscribe",
+    "--exclude-tools", "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe",
     "--model", route.launchModel ?? `${route.provider}/${route.model}`,
     "--thinking", clampThinkingLevel(route.thinking),
     "--name", description,
+    ...workerPolicyArgs(readonly),
+    ...(assignmentId ? ["--session-id", assignmentId, "--extension", fileURLToPath(new URL("./worker-lifecycle.ts", import.meta.url))] : []),
   ];
 }
 
@@ -446,14 +481,14 @@ export async function waitForHerdrAgentReady(pi: ExtensionAPI, agentName: string
   throw new Error(`agent_start_timeout: ${agentName} did not become prompt-ready within ${timeout}ms (${lastState})`);
 }
 
-export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string, capabilities: RoutedWorkerCapability[] = [], background = false): Promise<HerdrLaunch> {
-  const allocation = await allocateRoutedAgentPane(pi, cwd, manifestPath, background);
+export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string, capabilities: RoutedWorkerCapability[] = [], background = false, options: { assignmentId?: string; readonly?: boolean; onStarted?: (launch: HerdrLaunch) => void } = {}): Promise<HerdrLaunch> {
+  const allocation = await allocateRoutedAgentPane(pi, cwd, manifestPath, background, options.assignmentId, options.readonly);
   const { paneId, tabId } = allocation;
   const slug = description.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "task";
   const agent = `r-${slug}-${Date.now().toString(36).slice(-5)}`.slice(0, 32);
   let started = false;
   try {
-    const startArgs = ["agent", "start", agent, "--kind", "pi", "--pane", paneId, "--timeout", "30000", "--", ...buildRoutedWorkerPiArgs(description, route, capabilities)];
+    const startArgs = ["agent", "start", agent, "--kind", "pi", "--pane", paneId, "--timeout", "30000", "--", ...buildRoutedWorkerPiArgs(description, route, capabilities, options.readonly, options.assignmentId)];
     let lastStartError: unknown;
     for (const delay of [150, 350, 750, 1500]) {
       await sleep(delay, new AbortController().signal);
@@ -470,10 +505,14 @@ export async function launchHerdrAgent(pi: ExtensionAPI, task: string, descripti
       catch (error) { lastStartError = error; if (!/agent_pane_busy/.test(error instanceof Error ? error.message : String(error))) throw error; }
     }
     if (!started) throw lastStartError ?? new Error("Herdr pane did not become available");
+    const info = parseJson(await runHerdr(pi, ["agent", "get", agent], 5000), "started worker identity")?.result?.agent;
+    const sessionPath = info?.agent_session?.value;
+    const launch: HerdrLaunch = { agent, paneId, tabId, route: routeName, terminalId: info?.terminal_id, sessionPath, sessionId: readHerdrSessionId(sessionPath) ?? options.assignmentId };
+    options.onStarted?.(launch);
     const contract = background
       ? "Background contract: you are a long-lived background subagent. The parent agent never receives your output automatically and may later read your latest reply, so end each turn with a short current-status summary. Own only this assignment; do not delegate. Use notify_user (Telegram) only when the user must act or when something important finished."
       : "Task contract: own only this assignment; do not broaden scope or delegate. Report the outcome, changed artifacts or findings, evidence actually observed, and concrete blockers or risks. Stop if a missing decision materially changes the outcome.";
-    const prompt = [task, "", contract].join("\n");
+    const prompt = [...(options.assignmentId ? [`p3:routed-request ${options.assignmentId}`] : []), task, "", contract].join("\n");
     // One socket request both submits and observes the first working transition. If Herdr
     // 0.8.0's delayed Enter is swallowed, submit only the existing composer text and verify
     // activity; never paste the prompt twice.
@@ -498,7 +537,7 @@ export async function launchHerdrAgent(pi: ExtensionAPI, task: string, descripti
         if (!(info?.agent_status === "working" || info?.agent_status === "done" || info?.agent_status === "blocked" || result)) throw recoveryError;
       }
     }
-    return { agent, paneId, tabId, route: routeName };
+    return launch;
   } catch (error) {
     if (started) {
       const message = error instanceof Error ? error.message : String(error);

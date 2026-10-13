@@ -4,8 +4,10 @@ import type { Server } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { classifyDelegation, classifyModelRoute, planFallback, routes, selectEligibleRoute, clampThinkingLevel, routeTier, type CapabilityTier, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./routing/policy.ts";
-import { boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, resetCompletionDelivery, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
-import { parseJson, readHerdrResult, runHerdr, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
+import { availableTaskActions, buildCompletionMessage, canDeliverCompletion, boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, resetCompletionDelivery, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
+import { parseJson, proveTaskAbsent, readHerdrResult, runHerdr, verifyTaskAgent, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
+import { pathForResultRef, readAssignmentReceipt, readAssignmentResult } from "./routing/artifacts.ts";
+import { prepareEvidence } from "./routing/evidence.ts";
 import { ExplicitRouteRetryGuard } from "./routing/workflow.ts";
 import { launchRoutedTask, type RoutedTaskLaunchParams } from "./routing/launch.ts";
 import { registerRoutingRpc, type RoutingRpcResult } from "./routing/rpc.ts";
@@ -40,8 +42,10 @@ const RoutedTaskParams = Type.Object({
     description: "Optional paths this task owns, relative to cwd unless absolute. Launch is refused only if another active task in the same tree declared overlapping paths.",
   })),
   pane_retention: Type.Optional(StringEnum(["keep", "close"] as const, {
-    description: "Herdr-only completed-pane policy. keep (default) preserves the pane for later inspection; close removes it after caching the result and delivering the single completion message.",
+    description: "Herdr-only completed-pane policy. keep (default) preserves the pane for later inspection; close removes it only after persisting the result and proving receipt in the parent conversation.",
   })),
+  files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32, description: "Explicit evidence files or durable result:<UUID> references; small UTF-8 files are snapshotted, larger files remain canonical references." })),
+  readonly: Type.Optional(Type.Boolean({ description: "Restrict this worker to read/search and parent reporting; no bash, edits, writes, delegation, or MCP tools." })),
   capabilities: Type.Optional(Type.Array(StringEnum(["memory"] as const), {
     description: "Declared task capabilities. Subagents inherit configured extensions.",
   })),
@@ -54,6 +58,7 @@ const RoutedTaskControlParams = Type.Object({
   action: StringEnum(["list", "status", "result", "focus", "close", "clear", "steer", "stop"] as const),
   handle: Type.Optional(Type.String({ description: "Subagent handle; required except for list" })),
   message: Type.Optional(Type.String({ description: "Message for steer" })),
+  files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32, description: "Explicit evidence accompanying steer." })), 
   close_pane: Type.Optional(Type.Boolean({ description: "For Herdr stop, also close the owned pane. Default false." })),
 });
 
@@ -82,6 +87,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   let parentMetadataCount: number | undefined;
   let parentInbox: Server | undefined;
   let parentInboxPath: string | undefined;
+  const completionInFlight = new Set<string>();
+  let completionHeldForPrompt = false;
 
   const routeSummary = (name: RouteName) => {
     const route = routes[name];
@@ -262,37 +269,87 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     refreshParentMetadata();
   };
 
-  /**
-   * Deliver one bounded routed-task custom message per notification kind.
-   * Completion uses a persisted single-delivery claim, so watcher restarts, session reload,
-   * and manual result retrieval cannot produce a second completion turn.
-   */
+  const durableTaskResult = (task: TaskHandle): string | undefined => {
+    if (task.assignmentId && task.resultHash) return readAssignmentResult(task.requestId ?? task.assignmentId, task.resultHash);
+    return task.result;
+  };
+
+  const verifiedAgent = async (task: TaskHandle) => {
+    const agent = parseJson(await runHerdr(pi, ["agent", "get", task.agentName!], 5000), "worker control identity")?.result?.agent;
+    verifyTaskAgent(task, agent);
+    return agent;
+  };
+
+  const closeAfterReceipt = async (task: TaskHandle) => {
+    if (task.paneRetention !== "close" || task.paneClosedAt || !task.paneId || !task.completionNotifiedAt) return;
+    try {
+      await verifiedAgent(task);
+      const receipt = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
+      if (!receipt || receipt.outcome !== "completed" || receipt.requestId !== task.requestId || receipt.generation !== task.outcomeGeneration) return;
+      await runHerdr(pi, ["pane", "close", task.paneId], 5000);
+      updateTask(task, { paneClosedAt: Date.now() });
+    } catch (error) {
+      updateTask(task, { error: `Result delivered; retained pane because cleanup identity could not be verified: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  };
+
+  const acknowledgeCompletion = (task: TaskHandle, via: "message" | "manual") => {
+    if (!markCompletionDelivered(task, via)) return;
+    completionInFlight.delete(task.handle);
+    updateTask(task, { pendingCompletion: false });
+    persistTask(task);
+    void closeAfterReceipt(task);
+  };
+
+  const submitCompletion = (task: TaskHandle) => {
+    if (!task.pendingCompletion || !canDeliverCompletion(task) || completionInFlight.has(task.handle)) return;
+    const result = durableTaskResult(task);
+    if (result === undefined) return;
+    completionInFlight.add(task.handle);
+    try {
+      pi.sendMessage({
+        customType: "subagent-completion", content: buildCompletionMessage(task, result), display: true,
+        details: { handle: task.handle, assignmentId: task.assignmentId, requestId: task.requestId, generation: task.outcomeGeneration, route: task.route, state: task.state, kind: COMPLETION_KIND },
+      }, { deliverAs: completionHeldForPrompt ? "nextTurn" : "steer", triggerTurn: !completionHeldForPrompt });
+    } catch (error) { completionInFlight.delete(task.handle); throw error; }
+  };
+
+  const reconcileCompletions = () => {
+    if (!ownsManifest || !activeCtx) return;
+    for (const task of taskHandles.values()) {
+      const delivered = activeCtx.sessionManager.getEntries().some((entry: any) => {
+        const message = entry.type === "custom_message" ? entry : entry.type === "message" ? entry.message : undefined;
+        return message?.customType === "subagent-completion" && message.details?.handle === task.handle &&
+          message.details?.assignmentId === task.assignmentId && message.details?.requestId === task.requestId && message.details?.generation === task.outcomeGeneration;
+      });
+      if (delivered && task.state === "completed") acknowledgeCompletion(task, "message");
+      else if (task.pendingCompletion) submitCompletion(task);
+    }
+  };
+
   const notifyTask = (task: TaskHandle, kind: string, content: string) => {
-    // Workflow runs consume lifecycle events themselves and display bounded run-level
-    // status. Never wake the primary with routed-task custom messages for them.
     if (task.owner?.kind === "workflow") return;
     if (task.owner?.kind === "pr" && kind === COMPLETION_KIND) return;
-    // Background subagents never report back to the primary; only a stuck or vanished one
-    // reaches the user, through Telegram.
     if (task.background) {
       const blocked = kind.startsWith("blocked");
-      if ((!blocked && kind !== "abandoned") || !markNotified(task, kind)) return;
+      if ((!blocked && kind !== "lost") || !markNotified(task, kind)) return;
       persistTask(task);
       pi.events.emit("telegram:notify", {
-        kind: "blocked",
-        summary: `Background subagent "${task.label}" ${blocked ? "is waiting for input" : "exited unexpectedly"}`,
-        assistanceNeeded: blocked ? `Open it with /subagents focus ${task.label}` : "Check /subagents and relaunch it if still needed",
+        kind: "blocked", summary: `Background subagent "${task.label}" ${blocked ? "is waiting for input" : "lost its executor"}`,
+        assistanceNeeded: `Inspect /subagents ${task.label}; do not replace unresolved work automatically`,
       });
       return;
     }
-    const completion = kind === COMPLETION_KIND;
-    if (completion ? !markCompletionDelivered(task, "message") : !markNotified(task, kind)) return;
+    if (kind === COMPLETION_KIND) {
+      if (!canDeliverCompletion(task)) return;
+      updateTask(task, { pendingCompletion: true });
+      persistTask(task);
+      submitCompletion(task);
+      return;
+    }
+    if (!markNotified(task, kind)) return;
     persistTask(task);
-    refreshWidget();
-    pi.sendMessage({
-      customType: completion ? "subagent-completion" : "subagent-notification",
-      content: boundNotification(content),
-      display: true,
+    pi.sendMessage({ customType: "subagent-notification", content: boundNotification(content), display: true,
       details: { handle: task.handle, route: task.route, state: task.state, kind, escalation: task.escalation },
     }, { deliverAs: "steer", triggerTurn: true });
   };
@@ -388,7 +445,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Launch one task in a visible Herdr agent with workflow guards. Automatic tasks have a fixed starting route with bounded provider failover on exhausted usage. Explicit choices stay fixed and never silently fall back. This is fire-and-forget: after launch, do independent work or end the turn; completion automatically wakes the primary exactly once with a bounded subagent message. Do not poll status/result, sleep, tail logs, or steer merely to ask whether it finished. Retrieve the full cached result with subagent_control action=result.",
+    description: "Launch one task in a visible Herdr agent with workflow guards. Automatic tasks have a fixed starting route with bounded provider failover on exhausted usage. Explicit choices stay fixed and never silently fall back. This is fire-and-forget: after launch, do independent work or end the turn; completion automatically wakes the primary exactly once with a bounded subagent message. Do not poll status/result, sleep, tail logs, or steer merely to ask whether it finished. Retrieve durable result text with subagent_control action=result; its displayed text is capped at 12,000 characters and resultRef identifies the complete artifact.",
     promptSnippet: "Launch a guarded routed task in Herdr",
     promptGuidelines: [
       "Use subagent and subagent_control for all agent orchestration; never manage agents through the herdr CLI directly. Subagents use bounded dedicated tabs in the root workspace; never create agent splits in the user-owned root tab.",
@@ -408,6 +465,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   const focusRoutedPane = async (task: TaskHandle): Promise<string> => {
     if (!task.paneId) throw new Error("This task does not have a retained Herdr pane");
     if (task.paneClosedAt) throw new Error(`Pane for ${task.label} has already been closed`);
+    await verifiedAgent(task);
     await focusManifestPane(pi, task.paneId);
     return `Opened ${task.label}`;
   };
@@ -415,77 +473,81 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   const closeRoutedPane = async (task: TaskHandle): Promise<string> => {
     if (!task.paneId) throw new Error("This task does not have an owned Herdr pane");
     if (isActiveTask(task)) throw new Error("The task is still active; stop it before closing its pane");
+    if (task.pendingCompletion) throw new Error("Result delivery is pending; retain the pane until receipt is proven");
     if (!task.paneClosedAt) {
+      await verifiedAgent(task);
       await runHerdr(pi, ["pane", "close", task.paneId], 5000);
       task.paneClosedAt = Date.now();
       persistTask(task);
       syncManifest();
       refreshWidget();
     }
-    return `Closed the pane for ${task.label}; its result remains available`;
+    return `Closed the pane for ${task.label}; any verified durable result remains available`;
   };
 
   const readRoutedTaskResult = async (task: TaskHandle) => {
-    if (task.state === "completed" && task.result !== undefined) {
-      const consumedManually = markCompletionDelivered(task, "manual");
-      if (consumedManually) persistTask(task);
-      return { text: task.result.slice(0, 12000) || "No assistant text was captured", cached: true, truncated: task.result.length > 12000, consumedManually };
-    }
-    const raw = await runHerdr(pi, ["agent", "get", task.agentName!], 5000);
-    const sessionPath = parseJson(raw, "herdr agent get")?.result?.agent?.agent_session?.value;
-    let result = readHerdrResult(sessionPath);
-    if (!result) result = await runHerdr(pi, ["agent", "read", task.agentName!, "--source", "recent-unwrapped", "--lines", "120"], 5000);
-    return { text: result.slice(0, 12000) || "No result available yet", cached: false, truncated: result.length > 12000, consumedManually: false };
+    const result = durableTaskResult(task);
+    if (result !== undefined) return { text: result.slice(0, 12000), cached: task.result !== undefined, durable: !!task.resultHash, requestId: task.requestId, resultHash: task.resultHash, truncated: result.length > 12000, consumedManually: false, resultRef: task.resultRef };
+    if (task.state === "failed") return { text: task.error ?? "Pi execution failed; no successful result", cached: false, truncated: false, consumedManually: false };
+    const agent = await verifiedAgent(task);
+    const partial = readHerdrResult(agent.agent_session?.value);
+    return { text: partial ? `Partial output, NOT a completed result:\n${partial.slice(0, 12000)}` : "No verified result available yet", cached: false, truncated: partial.length > 12000, consumedManually: false };
   };
 
   const readFullRoutedTaskResult = async (task: TaskHandle): Promise<RoutingRpcResult> => {
-    if (task.result !== undefined) return { handle: task.handle, result: task.result, available: true };
-    if (!task.agentName) return { handle: task.handle, result: "", available: false };
-    try {
-      const raw = await runHerdr(pi, ["agent", "get", task.agentName], 5000);
-      const sessionPath = parseJson(raw, "herdr agent get")?.result?.agent?.agent_session?.value;
-      let result = readHerdrResult(sessionPath);
-      if (!result) result = await runHerdr(pi, ["agent", "read", task.agentName, "--source", "recent-unwrapped", "--lines", "120"], 5000);
-      return { handle: task.handle, result, available: !!result };
-    } catch { return { handle: task.handle, result: "", available: false }; }
+    const result = durableTaskResult(task);
+    if (result === undefined) return { handle: task.handle, result: "", available: false };
+    if (task.owner && task.state === "completed") acknowledgeCompletion(task, "manual");
+    return { handle: task.handle, result, available: true };
   };
 
   const refreshRoutedTaskStatus = async (task: TaskHandle): Promise<string | undefined> => {
-    if (!task.agentName) return undefined;
+    if (!task.agentName || task.paneClosedAt) return undefined;
     try {
-      const raw = await runHerdr(pi, ["agent", "get", task.agentName], 5000);
-      const liveStatus = parseJson(raw, "herdr agent get")?.result?.agent?.agent_status as string | undefined;
-      if (liveStatus === "working") updateTask(task, { state: "running" }, false);
-      if (liveStatus === "blocked") updateTask(task, { state: "blocked" }, false);
-      return liveStatus;
-    } catch { return undefined; }
+      const agent = await verifiedAgent(task);
+      updateTask(task, { presence: "live" }, false);
+      return agent.agent_status;
+    } catch (error) {
+      updateTask(task, { presence: "unknown", error: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    }
   };
 
   const stopRoutedTask = async (task: TaskHandle, closePane = false): Promise<string> => {
-    watchers.get(task.handle)?.abort();
-    try { await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000); }
-    catch (error) {
-      if (!/agent_not_found/.test(error instanceof Error ? error.message : String(error))) { watchHerdrTask(task); throw error; }
+    if (task.state === "lost") {
+      if (!await proveTaskAbsent(pi, task)) throw new Error("Original session is now present or moved; inspect before abandoning it");
+      watchers.get(task.handle)?.abort();
+      updateTask(task, { state: "stopped", endedAt: Date.now() });
+      return `Abandoned unresolved subagent ${task.handle}; no physical resources were removed or external effects rolled back`;
     }
+    await verifiedAgent(task);
+    watchers.get(task.handle)?.abort();
+    await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000);
     updateTask(task, { state: "stopped", endedAt: Date.now() });
     if (closePane && task.paneId) {
+      await verifiedAgent(task);
       await runHerdr(pi, ["pane", "close", task.paneId], 5000);
-      updateTask(task, { paneClosedAt: Date.now() }, false); persistTask(task);
+      updateTask(task, { paneClosedAt: Date.now() });
     }
-    return `Stopped subagent ${task.handle}${closePane ? " and closed its pane" : ""}`;
+    return `Stopped subagent ${task.handle}${closePane ? " and closed its pane" : ""}; external effects were not rolled back`;
   };
 
-  const steerTask = async (task: TaskHandle, message: string): Promise<void> => {
-    let baseline = "";
-    try {
-      const beforeRaw = await runHerdr(pi, ["agent", "get", task.agentName!], 5000);
-      baseline = readHerdrResult(parseJson(beforeRaw, "herdr agent get")?.result?.agent?.agent_session?.value);
-    } catch { /* steering still proceeds */ }
+  const steerTask = async (task: TaskHandle, message: string, files?: string[]): Promise<void> => {
+    const evidence = prepareEvidence(files, task.cwd ?? activeCtx!.cwd, pathForResultRef);
+    await verifiedAgent(task);
     watchers.get(task.handle)?.abort();
-    await runHerdr(pi, ["agent", "prompt", task.agentName!, message], 10000);
+    completionInFlight.delete(task.handle);
     resetCompletionDelivery(task);
-    updateTask(task, { state: "running" });
-    watchHerdrTask(task, baseline);
+    const requestId = crypto.randomUUID();
+    updateTask(task, { requestId, state: "queued", outcomeGeneration: undefined, pendingCompletion: false, result: undefined, resultHash: undefined, resultRef: undefined, resultPath: undefined, error: undefined });
+    persistTask(task);
+    try {
+      await runHerdr(pi, ["agent", "prompt", task.agentName!, [`p3:routed-request ${requestId}`, message, evidence.text].filter(Boolean).join("\n")], 10000);
+      updateTask(task, { state: "running" });
+    } catch (error) {
+      updateTask(task, { state: "unknown", presence: "unknown", error: `Steering submission is unresolved; do not resubmit blindly: ${error instanceof Error ? error.message : String(error)}` });
+      throw error;
+    } finally { watchHerdrTask(task); }
   };
 
   const clearRoutedTask = (task: TaskHandle): string => {
@@ -503,7 +565,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   pi.registerTool<typeof RoutedTaskControlParams, any>({
     name: "subagent_control",
     label: "Subagent Control",
-    description: "List, inspect, retrieve, focus, close, clear, steer, or stop Herdr agents launched by subagent. Completed panes remain available by default until explicitly closed; result returns the full cached worker output.",
+    description: "List, inspect, retrieve, focus, close, clear, steer, or stop Herdr agents launched by subagent. Completed panes remain available by default until explicitly closed; result reads hash-verified durable worker output (returned text is capped at 12,000 characters). List/status expose available_actions and nextAction; unknown identity never authorizes a mutation.",
     promptSnippet: "Control and retrieve routed subagents",
     parameters: RoutedTaskControlParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -511,7 +573,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       if (params.action === "list") {
         const items = [...taskHandles.values()].filter((item) => !item.clearedAt).sort((a, b) => b.startedAt - a.startedAt);
         const text = items.length ? items.map((item) => `${item.handle} [${item.state}] ${item.route} — ${item.label}${item.paneClosedAt ? " · pane closed" : ""}`).join("\n") : "No subagents";
-        return { content: [{ type: "text", text }], details: { tasks: items } };
+        return { content: [{ type: "text", text }], details: { tasks: items.map((task) => ({ ...task, ...taskMetadata(task), result: undefined })) } };
       }
       if (!params.handle) throw new Error("handle is required");
       const task = taskHandles.get(params.handle);
@@ -520,7 +582,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       if (params.action === "status") {
         const liveHerdrStatus = await refreshRoutedTaskStatus(task);
         const liveStatus = liveHerdrStatus ? `\nHerdr status: ${liveHerdrStatus}` : "";
-        return { content: [{ type: "text", text: `${task.handle} [${task.state}] ${task.route} ${task.model} — ${task.label}${liveStatus}${task.escalation ? `\nEscalation: ${task.escalation}` : ""}` }], details: { task, liveHerdrStatus } };
+        return { content: [{ type: "text", text: `${task.handle} [${task.state}] ${task.route} ${task.model} — ${task.label}${liveStatus}${task.escalation ? `\nEscalation: ${task.escalation}` : ""}` }], details: { task: { ...task, ...taskMetadata(task), result: undefined }, ...taskMetadata(task), liveHerdrStatus } };
       }
 
       if (params.action === "focus") {
@@ -545,7 +607,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
 
       if (params.action === "steer") {
         if (!params.message?.trim()) throw new Error("message is required for steer");
-        await steerTask(task, params.message.trim());
+        await steerTask(task, params.message.trim(), params.files);
         return { content: [{ type: "text", text: `Steered subagent ${task.handle}` }], details: { task } };
       }
 
@@ -685,11 +747,13 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
           if (!selected) return;
           task = choices.find((choice) => choice.label === selected)!.item;
           const actions: Array<{ label: string; action: string }> = [];
-          if (task.paneId && !task.paneClosedAt) actions.push({ label: "Open pane", action: "focus" });
-          actions.push({ label: "Show result", action: "result" });
-          if (isActiveTask(task)) actions.push({ label: "Stop and close pane", action: "stop" });
-          if (!isActiveTask(task) && task.paneId && !task.paneClosedAt) actions.push({ label: "Close pane", action: "close" });
-          if (!isActiveTask(task)) actions.push({ label: "Clear from list", action: "clear" });
+          const allowed = availableTaskActions(task);
+          if (allowed.includes("focus")) actions.push({ label: "Open pane", action: "focus" });
+          if (allowed.includes("result")) actions.push({ label: "Show result", action: "result" });
+          if (allowed.includes("stop")) actions.push({ label: "Stop and close pane", action: "stop" });
+          if (allowed.includes("close")) actions.push({ label: "Close pane", action: "close" });
+          if (allowed.includes("clear")) actions.push({ label: "Clear from list", action: "clear" });
+          if (!actions.length) { ctx.ui.notify(`No safe mutation is currently available for ${task.label}; inspect status and existing evidence.`, "warning"); return; }
           const selectedAction = await ctx.ui.select(task.label, actions.map((item) => item.label));
           if (!selectedAction) return;
           action = actions.find((item) => item.label === selectedAction)!.action;
@@ -807,6 +871,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       if (!lastDecision && candidate.customType === "delegation-route") lastDecision = candidate.data as typeof lastDecision;
       if (candidate.customType === "routed-task") {
         const data = candidate.data as TaskHandle | undefined;
+        if (data?.parentSessionId && data.parentSessionId !== ctx.sessionManager.getSessionId()) continue;
         if (data?.handle && data.agentName && data.paneId && typeof data.route === "string" && data.route && !seenTasks.has(data.handle)) {
           seenTasks.add(data.handle);
           taskHandles.set(data.handle, { ...data, messageToken: data.messageToken ?? routingManifest?.tasks.find((task) => task.handle === data.handle)?.messageToken, transitions: data.transitions ?? 0, notifiedStates: data.notifiedStates ?? [] });
@@ -850,11 +915,12 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }
 
     if (!ownsManifest) return;
+    completionInFlight.clear();
+    completionHeldForPrompt = false;
+    reconcileCompletions();
     for (const task of taskHandles.values()) {
-      if (["completed", "failed", "stopped", "abandoned"].includes(task.state)) continue;
-      if (!task.agentName) continue;
-      try { await runHerdr(pi, ["agent", "get", task.agentName], 3000); watchHerdrTask(task); }
-      catch (error) { updateTask(task, { state: "abandoned", endedAt: Date.now(), error: error instanceof Error ? error.message : String(error) }); }
+      if (isActiveTask(task) && task.agentName) watchHerdrTask(task);
+      else if (task.completionNotifiedAt) void closeAfterReceipt(task);
     }
   });
 
@@ -878,10 +944,23 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   });
 
   pi.on("message_end", async (event) => {
-    if ((event.message as any)?.role !== "assistant") return;
-    syncManifest();
-    refreshWidget();
+    const message = event.message as any;
+    if (message.role === "custom" && message.customType === "subagent-completion") {
+      const task = taskHandles.get(message.details?.handle);
+      if (task?.state === "completed" && task.assignmentId === message.details?.assignmentId && task.requestId === message.details?.requestId && task.outcomeGeneration === message.details?.generation) acknowledgeCompletion(task, "message");
+    }
+    if (message.role === "toolResult" && message.toolName === "subagent_control") {
+      const task = taskHandles.get(message.details?.task?.handle);
+      if (task?.state === "completed" && task.resultHash && message.details?.durable === true && message.details.requestId === task.requestId && message.details.resultHash === task.resultHash) acknowledgeCompletion(task, "manual");
+    }
+    syncManifest(); refreshWidget();
   });
+  pi.on("agent_end", (event) => {
+    const aborted = event.messages.some((message: any) => message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error" && /aborted/i.test(message.errorMessage ?? "")));
+    if (aborted) { completionInFlight.clear(); completionHeldForPrompt = true; }
+  });
+  pi.on("agent_settled", () => { reconcileCompletions(); });
+  pi.on("before_agent_start", () => { completionHeldForPrompt = false; });
 
   pi.on("model_select", async (_event, ctx) => {
     rememberUi(ctx);
