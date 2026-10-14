@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { AttachmentRecord } from "./attachment-store.ts";
 import type { TaskHandle } from "./state.ts";
 
 export const ROUTING_MANIFEST_VERSION = "pi-routing/v1" as const;
@@ -78,6 +79,7 @@ export interface RoutingManifest {
   sessionTotalKnown?: boolean;
   updatedAt: number;
   tasks: ManifestTask[];
+  attachments?: AttachmentRecord[];
 }
 
 export const manifestPathForPane = (sessionDir: string, paneId: string) =>

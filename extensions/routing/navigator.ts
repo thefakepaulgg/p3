@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, truncateToWidth, type Component, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
 import { parseJson, runHerdr } from "./herdr.ts";
 
-export interface RoutedWidgetTarget { handle: string; paneId?: string; paneClosedAt?: number }
+export interface RoutedWidgetTarget { handle: string; paneId?: string; paneClosedAt?: number; sessionPath?: string }
 
 const isEditorComponent = (component: Component | null): component is EditorComponent =>
   !!component && typeof (component as EditorComponent).getText === "function" && typeof (component as EditorComponent).setText === "function";
@@ -17,6 +17,7 @@ export class RoutedTaskWidget implements Component {
     private readonly renderLines: (selectedHandle?: string) => string[],
     private readonly focusPane: (paneId: string) => Promise<void>,
     private readonly warn: (message: string) => void,
+    private readonly openSession?: (target: RoutedWidgetTarget) => Promise<void>,
   ) {}
 
   handleTerminalInput(data: string, editorText: string): { consume: true } | undefined {
@@ -55,9 +56,9 @@ export class RoutedTaskWidget implements Component {
     }
     if (matchesKey(data, "enter")) {
       const target = targets[selected];
-      if (target?.paneId) {
+      if (target && (this.openSession || target.paneId)) {
         this.leave();
-        void this.focusPane(target.paneId).catch((error) => this.warn(error instanceof Error ? error.message : String(error)));
+        void (this.openSession ? this.openSession(target) : this.focusPane(target.paneId!)).catch((error) => this.warn(error instanceof Error ? error.message : String(error)));
       }
     }
   }
@@ -67,7 +68,7 @@ export class RoutedTaskWidget implements Component {
   requestRender(): void { this.tui.requestRender(); }
 
   private availableTargets(): RoutedWidgetTarget[] {
-    return this.getTargets().filter((target) => target.paneId && !target.paneClosedAt);
+    return this.getTargets().filter((target) => this.openSession ? !!target.paneId || !!target.sessionPath : !!target.paneId && !target.paneClosedAt);
   }
 
   private focusedComponent(): Component | null {

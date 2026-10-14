@@ -13,6 +13,7 @@ import { orchestrationError, orchestrationErrorResult } from "./routing/errors.t
 import { ensureWorkerEditor, saveRoutedInstruction } from "./routing/editor-guard.ts";
 import { prepareEvidence } from "./routing/evidence.ts";
 import { ExplicitRouteRetryGuard } from "./routing/workflow.ts";
+import { openSavedAttachment, closeAttachment, refreshAttachment, listParentAttachments } from "./routing/attachments.ts";
 import { continueRoutedTask, launchRoutedTask, type RoutedTaskLaunchParams } from "./routing/launch.ts";
 import { registerRoutingRpc, type RoutingRpcResult } from "./routing/rpc.ts";
 import { emitTaskLifecycle } from "./routing/lifecycle.ts";
@@ -59,7 +60,7 @@ const RoutedTaskParams = Type.Object({
 });
 
 const RoutedTaskControlParams = Type.Object({
-  action: StringEnum(["list", "status", "result", "focus", "close", "clear", "steer", "interrupt", "reply", "resume", "stop"] as const),
+  action: StringEnum(["list", "status", "result", "open", "focus", "close", "clear", "steer", "interrupt", "reply", "resume", "stop"] as const),
   handle: Type.Optional(Type.String({ description: "Subagent handle; required except for list" })),
   message: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "Explicit direction for steer/interrupt/resume, or the answer for reply. Original tasks are never replayed." })),
   ask_id: Type.Optional(Type.String({ minLength: 1, description: "Exact outstanding question ID; required for reply." })),
@@ -85,6 +86,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   let manifestPath: string | undefined;
   let routingManifest: RoutingManifest | undefined;
   let ownsManifest = false;
+  let attachmentTimer: ReturnType<typeof setInterval> | undefined;
   let manifestTimer: ReturnType<typeof setInterval> | undefined;
   let terminalInputUnsubscribe: (() => void) | undefined;
   let routedWidget: RoutedTaskWidget | undefined;
@@ -123,12 +125,13 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (!ownsManifest || !manifestPath || !activeCtx) return;
     const primary = sumSessionCost(activeCtx.sessionManager.getEntries());
     const tasks = [...taskHandles.values()].map(taskManifestRecord).filter((task): task is NonNullable<typeof task> => !!task);
-    const coverage = aggregateUsageCoverage(primary, tasks);
+    const attachments = listParentAttachments(activeCtx.sessionManager.getSessionId());
+    const coverage = aggregateUsageCoverage(primary, [...tasks, ...attachments.map((record) => ({ ...record, state: record.status === "starting" ? "queued" as const : record.status === "open" ? "running" as const : "stopped" as const }))]);
     routingManifest = {
       version: ROUTING_MANIFEST_VERSION,
       parentSessionId: activeCtx.sessionManager.getSessionId(), parentPaneId: process.env.HERDR_PANE_ID!, parentInbox: parentInboxPath,
       parentSessionPath: activeCtx.sessionManager.getSessionFile(), primaryCost: primary.cost, primaryCostKnown: primary.known,
-      sessionTotal: coverage.cost, sessionTotalKnown: coverage.known, sessionCostComplete: coverage.complete, missingCostSources: coverage.missingSources, pendingCostSources: coverage.pendingSources, usageScope: coverage.scope, updatedAt: Date.now(), tasks,
+      sessionTotal: coverage.cost, sessionTotalKnown: coverage.known, sessionCostComplete: coverage.complete, missingCostSources: coverage.missingSources, pendingCostSources: coverage.pendingSources, usageScope: coverage.scope, updatedAt: Date.now(), tasks, attachments,
     };
     writeRoutingManifest(manifestPath, routingManifest);
     // Workers retain their original env path when this exact parent session moves panes.
@@ -211,6 +214,12 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
           renderLines,
           (paneId) => focusManifestPane(pi, paneId),
           (message) => ctx.ui.notify(message, "warning"),
+          async (target) => {
+            if (target.handle === "parent") return focusManifestPane(pi, target.paneId!);
+            const task = taskHandles.get(target.handle);
+            if (!task || !ownsManifest) throw new Error("Open saved subagents from their owning parent session");
+            await openRoutedSession(task, ctx);
+          },
         );
         return routedWidget;
       }, { placement: "belowEditor" });
@@ -527,7 +536,19 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     return `Opened ${task.label}`;
   };
 
+  const openRoutedSession = async (task: TaskHandle, ctx: ExtensionContext) => {
+    const opened = await withTaskControl(task, () => openSavedAttachment(pi, ctx, task, taskHandles.values(), manifestPath));
+    syncManifest(); refreshWidget();
+    return opened;
+  };
+
   const closeRoutedPane = async (task: TaskHandle): Promise<string> => {
+    const attachment = activeCtx ? listParentAttachments(activeCtx.sessionManager.getSessionId()).find((record) => record.handle === task.handle && record.status !== "closed") : undefined;
+    if (attachment) {
+      await closeAttachment(pi, activeCtx!, attachment.attachmentId);
+      syncManifest(); refreshWidget();
+      return `Closed the reopened Pi session for ${task.label}; saved history and original result remain available`;
+    }
     if (!task.paneId) throw new Error("This task does not have an owned Herdr pane");
     if (isActiveTask(task)) throw new Error("The task is still active; stop it before closing its pane");
     if (task.pendingCompletion) throw new Error("Result delivery is pending; retain the pane until receipt is proven");
@@ -696,16 +717,18 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   pi.registerTool<typeof RoutedTaskControlParams, any>({
     name: "subagent_control",
     label: "Subagent Control",
-    description: "List, inspect, retrieve, focus, close, clear, steer, or stop Herdr agents launched by subagent. Bounded worker panes close after delivered completion unless keep was explicitly requested; resume creates a fresh generation from the exact saved session; result reads hash-verified durable worker output (returned text is capped at 12,000 characters). List/status expose available_actions and nextAction; unknown identity never authorizes a mutation.",
+    description: "List, inspect, retrieve, focus, close, clear, steer, or stop Herdr agents launched by subagent. open focuses a live worker or reopens its owned saved Pi session without submitting a task; close also closes a human-reopened session. Bounded worker panes close after delivered completion unless keep was explicitly requested; resume creates a fresh generation from the exact saved session; result reads hash-verified durable worker output (returned text is capped at 12,000 characters). List/status expose available_actions and nextAction; unknown identity never authorizes a mutation.",
     promptSnippet: "Control and retrieve routed subagents",
+    promptGuidelines: ["Use open only on an explicit user request to browse a saved worker conversation. It activates an interactive Pi session; it is not a progress-polling tool."],
     parameters: RoutedTaskControlParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       rememberUi(ctx);
       try {
       if (params.action === "list") {
         const items = [...taskHandles.values()].filter((item) => !item.clearedAt).sort((a, b) => b.startedAt - a.startedAt);
+        const attachments = activeCtx ? listParentAttachments(activeCtx.sessionManager.getSessionId()) : [];
         const text = items.length ? items.map((item) => `${item.handle} [${item.state}] ${item.route} — ${item.label}${item.paneClosedAt ? " · pane closed" : ""}`).join("\n") : "No subagents";
-        return { content: [{ type: "text", text }], details: { tasks: items.map((task) => ({ ...task, ...taskMetadata(task), result: undefined })) } };
+        return { content: [{ type: "text", text }], details: { tasks: items.map((task) => ({ ...task, ...taskMetadata(task), result: undefined })), attachments } };
       }
       if (!params.handle) throw new Error("handle is required");
       const task = taskHandles.get(params.handle);
@@ -717,6 +740,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         const question = task.assignmentId ? readAssignmentAsk(task.assignmentId) : undefined;
         const questionText = question ? `\nQuestion ${question.id} [${question.status}]: ${question.question}${question.evidence ? `\nComplete evidence snapshot: ${askPathForAssignment(task.assignmentId!)}` : ""}` : "";
         return { content: [{ type: "text", text: `${task.handle} [${task.state}] ${task.route} ${task.model} — ${task.label}${liveStatus}${questionText}${task.escalation ? `\nEscalation: ${task.escalation}` : ""}` }], details: { task: { ...task, ...taskMetadata(task), result: undefined }, ...taskMetadata(task), liveHerdrStatus, question: task.assignmentId ? readAssignmentAsk(task.assignmentId) : undefined } };
+      }
+
+      if (params.action === "open") {
+        const opened = await openRoutedSession(task, ctx);
+        return { content: [{ type: "text", text: opened.text }], details: { handle: task.handle, attachment: opened.record, ...opened.record } };
       }
 
       if (params.action === "focus") {
@@ -835,7 +863,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         } else if (action === "reply") ctx.ui.notify((await replyTask(task, ask!.id, instruction.trim())).text, "info");
         else ctx.ui.notify(await interruptTask(task, instruction.trim()), "info");
       });
-    } else if (action === "focus") ctx.ui.notify(await focusRoutedPane(task), "info");
+    } else if (action === "open") ctx.ui.notify((await openRoutedSession(task, ctx)).text, "info");
+    else if (action === "focus") ctx.ui.notify(await focusRoutedPane(task), "info");
     else if (action === "result") {
       const result = await readRoutedTaskResult(task);
       ctx.ui.notify(boundNotification(result.text), "info");
@@ -849,9 +878,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   };
 
   pi.registerCommand("subagents", {
-    description: "Inspect, reply, interrupt, resume a saved worker, or stop/close/clear it",
+    description: "Open a worker or its saved Pi conversation; reply, interrupt, resume, stop, close, or clear",
     getArgumentCompletions: (prefix) => {
-      const actions = ["focus", "result", "reply", "interrupt", "resume", "stop", "close", "clear"];
+      const actions = ["open", "focus", "result", "reply", "interrupt", "resume", "stop", "close", "clear"];
       const separator = prefix.indexOf(" ");
       if (separator < 0) {
         const matches = actions.filter((action) => action.startsWith(prefix.toLowerCase()));
@@ -882,11 +911,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         let action: string | undefined;
         if (trimmed) {
           const [verb, ...queryParts] = trimmed.split(/\s+/);
-          const aliases: Record<string, string> = { open: "focus", focus: "focus", show: "result", view: "result", result: "result", close: "close", clear: "clear", remove: "clear", stop: "stop", kill: "stop", reply: "reply", interrupt: "interrupt", resume: "resume" };
+          const aliases: Record<string, string> = { open: "open", focus: "focus", show: "result", view: "result", result: "result", close: "close", clear: "clear", remove: "clear", stop: "stop", kill: "stop", reply: "reply", interrupt: "interrupt", resume: "resume" };
           action = aliases[verb.toLowerCase()];
-          if (!action) throw new Error("Usage: /subagents [focus|result|reply|interrupt|resume|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
+          if (!action) throw new Error("Usage: /subagents [open|focus|result|reply|interrupt|resume|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
           if (!queryParts.length) {
-            if (action !== "clear") throw new Error("Usage: /subagents [focus|result|reply|interrupt|resume|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
+            if (action !== "clear") throw new Error("Usage: /subagents [open|focus|result|reply|interrupt|resume|stop|close] <handle or task name>, or /subagents clear [<handle or task name>]");
             const finished = listedTasks().filter((item) => !isActiveTask(item));
             if (!finished.length) { ctx.ui.notify("No finished subagents to clear", "info"); return; }
             const retainedPanes = finished.filter((item) => item.paneId && !item.paneClosedAt).length;
@@ -909,20 +938,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
           const selected = await ctx.ui.select("Subagents", choices.map((choice) => choice.label));
           if (!selected) return;
           task = choices.find((choice) => choice.label === selected)!.item;
-          const actions: Array<{ label: string; action: string }> = [];
-          const allowed = availableTaskActions(task);
-          if (allowed.includes("focus")) actions.push({ label: "Open pane", action: "focus" });
-          if (allowed.includes("result")) actions.push({ label: "Show result", action: "result" });
-          if (allowed.includes("reply")) actions.push({ label: "Reply to question", action: "reply" });
-          if (allowed.includes("interrupt")) actions.push({ label: "Interrupt and redirect", action: "interrupt" });
-          if (allowed.includes("resume")) actions.push({ label: "Resume saved session", action: "resume" });
-          if (allowed.includes("stop")) actions.push({ label: "Stop and close pane", action: "stop" });
-          if (allowed.includes("close")) actions.push({ label: "Close pane", action: "close" });
-          if (allowed.includes("clear")) actions.push({ label: "Clear from list", action: "clear" });
-          if (!actions.length) { ctx.ui.notify(`No safe mutation is currently available for ${task.label}; inspect status and existing evidence.`, "warning"); return; }
-          const selectedAction = await ctx.ui.select(task.label, actions.map((item) => item.label));
-          if (!selectedAction) return;
-          action = actions.find((item) => item.label === selectedAction)!.action;
+          action = "open";
         }
         await runRoutedCommandAction(action, task, ctx);
       } catch (error) {
@@ -1019,6 +1035,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     bindEventSubscriptions();
     rememberUi(ctx);
     if (manifestTimer) clearInterval(manifestTimer);
+    if (attachmentTimer) clearInterval(attachmentTimer);
     terminalInputUnsubscribe?.();
     const inheritedManifest = process.env.PI_ROUTING_MANIFEST?.trim();
     ownsManifest = !inheritedManifest && process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
@@ -1096,6 +1113,19 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     completionInFlight.clear(); questionInFlight.clear();
     completionHeldForPrompt = false;
     reconcileCompletions(); await reconcileQuestions();
+    let refreshingAttachments = false;
+    const reconcileAttachments = async () => {
+      if (refreshingAttachments || !activeCtx) return;
+      refreshingAttachments = true;
+      try {
+        for (const record of listParentAttachments(activeCtx.sessionManager.getSessionId())) {
+          if (record.status !== "closed") await refreshAttachment(pi, record.attachmentId).catch(() => undefined);
+        }
+        syncManifest(); refreshWidget();
+      } finally { refreshingAttachments = false; }
+    };
+    await reconcileAttachments();
+    attachmentTimer = setInterval(() => { void reconcileAttachments(); }, 1000);
     for (const task of taskHandles.values()) {
       if (isActiveTask(task) && task.agentName) watchHerdrTask(task);
       else if (task.completionNotifiedAt) void closeAfterReceipt(task);
@@ -1115,6 +1145,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     terminalInputUnsubscribe = undefined;
     if (manifestTimer) clearInterval(manifestTimer);
     manifestTimer = undefined;
+    if (attachmentTimer) clearInterval(attachmentTimer);
+    attachmentTimer = undefined;
     uiCtx = undefined;
     activeCtx = undefined;
     widgetSignature = undefined;

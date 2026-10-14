@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { assertSessionUnattached } from "./attachment-lifecycle.ts";
 import { readAssignmentReceipt } from "./artifacts.ts";
 import { readPendingAssignmentAsk } from "./questions.ts";
 import { orchestrationError } from "./errors.ts";
@@ -27,6 +28,7 @@ export async function validateContinuation(pi: ExtensionAPI, ctx: ExtensionConte
   if (previous.background || isActiveTask(previous) || previous.pendingCompletion || !previous.completionNotifiedAt && previous.state === "completed") throw new Error("The previous assignment is unresolved; finish delivery or explicitly stop it before continuation");
   if (previous.assignmentId && readPendingAssignmentAsk(previous.assignmentId)) throw new Error("Session has an outstanding question; reply or explicitly cancel it before continuation");
   const saved = savedRoutedSession(previous);
+  assertSessionUnattached(saved.path);
   const original = readAssignmentReceipt(previous.assignmentId!);
   if (!original || original.sessionId !== saved.id || original.paneId !== previous.paneId || original.terminalId !== previous.terminalId || !Number.isSafeInteger(original.workerPid) || original.workerPid! <= 0) throw new Error("Original Pi process identity is unverified; continuation cannot guess that it exited");
   try { process.kill(original.workerPid!, 0); throw new Error("Original Pi process has not exited; wait for cleanup before continuation"); }
