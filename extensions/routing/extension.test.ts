@@ -858,7 +858,7 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
   const widgets: Array<{ key: string; content: string[] | undefined }> = [];
   const notices: Array<{ text: string; level: string }> = [];
   const replayed = {
-    handle: "rt-stored", route: "sol", routeExplicit: true, target: "herdr",
+    handle: "rt-stored", parentSessionId: "session-1", route: "sol", routeExplicit: true, target: "herdr",
     model: "openai-codex/gpt-6-sol", thinking: "medium", label: "Stored agent", state: "completed",
     startedAt: Date.now() - 60_000, endedAt: Date.now() - 30_000, agentName: "r-stored", paneId: "w1:p9", terminalId: "terminal-w1:p9", sessionId: workerSessionId, paneRetention: "keep",
     transitions: 2, notifiedStates: ["completed"], completionNotifiedAt: Date.now() - 30_000, completionDeliveredVia: "message",
@@ -884,11 +884,13 @@ test("/subagents opens a retained pane and clear survives reload", async () => {
     const complete = commands.get("subagents").getArgumentCompletions;
     expect(complete("focus ")).toEqual([{ value: "focus Stored agent", label: "Stored agent", description: "gpt-6-sol · completed" }]);
     expect(complete("result Stor")[0].value).toBe("result Stored agent");
+    expect(complete("open Stor")[0].value).toBe("open Stored agent");
     expect(complete("focus rt-")[0].value).toBe("focus rt-stored");
     expect(complete("clear missing")).toBeNull();
     await commands.get("subagents").handler("", ctx);
     expect(calls.some((args) => args.join(" ") === "pane focus w1:p9")).toBe(true);
-    expect(notices.at(-1)?.text).toBe("Opened Stored agent");
+    expect(notices.at(-1)?.text).toContain("Focused retained worker rt-stored");
+    expect(selectCall).toBe(1);
 
     await commands.get("subagents").handler("clear", ctx);
     expect(notices.at(-1)?.text).toContain("Cleared 1 finished subagent");

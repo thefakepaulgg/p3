@@ -83,3 +83,19 @@ test("focus validates that the target pane still exists", async () => {
   setHerdrTestTransportForTests(async () => JSON.stringify({ result: { panes: [{ pane_id: "w1:p1" }] } }));
   await expect(focusManifestPane({} as any, "w1:p2")).rejects.toThrow("no longer exists");
 });
+
+
+test("Enter can open a closed worker's saved session through the native-session callback", async () => {
+  const editor = { render: () => [], invalidate: () => {}, getText: () => "", setText: () => {}, handleInput: () => {} };
+  let focused: any = editor;
+  const opened: string[] = [];
+  const target = { handle: "rt-closed", paneId: "old-pane", paneClosedAt: 1, sessionPath: "/saved/session.jsonl" };
+  const tui: any = { getFocusedComponent: () => focused, setFocus: (component: any) => { focused = component; }, requestRender: () => {} };
+  const widget = new RoutedTaskWidget(tui, () => [target], () => [], async () => { throw new Error("must not focus old pane"); }, () => {}, async (row) => { opened.push(row.handle); });
+  widget.handleTerminalInput("\x1b[B", "");
+  expect(focused).toBe(widget);
+  widget.handleTerminalInput("\r", "");
+  await Promise.resolve();
+  expect(opened).toEqual(["rt-closed"]);
+  expect(focused).toBe(editor);
+});

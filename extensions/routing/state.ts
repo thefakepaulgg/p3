@@ -214,11 +214,11 @@ export function availableTaskActions(task: TaskHandle): string[] {
   const actions = ["status"];
   if (task.resultHash || task.result !== undefined) actions.push("result");
   const canResume = !isActiveTask(task) && !task.pendingCompletion && !task.pendingAskId && !!task.sessionPath && !!task.sessionId && !!task.capabilities;
-  if (canResume && (task.paneClosedAt || task.presence === "lost")) actions.push("resume");
+  if (canResume && (task.paneClosedAt || task.presence === "lost")) actions.push("open", "resume");
   if (task.presence === "unknown" || task.state === "unknown") return actions;
   if (task.state === "lost") return [...actions, "stop"];
   if (task.presence === "lost") return [...actions, "clear"];
-  if (task.paneId && !task.paneClosedAt) actions.push("focus");
+  if (task.paneId && !task.paneClosedAt) actions.push("open", "focus");
   if (task.pendingAskId) actions.push("reply", "stop");
   else if (isActiveTask(task)) actions.push("steer", "stop", ...(task.state === "running" ? ["interrupt"] : []));
   else {
@@ -237,7 +237,7 @@ export function taskNextAction(task: TaskHandle): string {
   if (task.state === "failed") return "Inspect execution failure and any external effects; do not treat partial text as a result or blindly replay tools.";
   if (task.pendingAskId) return "Reply to the exact outstanding ask_id; the worker is waiting inside the same assignment, not completed.";
   if (task.state === "blocked") return "Inspect the blocking condition; do not start another assignment.";
-  if (task.paneClosedAt && task.sessionPath) return "Read the saved result or use resume with an explicit follow-up to continue this exact Pi session in a fresh pane.";
+  if (task.paneClosedAt && task.sessionPath) return "Use open to browse the saved Pi conversation without submitting work, or resume for a bounded explicit follow-up.";
   return isActiveTask(task) ? "Allow work to progress; use controls only when the assignment changes or evidence calls for recovery." : "Read the durable result or close the retained pane when no longer needed.";
 }
 

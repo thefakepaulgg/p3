@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { classifyDelegation, classifyModelRoute, type CapabilityTier, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./policy.ts";
-import { isActiveTask, normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
+import { normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
 import { prepareEvidence } from "./evidence.ts";
 import { pathForResultRef } from "./artifacts.ts";
 import { classifyRoute, routingClassifierConfig } from "./classifier.ts";
@@ -100,8 +100,6 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   catch (error) { if (params.route !== undefined) deps.routeRetryGuard.record(retryKey, requestedRoute); throw error; }
   deps.routeRetryGuard.clear(retryKey);
 
-  const active = [...deps.taskHandles.values()].filter((item) => !item.background && isActiveTask(item)).length;
-  if (active >= 4) throw new Error("Herdr subagent concurrency limit reached (4 active tasks)");
   const routeName = routePlan.route;
   const route = routePlan.config;
   const handle = newHandle();
@@ -174,8 +172,6 @@ export async function continueRoutedTask(deps: LaunchDependencies, ctx: Extensio
   const initial = await validateContinuation(deps.pi, ctx, previous, deps.taskHandles.values());
   return withSessionStartLock(initial.path, async () => {
     const saved = await validateContinuation(deps.pi, ctx, previous, deps.taskHandles.values());
-    const active = [...deps.taskHandles.values()].filter((task) => !task.background && isActiveTask(task)).length;
-    if (active >= 4) throw new Error("Herdr subagent concurrency limit reached (4 active tasks)");
     validateWorkflowLaunch({ cwd: saved.cwd, dependsOn: [], ownedPaths: previous.ownedPaths ?? [], tasks: deps.taskHandles.values() });
     const assignmentId = randomUUID();
     const tracked: TaskHandle = {
