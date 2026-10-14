@@ -188,6 +188,9 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
     writeAttachmentRecord(record);
     const args = [...buildRoutedWorkerPiArgs(task.label, { label: task.label, provider: saved.model.provider, model: saved.model.modelId, thinking: saved.thinking, purpose: "Human session attachment" },
       task.capabilities, task.readonly), "--session", saved.path, "--extension", LIFECYCLE];
+    // --name appends session_info even when unchanged; browsing must not rewrite saved history.
+    const nameIndex = args.indexOf("--name");
+    if (nameIndex >= 0) args.splice(nameIndex, 2);
     try {
       let started = false;
       for (const delay of [150, 350, 750, 1500]) {
