@@ -166,7 +166,7 @@ export default function smokeProvider(pi: ExtensionAPI) {
     }
   });
   // worker-alt: a reasoning-capable worker equivalent that a human can switch to with /model and /thinking.
-  const faux = fauxProvider({ provider: "smoke-routing", api: "smoke-routing-api", models: [...["root", "worker", "error", "ask", "hold"].map((id) => ({ id, reasoning: false, input: ["text"] })), { id: "worker-alt", reasoning: true, input: ["text"] }] });
+  const faux = fauxProvider({ provider: "smoke-routing", api: "smoke-routing-api", models: [...["root", "worker", "error", "ask", "hold"].map((id) => ({ id, reasoning: false, input: ["text"] as Array<"text"> })), { id: "worker-alt", reasoning: true, input: ["text"] }] });
   const response = (context: any, options: any, _state: any, model: any) => { faux.appendResponses([response]); trace("provider", { model: model.id, reasoning: options?.reasoning, users: context.messages.filter((m: any) => m.role === "user").map(text) }); return decide(model.id === "worker-alt" ? "worker" : model.id, context.messages); };
   faux.setResponses([response]);
   pi.registerProvider(faux.provider);
