@@ -128,6 +128,7 @@ test("opens a finished worker's saved session with zero model turns, exact profi
   const start = calls.find((call) => call.slice(0, 2).join(" ") === "agent start")!;
   expect(start).toEqual(expect.arrayContaining(["--pane", "w1:p7", "--session", sessionPath, "--model", "openai-codex/gpt-6-luna", "--thinking", "high", "--tools", "--no-mcp", "--extension", LIFECYCLE]));
   expect(start.join(" ")).not.toContain("worker-lifecycle");
+  expect(start).not.toContain("--name");
   expect(start[start.indexOf("--exclude-tools") + 1]).toContain("subagent");
   expect(readAttachmentPresence(record.attachmentId)).toMatchObject({ pid: live!.child.pid, sessionId, paneId: "w1:p7" });
   expect(readFileSync(sessionPath).equals(prefix)).toBe(true);
@@ -200,6 +201,7 @@ test("crash: claim held while unverifiable, finalized as partial only after prov
   const finalized = await refreshAttachment(pi, record.attachmentId);
   expect(finalized).toMatchObject({ status: "closed", estimatedCost: 0.5, costComplete: false });
   expect(finalized.error).toContain("partial");
+  expect(finalized.error).not.toContain("claim retained");
   expect(() => assertSessionUnattached(sessionPath)).not.toThrow();
 });
 

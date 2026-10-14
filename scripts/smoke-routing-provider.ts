@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createConnection } from "node:net";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Type } from "typebox";
@@ -32,6 +32,15 @@ function decide(model: string, messages: any[]) {
     return call("smoke_hold", {});
   }
   if (model === "worker") {
+    // Manual follow-ups typed into a natively reopened worker: exercise the restored
+    // read-only tool profile with a real write attempt, never an automatic completion.
+    const human = messages.findLastIndex((m: any) => m.role === "user" && text(m).startsWith("P3_SMOKE_HUMAN "));
+    if (human >= 0) {
+      const marker = text(messages[human]).split(" ")[1];
+      const attempt = callResult(messages, "write", human);
+      if (!attempt) return call("write", { path: `human-canary-${marker}.txt`, content: "Manual turn write must be denied" });
+      return fauxAssistantMessage(`P3_SMOKE_HUMAN_DONE ${marker} ${attempt.isError ? "WRITE_DENIED" : "WRITE_ALLOWED"}`);
+    }
     if (messages.some((m: any) => m.role === "user" && text(m).includes("P3_SMOKE_FOLLOWUP"))) return fauxAssistantMessage("P3_SMOKE_FOLLOWUP_DONE (saved history retained, no tools replayed)");
     const denied = callResult(messages, "write");
     const read = callResult(messages, "read");
@@ -51,11 +60,24 @@ function decide(model: string, messages: any[]) {
     if (!result) return call("subagent_control", args);
     return fauxAssistantMessage(`P3_SMOKE_CONTROL_OK ${marker}\n${text(result)}`);
   }
+  const fanout = messages.find((m: any) => m.role === "user" && text(m).startsWith("P3_SMOKE_FANOUT "));
+  if (fanout) {
+    const [, count, nonce] = text(fanout).split(" ");
+    const launched = messages.find((m: any) => m.role === "assistant" && m.content?.some((p: any) => p.type === "toolCall" && p.name === "subagent"));
+    if (!launched) return fauxAssistantMessage(Array.from({ length: Number(count) }, (_, i) => fauxToolCall("subagent", {
+      task: `P3_SMOKE_OBJECTIVE FANOUT ${i}: hold only this disjoint fixture scope.`, description: `smoke fanout ${i}`, route: "smoke-routing/hold",
+      owned_paths: [`fanout-${nonce}/${i}`], pane_retention: "keep",
+    })), { stopReason: "toolUse" });
+    const ids = launched.content.filter((p: any) => p.type === "toolCall").map((p: any) => p.id);
+    const results = messages.filter((m: any) => m.role === "toolResult" && ids.includes(m.toolCallId));
+    if (results.length < ids.length) throw new Error("Fan-out tool results missing");
+    return fauxAssistantMessage(`P3_SMOKE_FANOUT_READY ${results.filter((r: any) => !r.isError).length}`);
+  }
   const boundary = messages.find((m: any) => m.role === "user" && text(m).startsWith("P3_SMOKE_CASE "));
   if (boundary) {
     if (!callResult(messages, "subagent")) {
       const kind = text(boundary).split(" ")[1];
-      return call("subagent", { task: `P3_SMOKE_OBJECTIVE ${kind}: execute only this fixture objective.`, description: `smoke ${kind}`, route: kind === "AUTO" ? "auto" : kind.includes("STREAM") ? "smoke-stream/stream" : `smoke-routing/${kind === "ASK" ? "ask" : kind === "RESUME" ? "worker" : "hold"}`, readonly: kind === "ASK" || kind === "RESUME" || kind === "AUTO", pane_retention: kind === "RESUME" ? "close" : "keep" });
+      return call("subagent", { task: `P3_SMOKE_OBJECTIVE ${kind}: execute only this fixture objective.`, description: `smoke ${kind}`, route: kind === "AUTO" ? "auto" : kind.includes("STREAM") ? "smoke-stream/stream" : `smoke-routing/${kind === "ASK" ? "ask" : kind === "RESUME" || kind === "NATIVE" ? "worker" : "hold"}`, readonly: ["ASK", "RESUME", "AUTO", "NATIVE"].includes(kind), pane_retention: kind === "RESUME" || kind === "NATIVE" ? "close" : "keep" });
     }
     return fauxAssistantMessage("P3_SMOKE_CASE_READY");
   }
@@ -91,8 +113,16 @@ export default function smokeProvider(pi: ExtensionAPI) {
   const trace = (event: string, details: any = {}) => appendFileSync(join(root, "trace.jsonl"), JSON.stringify({ event, at: Date.now(), assignment, pid: process.pid, ...details }) + "\n");
   let editorProbe: ReturnType<typeof setInterval> | undefined;
   pi.on("session_shutdown", () => { if (editorProbe) clearInterval(editorProbe); });
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event: any, ctx) => {
     if (process.env.P3_SMOKE_SANDBOX !== "1") throw new Error("Smoke root/worker requires OS network denial");
+    // Identity evidence for every real Pi (including native attachments): exact file,
+    // restored model/thinking/tools/cwd and routing env names. Fixture files only; no settings.
+    const identity = { pid: process.pid, reason: event?.reason, sessionFile: ctx.sessionManager.getSessionFile(), session: ctx.sessionManager.getSessionId(),
+      model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: pi.getThinkingLevel(), tools: [...pi.getActiveTools()].sort(), cwd: process.cwd(), argv: process.argv.slice(2),
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => /^PI_ROUT(ED|ING)_|^PI_SUBAGENT_/.test(key))) };
+    trace("session_identity", identity);
+    mkdirSync(join(root, "pids"), { recursive: true });
+    writeFileSync(join(root, "pids", `${process.pid}.json`), JSON.stringify(identity));
     await new Promise<void>((yes, no) => {
       const socket = createConnection({ host: "127.0.0.1", port: 9 });
       socket.once("connect", () => { socket.destroy(); no(new Error("Worker TCP escaped network sandbox")); });
@@ -103,6 +133,8 @@ export default function smokeProvider(pi: ExtensionAPI) {
       if (existsSync(request)) writeFileSync(join(root, `probe-result-${assignment}.json`), JSON.stringify({ nonce: readFileSync(request, "utf8"), editor: ctx.ui.getEditorText(), idle: ctx.isIdle() }));
     }, 100);
   });
+  // Native Pi session switch (same runtime path as /resume's selector) for owned drift fixtures.
+  pi.registerCommand("p3-smoke-switch", { description: "Smoke fixture: switch to an exact saved session file", handler: async (args, ctx) => { await ctx.switchSession(args.trim()); } });
   let streamed = false;
   pi.on("message_update", (event: any) => {
     if (!streamed && event.message?.model === "stream" && text(event.message)) { streamed = true; trace("stream_delta"); }
@@ -133,8 +165,9 @@ export default function smokeProvider(pi: ExtensionAPI) {
       return { content: [{ type: "text", text: "Released owned fixture gate" }], details: {} };
     }
   });
-  const faux = fauxProvider({ provider: "smoke-routing", api: "smoke-routing-api", models: ["root", "worker", "error", "ask", "hold"].map((id) => ({ id, reasoning: false, input: ["text"] })) });
-  const response = (context: any, _options: any, _state: any, model: any) => { faux.appendResponses([response]); trace("provider", { model: model.id, users: context.messages.filter((m: any) => m.role === "user").map(text) }); return decide(model.id, context.messages); };
+  // worker-alt: a reasoning-capable worker equivalent that a human can switch to with /model and /thinking.
+  const faux = fauxProvider({ provider: "smoke-routing", api: "smoke-routing-api", models: [...["root", "worker", "error", "ask", "hold"].map((id) => ({ id, reasoning: false, input: ["text"] })), { id: "worker-alt", reasoning: true, input: ["text"] }] });
+  const response = (context: any, options: any, _state: any, model: any) => { faux.appendResponses([response]); trace("provider", { model: model.id, reasoning: options?.reasoning, users: context.messages.filter((m: any) => m.role === "user").map(text) }); return decide(model.id === "worker-alt" ? "worker" : model.id, context.messages); };
   faux.setResponses([response]);
   pi.registerProvider(faux.provider);
   const automatic = fauxProvider({ provider: "openai-codex", api: "smoke-auto-api", models: [{ id: "gpt-6.1-sol", reasoning: false, input: ["text"] }] });
