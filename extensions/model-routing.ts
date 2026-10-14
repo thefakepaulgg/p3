@@ -147,6 +147,10 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     const tasks: TaskWidgetItem[] = ownsManifest || !manifestTasks ? [...taskHandles.values()] : [...manifestTasks];
     const shown = taskWidgetItems(tasks);
     const lines = formatTaskWidget(tasks) ?? [];
+    for (const [index, task] of shown.entries()) {
+      const attachment = routingManifest?.attachments?.find((record) => record.handle === task.handle && record.status === "open");
+      if (attachment && lines[index + 1]) lines[index + 1] = lines[index + 1].replace(" · closed", "") + " · Pi open";
+    }
     const targets = [...shown];
     const parentPaneId = routingManifest?.parentPaneId;
     const isChildPane = !ownsManifest && parentPaneId && process.env.HERDR_PANE_ID !== parentPaneId;

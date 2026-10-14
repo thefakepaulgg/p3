@@ -65,7 +65,7 @@ function finalize(record: AttachmentRecord, reason: string): AttachmentRecord {
   measureUsage(record, clean ? presence!.shutdown!.bytes : size);
   if (!clean) record.costComplete = false;
   Object.assign(record, { status: "closed", closedAt: Date.now() });
-  if (presence?.drift) record.error = `Session drift before close (${presence.drift.reason})`;
+  record.error = presence?.drift ? `Session drift before close (${presence.drift.reason})` : undefined;
   if (!clean) record.error = [record.error, `Usage window is unverifiable/partial (${reason})`].filter(Boolean).join("; ");
   writeAttachmentRecord(record);
   releaseSessionClaim(record.attachmentId, record.sessionPath);
