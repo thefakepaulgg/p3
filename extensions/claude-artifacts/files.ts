@@ -40,7 +40,7 @@ export async function saveResponse(response: Response, destination: string, expe
   }
 }
 
-export async function localText(source: string, sourceRoot: string, limit: number) {
+export async function localFile(source: string, sourceRoot: string, limit: number) {
   if (!isAbsolute(source)) fail("source must be an explicit absolute local file path.");
   if (!(await lstat(source)).isFile()) fail("source must be a regular file, not a symlink or device.");
   if (!isAbsolute(sourceRoot)) fail("source_root must be an explicit absolute local directory.");
@@ -56,7 +56,7 @@ export async function localText(source: string, sourceRoot: string, limit: numbe
   const input = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await input.stat();
-    if (!stat.isFile() || stat.size > limit) fail("Each source must be a regular UTF-8 text file within the 1 MB inline deploy bound.");
+    if (!stat.isFile() || stat.size > limit) fail(`Each source must be a regular file within the ${limit}-byte limit.`);
     const buffer = Buffer.alloc(limit + 1);
     let bytesRead = 0;
     while (bytesRead < buffer.length) {
@@ -64,10 +64,7 @@ export async function localText(source: string, sourceRoot: string, limit: numbe
       if (read.bytesRead === 0) break;
       bytesRead += read.bytesRead;
     }
-    if (bytesRead > limit) fail("Source exceeds the 1 MB inline deploy bound.");
-    let content: string;
-    try { content = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead)); }
-    catch { fail("Source is not valid UTF-8. Native binary upload is not supported."); }
-    return { source: resolved, content };
+    if (bytesRead > limit) fail(`Source exceeds the ${limit}-byte limit.`);
+    return { source: resolved, content: buffer.subarray(0, bytesRead) };
   } finally { await input.close(); }
 }

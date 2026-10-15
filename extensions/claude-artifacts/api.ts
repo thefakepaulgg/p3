@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { fail, freshAccessToken } from "./auth.ts";
-import { localText, saveResponse } from "./files.ts";
+import { localFile, saveResponse } from "./files.ts";
 
 const UUID = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 export const artifactId = UUID.describe("Exact artifact UUID (slug) returned by list_artifacts; short share IDs are not supported.");
@@ -119,7 +119,7 @@ export async function readFile(slug: string, path: string) {
   const contentType = selected.contentType ?? response.headers.get("content-type")?.split(";")[0] ?? "";
   if (!/^(text\/|application\/(json|javascript|xml|xhtml\+xml)|image\/svg\+xml)/.test(contentType)) {
     await response.body?.cancel();
-    fail("Binary file content is not returned by this text-only bridge.");
+    fail("Binary content is not returned by read_file; use download_file.");
   }
   const content = (await bytes(response, MAX_RESULT_BYTES)).toString("utf8");
   if (content.split("\n").length > 2000) fail("File exceeds the 2,000-line read limit; no content returned.");
@@ -153,22 +153,27 @@ export async function downloadFile(slug: string, path: string, destination: stri
 }
 
 export const diskFileInput = z.object({ path: z.string().max(1024),
-  source: z.string().describe("Explicit absolute path to a local UTF-8 text file (not a symlink); never a secret or credential file"),
+  source: z.string().describe("Explicit absolute path to a local supporting file (not a symlink); never a secret or credential file"),
   contentType: z.string().max(255).optional() });
 
 export async function writeFilesFromDisk(slug: string, baseVersion: string, sourceRoot: string, files: z.infer<typeof diskFileInput>[]) {
-  if (files.length === 0 || files.length > 25) fail("Provide 1-25 files.");
-  const loaded = [];
-  for (const file of files) loaded.push({ ...file, ...await localText(file.source, sourceRoot, MAX_REQUEST_BYTES) });
-  return { ...await deployFiles(slug, baseVersion, loaded, MAX_REQUEST_BYTES), sources: loaded.map(({ path, source }) => ({ path, source })) };
+  if (files.length === 0 || files.length > MAX_WRITE_FILES) fail(`Provide 1-${MAX_WRITE_FILES} files.`);
+  return deployFiles(slug, baseVersion, files, MAX_REQUEST_BYTES, sourceRoot);
 }
 
-// Native text MIME set (Claude Code `ige`); text content is sent inline unchanged, binary is not supported here.
+// Native Claude Code `ige` and `Tn`: text goes unchanged, other allowed types use base64 content (no encoding field).
 const TEXT_TYPES = new Set(["text/html", "text/css", "text/plain", "text/markdown", "text/csv", "text/javascript",
   "application/javascript", "application/json", "application/manifest+json", "application/xml", "text/xml",
   "image/svg+xml"]);
+const BINARY_TYPES = new Set(["application/wasm", "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+  "image/x-icon", "image/vnd.microsoft.icon", "font/woff", "font/woff2", "font/ttf", "font/otf",
+  "application/font-woff", "application/font-woff2", "audio/mpeg", "audio/ogg", "audio/wav", "audio/webm",
+  "video/mp4", "video/webm", "video/ogg", "application/pdf"]);
 const MAX_WRITE_FILES = 25;
-const MAX_REQUEST_BYTES = 1_000_000; // Everything goes inline in one deploy request; no upload staging.
+const MAX_REQUEST_BYTES = 1_000_000; // Existing text-only bridge bound.
+const MAX_BINARY_BYTES = 15 * 1024 * 1024; // Native raw binary per-file limit (`atr`).
+const MAX_DISK_REQUEST_BYTES = 20 * 1024 * 1024; // Native serialized request limit (`ir`), including base64.
+
 export const writeFileInput = z.object({
   path: z.string().max(1024).describe("Supporting-file path; existing paths are edited, new paths are added"),
   content: z.string().describe("Full UTF-8 text content for this file (max 100 KB)"),
@@ -184,7 +189,8 @@ export async function writeFiles(slug: string, baseVersion: string, files: z.inf
   return deployFiles(slug, baseVersion, files, MAX_RESULT_BYTES);
 }
 
-async function deployFiles(slug: string, baseVersion: string, files: z.infer<typeof writeFileInput>[], perFileLimit: number) {
+async function deployFiles(slug: string, baseVersion: string,
+  files: (z.infer<typeof writeFileInput> | z.infer<typeof diskFileInput>)[], perFileLimit: number, sourceRoot?: string) {
   parse(UUID, slug);
   if (!version.safeParse(baseVersion).success) fail("Invalid base_version.");
   if (files.length === 0 || files.length > MAX_WRITE_FILES) fail(`Provide 1-${MAX_WRITE_FILES} files.`);
@@ -195,7 +201,7 @@ async function deployFiles(slug: string, baseVersion: string, files: z.infer<typ
     if (entry.path === "index.html") fail("index.html is the artifact's page and cannot be changed by write_files.");
     if (seen.has(entry.path)) fail(`${entry.path} is listed more than once.`);
     seen.add(entry.path);
-    if (Buffer.byteLength(entry.content, "utf8") > perFileLimit) fail(`${entry.path} exceeds the ${perFileLimit}-byte per-file limit.`);
+
   }
   const data = await boot(slug);
   if (data.ver !== baseVersion) fail(`base_version ${baseVersion} is stale; the artifact is at ${data.ver}. ` +
@@ -203,21 +209,41 @@ async function deployFiles(slug: string, baseVersion: string, files: z.infer<typ
   if (data.title === undefined) fail("Could not determine the artifact's current title; nothing was sent.");
   const current = new Map(data.files.map((entry) => [entry.path, entry]));
   const manifest: Record<string, { content: string; contentType: string; ifMatch: string | null }> = Object.create(null);
+  const sources: { path: string; source: string }[] = [];
   for (const entry of files) {
     const existing = current.get(entry.path);
     const contentType = entry.contentType ?? existing?.contentType;
     if (contentType === undefined) fail(`${entry.path} is a new file or has no listed type; provide contentType.`);
-    if (!TEXT_TYPES.has(contentType)) fail(`${entry.path}: contentType ${contentType} is not a supported text type.`);
-    const sha256 = createHash("sha256").update(entry.content, "utf8").digest("hex");
+    const binary = BINARY_TYPES.has(contentType);
+    if (!TEXT_TYPES.has(contentType) && !(sourceRoot !== undefined && binary))
+      fail(`${entry.path}: contentType ${contentType} is not supported by this write tool.`);
+    let content: string;
+    let raw: Buffer;
+    if ("source" in entry && sourceRoot !== undefined) {
+      const loaded = await localFile(entry.source, sourceRoot, binary ? MAX_BINARY_BYTES : perFileLimit);
+      raw = loaded.content;
+      sources.push({ path: entry.path, source: loaded.source });
+      if (binary) content = raw.toString("base64");
+      else {
+        try { content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw); }
+        catch { fail(`${entry.path}: source is not valid UTF-8; choose an allowed binary contentType for binary files.`); }
+      }
+    } else if ("content" in entry) {
+      content = entry.content;
+      raw = Buffer.from(content, "utf8");
+      if (raw.length > perFileLimit) fail(`${entry.path} exceeds the ${perFileLimit}-byte per-file limit.`);
+    } else fail("Disk sources require source_root.");
+    const sha256 = createHash("sha256").update(raw).digest("hex");
     if (existing && !existing.sha256) fail(`${entry.path} has no listed sha256 to guard the edit; nothing was sent.`);
     if (existing?.sha256 === sha256 && existing.contentType === contentType) continue; // unchanged: skip, like native
-    manifest[entry.path] = { content: entry.content, contentType, ifMatch: existing?.sha256 ?? null };
+    manifest[entry.path] = { content, contentType, ifMatch: existing?.sha256 ?? null };
   }
   const changed = Object.keys(manifest);
-  if (changed.length === 0) return { slug, version: data.ver, ...viewer(data), changed, unchanged: true };
+  if (changed.length === 0) return { slug, version: data.ver, ...viewer(data), changed, unchanged: true, ...(sourceRoot !== undefined ? { sources } : {}) };
   const body = JSON.stringify({ slug, title: data.title, ...(data.favicon ? { favicon: data.favicon } : {}),
     baseVersion, mode: "patch", manifest });
-  if (Buffer.byteLength(body, "utf8") > MAX_REQUEST_BYTES) fail("Update exceeds the 1 MB inline request limit; send fewer files.");
+  const requestLimit = sourceRoot !== undefined ? MAX_DISK_REQUEST_BYTES : MAX_REQUEST_BYTES;
+  if (Buffer.byteLength(body, "utf8") > requestLimit) fail(`Update exceeds the ${requestLimit}-byte serialized request limit; send fewer or smaller files.`);
 
   const unknown = "The update status is unknown: it may or may not have been applied. " +
     "Re-read the artifact with list_files before retrying; do not resend blindly.";
@@ -248,7 +274,7 @@ async function deployFiles(slug: string, baseVersion: string, files: z.infer<typ
   const deployed = deployedSchema.safeParse(reply);
   if (!deployed.success || deployed.data.slug !== slug)
     fail("The server accepted the request but its reply was malformed, so the update may have succeeded. Re-read the artifact with list_files to verify.");
-  return { slug, version: deployed.data.version, ...await mutationViewer(slug, { viewerPath: deployed.data.viewerPath ?? data.viewerPath }), changed };
+  return { slug, version: deployed.data.version, ...await mutationViewer(slug, { viewerPath: deployed.data.viewerPath ?? data.viewerPath }), changed, ...(sourceRoot !== undefined ? { sources } : {}) };
 }
 
 const typesSchema = z.object({ types: z.array(z.object({ slug: UUID, title: z.string().max(1024).optional(),
