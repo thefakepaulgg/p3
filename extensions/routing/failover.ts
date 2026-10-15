@@ -6,7 +6,8 @@ import { estimateTokens, getAgentDir, VIRTUAL_MODEL_STATE_ENTRY, type ExtensionA
 import { clampThinkingLevel, fallbackChains, routes, type RouteName, type ThinkingLevel } from "./policy.ts";
 
 const wrapperProvider = "p3-failover";
-const allowedProviders = new Set(["anthropic", "openai-codex"]);
+const anthropicApiProvider = "anthropic-api";
+const allowedProviders = new Set(["anthropic", anthropicApiProvider, "openai-codex"]);
 const cooldownCap = 60 * 60 * 1000;
 type LimitReason = "quota" | "usage-limit" | "rate-limit" | "overload";
 type PhysicalRoute = { provider: string; model: string; thinkingLevel: ThinkingLevel };
@@ -16,7 +17,6 @@ export interface FailoverState {
   selected: PhysicalRoute;
   preferred?: PhysicalRoute;
   triedProviders: string[];
-  failover?: PhysicalRoute;
   switchReason?: string;
 }
 
@@ -94,7 +94,7 @@ function limitReason(message: AssistantMessage): LimitReason | undefined {
   if (message.provider === "openai-codex" && /usage_limit_reached|usage_not_included|subscription_sharing_usage_limit_exceeded|monthly usage limit reached|(?:quota|usage limit) (?:exceeded|reached)|insufficient_quota|out of budget/i.test(text)) return "quota";
   // Codex also uses this phrase for transient 429s; it does not prove quota exhaustion.
   if (message.provider === "openai-codex" && /you have hit your ChatGPT usage limit/i.test(text)) return "usage-limit";
-  if (message.provider === "anthropic" && /(?:usage|spend|credit) (?:limit|balance).{0,40}(?:reached|exceeded|exhausted|too low)|(?:exceed(?:ed)?|reached).{0,60}(?:usage|spend) limits?|credit balance is too low|insufficient (?:credits|quota)|usage_limit_reached/i.test(text)) return "quota";
+  if ((message.provider === "anthropic" || message.provider === anthropicApiProvider) && /(?:usage|spend|credit) (?:limit|balance).{0,40}(?:reached|exceeded|exhausted|too low)|(?:exceed(?:ed)?|reached).{0,60}(?:usage|spend) limits?|credit balance is too low|insufficient[_ ](?:credits|quota)|usage_limit_reached/i.test(text)) return "quota";
   if (/rate_limit(?:_error|_exceeded)?|rate[ -]limit(?:ed|ing)?|too many requests|(?:HTTP|status(?: code)?)\s*[:=]?\s*429\b|^429\s*[:{]/i.test(text)) return "rate-limit";
   if (/overloaded_error|\boverloaded\b|(?:HTTP|status(?: code)?)\s*[:=]?\s*(?:503|529)\b/i.test(text)) return "overload";
   return undefined;
@@ -121,7 +121,9 @@ function assignmentId(ctx: ExtensionContext): string | null {
 }
 
 function routeName(physical: PhysicalRoute): RouteName | undefined {
-  return (Object.keys(routes) as RouteName[]).find(name => routes[name].provider === physical.provider && routes[name].model === physical.model);
+  return (Object.keys(routes) as RouteName[]).find(name => routes[name].model === physical.model
+    && (routes[name].provider === physical.provider
+      || (routes[name].provider === "anthropic" && physical.provider === anthropicApiProvider)));
 }
 
 function physical(route: ModelRoute): PhysicalRoute {
@@ -134,7 +136,8 @@ async function eligible(model: Model<Api>, messages: readonly Message[], ctx: Ex
     && message.content.some((block: unknown) => typeof block === "object" && block !== null && "type" in block && block.type === "image"))) return false;
   const tokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0);
   if (model.contextWindow <= 0 || tokens + model.maxTokens >= model.contextWindow) return false;
-  return (await ctx.modelRegistry.getApiKeyAndHeaders(model)).ok;
+  if (model.provider === "anthropic" && !ctx.modelRegistry.isUsingOAuth(model)) return false;
+  return ctx.modelRegistry.hasConfiguredAuth(model) && (await ctx.modelRegistry.getApiKeyAndHeaders(model)).ok;
 }
 
 async function replacement(selected: PhysicalRoute, tried: readonly string[], messages: readonly Message[], ctx: ExtensionContext): Promise<ModelRoute | undefined> {
@@ -142,10 +145,13 @@ async function replacement(selected: PhysicalRoute, tried: readonly string[], me
   if (!name) return undefined;
   for (const candidate of fallbackChains[name]) {
     const spec = routes[candidate];
-    if (!allowedProviders.has(spec.provider) || tried.includes(spec.provider) || providerIsCoolingDown(spec.provider)) continue;
-    const model = ctx.modelRegistry.find(spec.provider, spec.model);
-    if (model && await eligible(model, messages, ctx)) {
-      return { model, thinkingLevel: clampThinkingLevel(selected.thinkingLevel) };
+    const providers = spec.provider === "anthropic" ? ["anthropic", anthropicApiProvider] : [spec.provider];
+    for (const provider of providers) {
+      if (!allowedProviders.has(provider) || tried.includes(provider) || providerIsCoolingDown(provider)) continue;
+      const model = ctx.modelRegistry.find(provider, spec.model);
+      if (model && await eligible(model, messages, ctx)) {
+        return { model, thinkingLevel: clampThinkingLevel(selected.thinkingLevel) };
+      }
     }
   }
   return undefined;
@@ -154,7 +160,7 @@ async function replacement(selected: PhysicalRoute, tried: readonly string[], me
 function switched(state: FailoverState, route: ModelRoute, reason: string, ctx: ExtensionContext): FailoverState {
   const target = physical(route);
   ctx.ui.notify(`Automatic provider failover: ${state.selected.provider}/${state.selected.model} (${reason}) → ${target.provider}/${target.model}.`, "warning");
-  return { ...state, selected: target, failover: target, triedProviders: [...new Set([...state.triedProviders, target.provider])], switchReason: reason };
+  return { ...state, selected: target, triedProviders: [...new Set([...state.triedProviders, target.provider])], switchReason: reason };
 }
 
 function observeFailure(message: AssistantMessage, ctx: ExtensionContext): LimitReason | undefined {
@@ -196,7 +202,7 @@ export async function routeWithFailover(
     }
   } else if (request.reason === "retry" && request.failed) {
     // Rate limits, ambiguous Codex usage errors and overloads retain the core retry budget.
-    if (failedReason === "quota" && !state.failover && request.failed.model.provider === state.selected.provider
+    if (failedReason === "quota" && request.failed.model.provider === state.selected.provider
       && request.failed.model.id === state.selected.model) {
       const fallback = await replacement(state.selected, state.triedProviders, request.messages, ctx);
       if (fallback) state = switched(state, fallback, failedReason, ctx);
@@ -211,6 +217,16 @@ export async function routeWithFailover(
 }
 
 export function registerFailoverModels(pi: ExtensionAPI): void {
+  pi.on("session_start", (_event, ctx) => {
+    const models = ctx.modelRegistry.getAll().filter(model => model.provider === "anthropic");
+    pi.registerProvider(anthropicApiProvider, {
+      name: "Anthropic API key",
+      baseUrl: "https://api.anthropic.com",
+      api: "anthropic-messages",
+      apiKey: "$ANTHROPIC_API_KEY",
+      models: models.map(({ provider, ...model }) => model),
+    });
+  });
   for (const name of Object.keys(routes) as RouteName[]) {
     pi.registerVirtualModel<FailoverState>({
       provider: wrapperProvider, id: name, name: `${routes[name].label} (automatic failover)`,
@@ -243,7 +259,7 @@ export function registerFailoverModels(pi: ExtensionAPI): void {
     const failure = projected?.messages.slice().reverse().find(message => message.role === "assistant");
     if (!projected || failure?.role !== "assistant" || failure.provider !== state.selected.provider || failure.model !== state.selected.model) return;
     const reason = observeFailure(failure, ctx);
-    if (!reason || state.failover) return;
+    if (!reason) return;
     // Only omit the failed assistant, never its user request or any completed tool results.
     if (projected.sourceEntry.type !== "message" || projected.messages.length !== 1) return;
     const remaining = event.context.contextEntries.filter(item => item.sourceEntry.id !== projected.sourceEntry.id).flatMap(item => item.messages);
