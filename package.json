@@ -8,6 +8,7 @@
   "repository": "github:therealpaulgg/p3",
   "files": [
     "extensions",
+    "skills",
     "themes",
     "workflows",
     "scripts/pi-telegram-notify"
@@ -30,6 +31,9 @@
     ],
     "themes": [
       "./themes"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {
