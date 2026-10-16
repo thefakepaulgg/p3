@@ -35,6 +35,19 @@ install -m 700 scripts/pi-telegram-notify ~/.local/bin/pi-telegram-notify
 
 Telegram replies default to off. Run `/notify replies-on` or `/notify replies-off` to control them independently from notifications. When enabled in a private chat with the bot, reply to a notification within one hour to send that reply back to the Pi session that produced it. Replies must come from the user represented by the configured private chat ID; Telegram input is passed to Pi as literal text without slash-command or prompt-template expansion. The extension remains disabled when the helper is unavailable.
 
+## Background bash
+
+In the interactive TUI, p3 replaces the built-in `bash` tool. A command that finishes within 10 seconds returns exactly the built-in result (same text, renderer, and `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }` value). A command still running after 10 seconds keeps running in the Pi process and the tool returns immediately with `{ status: "running", job_id, output, truncated, full_output_path?, wall_time_seconds }` and no `exit_code`, so the agent is free to chat. When the job ends, one `bash-job-complete` message with the exit code (or failure/timeout reason) and the built-in-bounded output (last 2000 lines or 50KB, with a full-output path when truncated) is delivered as a steer and starts a turn if the agent is idle. `bash_job` reads a job's current status and output, or stops it.
+
+- `timeout` keeps its built-in meaning: it kills the command, also after the handoff. The 10-second yield is separate and fixed.
+- Execution reuses Pi's own bash factory with the configured `shellPath` and `shellCommandPrefix`, so session tool guards, `PI_*` variables, process-tree killing, and output truncation are unchanged.
+- Aborting the turn during the first 10 seconds kills the command. After the handoff, turn completion and Escape leave it running; `bash_job` stop, reload, quit, and new/resume/fork session switches kill it, and no completion is delivered for killed jobs or into a later session.
+- The completion message is a custom message, not a tool result: `tool_result` hooks do not see it. p3 applies its advisor secret filter to it instead. `bash_job` output is an ordinary tool result.
+- Programmatic callers such as codemode receive the running value instead of awaiting completion. Keep dependent steps in one command (`build && test`).
+- Print, JSON, and RPC modes keep the built-in synchronous `bash`, because nothing guarantees the process stays alive to deliver a completion.
+- If another extension or SDK tool already provides `bash` (for example a sandbox or remote backend), p3 leaves it in place and shows a warning. p3 checks at `session_start`, after every extension has loaded, so load-time `bash` registrations in any order are detected. A `bash` registered later at runtime by an extension loaded after p3, or an SDK `baseToolsOverride` (reported as built-in), is not detected and would be displaced.
+- Jobs are in memory only. They do not survive a Pi crash or restart, and user `!` shell commands are unaffected.
+
 ## Delegation evidence and recovery
 
 Routed workers now record Pi's settled execution outcome against an exact assignment, request, session, and terminal identity. Idle state or partial assistant text is not success. Successful results are persisted with SHA-256 checksums under `~/.pi/agent/state/routed-assignments/` (or the resolved `PI_CODING_AGENT_DIR`). The workflow engine uses the same private atomic artifact writer.

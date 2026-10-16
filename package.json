@@ -17,6 +17,7 @@
     "extensions": [
       "./extensions/advisor.ts",
       "./extensions/agent-grants.ts",
+      "./extensions/bash-background.ts",
       "./extensions/claude-connectors.ts",
       "./extensions/claude-artifacts.ts",
       "./extensions/github-pr-watch.ts",
