@@ -214,3 +214,14 @@ test("session drift refuses parent control", async () => {
   expect(live!.child.exitCode).toBeNull();
   expect(readAttachmentRecord(record.attachmentId)?.status).toBe("open");
 });
+
+test("a suspended worker opens its saved native conversation without replaying a prompt", async () => {
+  const { task, sessionPath, ctx, pi } = await fixture();
+  task.state = "suspended"; task.presence = "lost"; task.paneClosedAt = undefined; task.completionNotifiedAt = undefined;
+  const before = readFileSync(sessionPath);
+  const opened = await openSavedAttachment(pi, ctx, task);
+  expect(opened.record?.sessionPath).toBe(realpathSync(sessionPath));
+  expect(readFileSync(sessionPath).equals(before)).toBe(true);
+  expect(calls.some(args => args[0] === "agent" && args[1] === "prompt")).toBe(false);
+  await closeAttachment(pi, ctx, opened.record!.attachmentId);
+});

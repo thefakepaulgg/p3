@@ -1224,3 +1224,25 @@ for (const scenario of [
     expect(title.includes("missing")).toBe(scenario.missing);
   } finally { await handlers.get("session_shutdown")?.(); delete process.env.PI_ROUTING_MANIFEST; restore(); }
 });
+
+test("unknown startup orphan can be stopped and cleared without contacting a missing agent", async () => {
+  const restore = herdrEnv(); const lifecycle = new Map<string, Function>(); const tools: any[] = []; const calls: string[][] = [];
+  const tracked = { handle: "rt-startup-orphan", assignmentId: randomUUID(), requestId: "unused", parentSessionId: "session-1", sessionId: randomUUID(),
+    agentName: "missing-startup", paneId: "w1:p9", route: "sol", model: "model", state: "unknown", label: "Startup orphan", startedAt: 1,
+    capabilities: [], transitions: 0, notifiedStates: [] };
+  const ctx = uiCtx(); ctx.sessionManager = sessionManager([{ type: "custom", customType: "routed-task", data: tracked }]);
+  const fake: any = { registerVirtualModel: () => {}, registerTool: (tool: any) => tools.push(tool), registerCommand: () => {}, appendEntry: () => {}, sendMessage: () => {},
+    on: (name: string, handler: Function) => lifecycle.set(name, handler), events: { on: () => () => {}, emit: () => {} },
+    exec: async (_: string, args: string[]) => { calls.push(args); return { code: 0, stdout: JSON.stringify({ result: { agents: [], panes: [] } }), stderr: "" }; } };
+  try {
+    routing(fake); await lifecycle.get("session_start")!({}, ctx);
+    const control = tools.find(t => t.name === "subagent_control");
+    calls.length = 0; // Exclude the observer started by session_start; stop must not target the missing alias.
+    const stopped = await control.execute("stop", { action: "stop", handle: tracked.handle }, undefined, undefined, ctx);
+    expect(stopped.isError).not.toBe(true); expect(stopped.content[0].text).toContain("absent");
+    const cleared = await control.execute("clear", { action: "clear", handle: tracked.handle }, undefined, undefined, ctx);
+    expect(cleared.isError).not.toBe(true);
+    expect(calls.some(args => args[0] === "agent" && ["get", "send-keys", "start", "prompt"].includes(args[1]))).toBe(false);
+    expect(calls.some(args => args[0] === "pane" && args[1] === "close")).toBe(false);
+  } finally { await lifecycle.get("session_shutdown")?.(); restore(); }
+});
