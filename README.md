@@ -66,6 +66,8 @@ Selecting a worker in `/subagents`, or pressing Enter on its widget row, opens i
 
 These human-opened sessions preserve the saved model/thinking/working directory and original tool/readonly policy, but are interactive, not read-only viewers. Manual follow-ups append to the conversation without changing the original assignment/result or generating another bounded-worker completion notification. They stay open until you close them. `/subagents close <handle>` closes the reopened session only after checking it is idle with no queued input, modal prompt or unsent editor draft. The widget marks it **Pi open**; secondary controls remain available through the command verbs.
 
+Routed workers and reopened attachments publish their own Pi session identity to Herdr; a separate account-level `herdr integration install pi` is not required for these panes.
+
 A durable canonical-session claim prevents another p3-mediated `open` or bounded `resume` from creating a second writer. Reopening the same owned session focuses the existing instance, including after parent restart. A pane that switches sessions with `/new`, `/resume` or `/fork` is treated as drift; parent controls refuse rather than controlling the wrong conversation. Unknown claims are not stolen. This cannot prevent manually running another Pi outside p3. New usage is recorded in separate byte windows starting at open, without charging historical turns again.
 
 There is no total subagent count cap. Declared path ownership, dependencies and session identity checks still apply. Routed tabs keep at most four panes each for layout, then overflow into additional tabs; that is not a concurrency limit.

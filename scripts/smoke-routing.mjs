@@ -107,7 +107,7 @@ for (const module of ["node:http", "node:https"]) { const api = require(module);
       extensions: [join(source, "extensions", "model-routing.ts"), join(source, "scripts", "smoke-routing-provider.ts")],
     }), { mode: 0o600 });
     await writeFile(join(env.HOME, ".zshrc"), `export PATH=${quote([env.PATH])}\n`);
-    await run("herdr", ["integration", "install", "pi"], env);
+    // Deliberately omit Herdr's optional account-level Pi integration: routed panes must publish their own identity.
     const clear = Object.keys(process.env).filter((key) => secret(key) || /^PI_ROUT(ED|ING)_|^PI_SUBAGENT_/.test(key)).flatMap((key) => ["--env", `${key}=`]);
     const overrides = ["HOME", "ZDOTDIR", "NODE_OPTIONS", "P3_SMOKE_ROOT", "HERDR_CONFIG_PATH", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "TMPDIR", "PI_OFFLINE"].flatMap((key) => ["--env", `${key}=${env[key]}`]);
     const host = await herdr(["tab", "create", "--workspace", process.env.HERDR_WORKSPACE_ID, "--cwd", cwd, "--label", name, "--no-focus", ...overrides, ...clear], process.env);
