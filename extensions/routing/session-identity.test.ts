@@ -18,7 +18,8 @@ test("a routed worker publishes its own identity over Herdr's socket without the
     let input = ""; client.setEncoding("utf8"); client.on("data", chunk => {
       input += chunk; if (!input.includes("\n")) return;
       const request = JSON.parse(input.slice(0, input.indexOf("\n"))); requests.push(request);
-      if (request.method === "pane.report_agent_session") agent.agent_session = { value: request.params.agent_session_path };
+      // Real Herdr requires lifecycle authority as well as a session reference.
+      if (request.method === "pane.report_agent") agent.agent_session = { value: request.params.agent_session_path };
       client.end(JSON.stringify({ id: request.id, result: { ok: true } }) + "\n");
     });
   });
@@ -27,7 +28,7 @@ test("a routed worker publishes its own identity over Herdr's socket without the
   const handlers = new Map<string, Function>();
   const pi: any = { on: (event: string, handler: Function) => handlers.set(event, handler) };
   let savedPath: string | undefined;
-  const ctx: any = { mode: "tui", sessionManager: { getSessionFile: () => savedPath } };
+  const ctx: any = { mode: "tui", isIdle: () => true, sessionManager: { getSessionFile: () => savedPath } };
   const task: any = { paneId: "w1:p2", terminalId: "terminal", sessionId: "owned-session" };
   try {
     registerRoutedSessionIdentity(pi);
@@ -39,12 +40,12 @@ test("a routed worker publishes its own identity over Herdr's socket without the
     expect(() => verifyTaskAgent(task, agent)).not.toThrow();
     expect(requests[0].method).toBe("pane.report_agent_session");
     expect(requests[0].params).toMatchObject({ pane_id: "w1:p2", source: "p3:routed-session", agent: "pi", agent_session_path: path });
-    expect(requests.every(r => r.method === "pane.report_agent_session")).toBe(true); // No prompt, tool or settings mutation.
+    expect(requests.every(r => ["pane.report_agent_session", "pane.report_agent"].includes(r.method))).toBe(true); // No prompt, tool or settings mutation.
     const next = join(root, "new.jsonl"); writeFileSync(next, JSON.stringify({ type: "session", id: "different" }) + "\n"); savedPath = next;
     await handlers.get("session_start")!({ reason: "new" }, ctx);
-    expect(requests[1].params.session_start_source).toBe("new");
-    expect(requests[1].params.seq).toBeGreaterThan(requests[0].params.seq);
+    expect(requests[2].params.session_start_source).toBe("new");
+    expect(requests[2].params.seq).toBeGreaterThan(requests[1].params.seq);
     expect(() => verifyTaskAgent(task, agent)).toThrow("session identity"); // Real drift is still refused.
-    ctx.mode = "rpc"; await handlers.get("agent_start")!({}, ctx); expect(requests).toHaveLength(2);
+    ctx.mode = "rpc"; await handlers.get("agent_start")!({}, ctx); expect(requests).toHaveLength(4);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); }
 });
