@@ -241,7 +241,7 @@ export function herdrSocketRequestForArgs(args: string[]): HerdrSocketRequest {
     case "pane split": return { method: "pane.split", params: { target_pane_id: option(args, "--pane"), direction: option(args, "--direction"), cwd: option(args, "--cwd"), focus: !args.includes("--no-focus"), env: envOptions(args) } };
     case "pane close": return { method: "pane.close", params: { pane_id: target } };
     case "pane report-agent-session": return { method: "pane.report_agent_session", params: {
-      pane_id: target, source: option(args, "--source"), agent: option(args, "--agent"),
+      pane_id: target, source: option(args, "--source"), agent: option(args, "--agent"), seq: Number(option(args, "--seq")),
       agent_session_path: option(args, "--agent-session-path"), session_start_source: option(args, "--session-start-source"),
     } };
     case "pane report-metadata": return {
