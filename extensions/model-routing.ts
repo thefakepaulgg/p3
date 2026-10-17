@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { classifyDelegation, classifyModelRoute, planFallback, routes, selectEligibleRoute, clampThinkingLevel, routeTier, type CapabilityTier, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./routing/policy.ts";
 import { availableTaskActions, buildCompletionMessage, canDeliverCompletion, boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, resetCompletionDelivery, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
-import { parseJson, proveTaskAbsent, readHerdrResult, runHerdr, verifyTaskAgent, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
+import { parseJson, proveTaskAbsent, recoverAbsentTask, readHerdrResult, runHerdr, verifyTaskAgent, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
 import { pathForResultRef, askPathForAssignment, readAssignmentReceipt, readAssignmentResult, writeCancellationIntent } from "./routing/artifacts.ts";
 import { readAssignmentAsk, readPendingAssignmentAsk, writeAssignmentReply, cancelAssignmentAsk, type AssignmentAsk } from "./routing/questions.ts";
 import { orchestrationError, orchestrationErrorResult } from "./routing/errors.ts";
@@ -541,7 +541,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   };
 
   const openRoutedSession = async (task: TaskHandle, ctx: ExtensionContext) => {
-    const opened = await withTaskControl(task, () => openSavedAttachment(pi, ctx, task, taskHandles.values(), manifestPath));
+    const opened = await withTaskControl(task, async () => {
+      const recovered = isActiveTask(task) ? await recoverAbsentTask(pi, task) : undefined;
+      if (recovered) updateTask(task, recovered);
+      return openSavedAttachment(pi, ctx, task, taskHandles.values(), manifestPath);
+    });
     syncManifest(); refreshWidget();
     return opened;
   };
@@ -596,7 +600,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       updateTask(task, { presence: "live" }, false);
       return agent.agent_status;
     } catch (error) {
-      updateTask(task, { presence: "unknown", error: error instanceof Error ? error.message : String(error) });
+      const recovered = isActiveTask(task) || task.state === "failed" ? await recoverAbsentTask(pi, task) : undefined;
+      if (recovered) updateTask(task, recovered);
+      else if (task.state !== "suspended") updateTask(task, { presence: "unknown", error: error instanceof Error ? error.message : String(error) });
       return undefined;
     }
   };
@@ -613,6 +619,13 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   };
 
   const stopRoutedTask = async (task: TaskHandle, closePane = false): Promise<string> => {
+    const recovered = isActiveTask(task) || task.state === "suspended" ? await recoverAbsentTask(pi, task) : undefined;
+    if (recovered) {
+      watchers.get(task.handle)?.abort();
+      updateTask(task, { ...recovered, state: "stopped", pendingAskId: undefined, pendingCompletion: false, endedAt: Date.now() });
+      if (task.assignmentId && readPendingAssignmentAsk(task.assignmentId)) cancelAssignmentAsk(task.assignmentId);
+      return `Stopped absent subagent ${task.handle}; saved history remains and no physical resources were removed`;
+    }
     if (task.state === "lost") {
       if (!await proveTaskAbsent(pi, task)) throw new Error("Original session is now present or moved; inspect before abandoning it");
       const receipt = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;

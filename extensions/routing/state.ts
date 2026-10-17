@@ -3,7 +3,7 @@ import type { TaskPhase } from "./workflow.ts";
 import { formatEstimatedCost } from "./usage.ts";
 
 /** interrupted: the user pressed Esc in the pane mid-task; the agent is idle but the task is unfinished and still watched. */
-export type TaskState = "queued" | "running" | "blocked" | "interrupted" | "unknown" | "lost" | "completed" | "failed" | "stopped" | "abandoned";
+export type TaskState = "queued" | "running" | "blocked" | "interrupted" | "unknown" | "lost" | "suspended" | "completed" | "failed" | "stopped" | "abandoned";
 
 /** Bounded correlation metadata supplied by workflow callers over routing RPC. */
 export type TaskOwner = { kind: "workflow"; runId: string; stepId: string; attemptId: string }
@@ -215,6 +215,7 @@ export function availableTaskActions(task: TaskHandle): string[] {
   if (task.resultHash || task.result !== undefined) actions.push("result");
   const canResume = !isActiveTask(task) && !task.pendingCompletion && !task.pendingAskId && !!task.sessionPath && !!task.sessionId && !!task.capabilities;
   if (canResume && (task.paneClosedAt || task.presence === "lost")) actions.push("open", "resume");
+  if (task.state === "suspended") return [...actions, "clear"];
   if (task.presence === "unknown" || task.state === "unknown") return actions;
   if (task.state === "lost") return [...actions, "stop"];
   if (task.presence === "lost") return [...actions, "clear"];
@@ -229,6 +230,7 @@ export function availableTaskActions(task: TaskHandle): string[] {
 }
 
 export function taskNextAction(task: TaskHandle): string {
+  if (task.state === "suspended") return "Executor exited; open the saved conversation or resume with explicit follow-up direction. No task or tool replay was started.";
   if (task.presence === "unknown" || task.state === "unknown") return "Identity or runtime evidence is unverified; inspect status before any mutation. Do not replace or replay work.";
   if (task.state === "lost") return "The exact executor is absent. Inspect its saved session/external effects; use stop only to explicitly abandon this unresolved assignment. No replacement was started.";
   if (task.presence === "lost") return "The assignment was abandoned; saved session evidence remains. No physical resources were removed or external effects rolled back.";
@@ -247,7 +249,7 @@ export const WIDGET_MAX_ROWS = 4;
 export const WIDGET_RECENT_WINDOW_MS = 30 * 60_000;
 
 const STATE_MARKER: Record<TaskState, string> = {
-  queued: "○", running: "●", blocked: "◆", interrupted: "‖", unknown: "?", lost: "?", completed: "✓", failed: "×", stopped: "−", abandoned: "?",
+  queued: "○", running: "●", blocked: "◆", interrupted: "‖", unknown: "?", lost: "?", suspended: "‖", completed: "✓", failed: "×", stopped: "−", abandoned: "?",
 };
 
 export function formatElapsed(ms: number): string {
@@ -277,6 +279,7 @@ export function formatTaskRow(task: TaskWidgetItem, now: number): string {
   if (task.background && isActiveTask(task)) parts.push("background");
   if (task.state === "blocked") parts.push("needs input");
   else if (task.state === "interrupted") parts.push("interrupted");
+  else if (task.state === "suspended") parts.push("saved · resume available");
   else if (task.state === "failed" || task.state === "abandoned") parts.push(task.state);
   else if (task.paneClosedAt) parts.push("closed");
   return truncate(parts.join(" · "), 120);
@@ -286,7 +289,7 @@ export function taskWidgetItems(tasks: Iterable<TaskWidgetItem>, now = Date.now(
   const items = [...tasks].filter((task) => !task.clearedAt);
   const active = items.filter(isActiveTask).sort((a, b) => a.startedAt - b.startedAt);
   const recent = items
-    .filter((task) => !isActiveTask(task) && now - (task.endedAt ?? task.startedAt) <= WIDGET_RECENT_WINDOW_MS)
+    .filter((task) => !isActiveTask(task) && (task.state === "suspended" || now - (task.endedAt ?? task.startedAt) <= WIDGET_RECENT_WINDOW_MS))
     .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt));
   return [...active, ...recent].slice(0, Math.max(1, maxRows));
 }
@@ -296,7 +299,7 @@ export function formatTaskWidget(tasks: Iterable<TaskWidgetItem>, now = Date.now
   const items = [...tasks].filter((task) => !task.clearedAt);
   const active = items.filter(isActiveTask).sort((a, b) => a.startedAt - b.startedAt);
   const recent = items
-    .filter((task) => !isActiveTask(task) && now - (task.endedAt ?? task.startedAt) <= WIDGET_RECENT_WINDOW_MS)
+    .filter((task) => !isActiveTask(task) && (task.state === "suspended" || now - (task.endedAt ?? task.startedAt) <= WIDGET_RECENT_WINDOW_MS))
     .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt));
   if (!active.length && !recent.length) return undefined;
   const shown = taskWidgetItems(items, now, maxRows);

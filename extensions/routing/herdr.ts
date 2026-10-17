@@ -346,6 +346,36 @@ export async function proveTaskAbsent(pi: ExtensionAPI, task: TaskHandle): Promi
   return !agents.some((agent: any) => agent.pane_id === task.paneId || agent.terminal_id === task.terminalId || readHerdrSessionId(agent.agent_session?.value) === task.sessionId);
 }
 
+/** Reconcile only proven-exited executors; registry failure alone never authorizes a second writer. */
+export async function recoverAbsentTask(pi: ExtensionAPI, task: TaskHandle): Promise<Partial<TaskHandle> | undefined> {
+  try {
+    if (!task.paneId || !task.sessionId || !task.assignmentId || task.pendingCompletion) return undefined;
+    const agents = parseJson(await runHerdr(pi, ["agent", "list"], 5000), "recovery inventory")?.result?.agents;
+    if (!Array.isArray(agents) || agents.some((agent: any) => agent.pane_id === task.paneId ||
+      (task.terminalId && agent.terminal_id === task.terminalId) || agent.name === task.agentName ||
+      readHerdrSessionId(agent.agent_session?.value) === task.sessionId || (agent.agent === "pi" && agent.launch_pending))) return undefined;
+    const receipt = readAssignmentReceipt(task.assignmentId);
+    if (receipt) {
+      const failed = task.state === "failed" && receipt.outcome === "error";
+      if ((!failed && !["running", "aborted"].includes(receipt.outcome)) || receipt.requestId !== task.requestId || receipt.generation < (task.minimumGeneration ?? 1)) return undefined;
+      if (receipt.sessionId !== task.sessionId || receipt.paneId !== task.paneId || receipt.terminalId !== task.terminalId ||
+        !Number.isSafeInteger(receipt.workerPid) || receipt.workerPid! <= 0 || readHerdrSessionId(receipt.sessionPath) !== task.sessionId) return undefined;
+      try { process.kill(receipt.workerPid!, 0); return undefined; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return undefined; }
+      if (failed) return { presence: "lost", sessionPath: receipt.sessionPath };
+      return { state: "suspended", presence: "lost", sessionPath: receipt.sessionPath, workerPid: receipt.workerPid,
+        costComplete: false, error: "Executor exited; saved conversation is available for open or explicit resume. No work was replayed." };
+    }
+    // Before interactive readiness there is no worker PID to verify. Only retire the
+    // failed launch once its exact allocated pane is gone; never close a guessed pane.
+    if (task.sessionPath || task.terminalId) return undefined;
+    const panes = parseJson(await runHerdr(pi, ["pane", "list"], 5000), "startup recovery inventory")?.result?.panes;
+    if (!Array.isArray(panes) || panes.some((pane: any) => pane.pane_id === task.paneId)) return undefined;
+    return { state: "failed", presence: "lost", endedAt: Date.now(), costComplete: false,
+      error: "Startup never established a saved worker session and its allocated pane is absent; this failed launch can be cleared." };
+  } catch { return undefined; }
+}
+
 export function watchHerdrTask(options: {
   pi: ExtensionAPI;
   task: TaskHandle;
@@ -426,6 +456,13 @@ export function watchHerdrTask(options: {
         if (!watching()) return;
         const message = error instanceof Error ? error.message : String(error);
         errors++;
+        const recovered = await recoverAbsentTask(pi, task);
+        if (!watching()) return;
+        if (recovered) {
+          update(recovered);
+          notify(recovered.state!, `Subagent ${task.handle}: ${recovered.error}`);
+          return;
+        }
         let lost = false;
         if (/agent_not_found/.test(message)) {
           try {

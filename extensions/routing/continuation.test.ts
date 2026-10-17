@@ -164,8 +164,12 @@ test("dead startup claim is reported as stale and never stolen", async () => {
   expect(called).toBe(false); expect(existsSync(join(lock, "owner.json"))).toBe(true);
   expect(JSON.parse(readFileSync(join(lock, "owner.json"), "utf8"))).toEqual(owner);
 });
-test("continuation creates a new assignment on the same session, preserving profile and isolating usage", async () => {
+for (const afterExecutorLoss of [false, true]) test(`continuation ${afterExecutorLoss ? "after executor loss" : "after completion"} creates a new assignment on the same session, preserving profile and isolating usage`, async () => {
   const { task, ctx, receipt } = fixture(); receipt(await exitedOwnedPid());
+  if (afterExecutorLoss) {
+    task.state = "unknown"; task.completionNotifiedAt = undefined;
+    writeAssignmentReceipt({ ...readAssignmentReceipt(task.assignmentId!)!, outcome: "running" });
+  }
   task.capabilities = ["memory"];
   const original = structuredClone(task); const calls: string[][] = []; const watched: TaskHandle[] = [];
   const tasks = new Map([[task.handle, task]]);
@@ -183,7 +187,10 @@ test("continuation creates a new assignment on the same session, preserving prof
   const boundary = statSync(task.sessionPath!).size;
   const result = await continueRoutedTask(deps, ctx, task, "Follow up only; do not replay the original.");
   const next = result.task!;
-  expect(task).toEqual(original); expect(next.handle).not.toBe(task.handle); expect(next.assignmentId).not.toBe(task.assignmentId);
+  if (afterExecutorLoss) {
+    expect(task.state).toBe("suspended"); expect(task.sessionPath).toBe(original.sessionPath);
+  } else expect(task).toEqual(original);
+  expect(next.handle).not.toBe(task.handle); expect(next.assignmentId).not.toBe(task.assignmentId);
   expect(next.continuedFrom).toBe(task.handle); expect(next.sessionId).toBe(task.sessionId); expect(next.sessionPath).toBe(realpathSync(task.sessionPath!));
   expect(next.cwd).toBe(task.cwd); expect(next.model).toBe(task.model); expect(next.thinking).toBe(task.thinking); expect(next.readonly).toBe(true); expect(next.capabilities).toEqual(["memory"]);
   expect(next.usageStartOffset).toBe(boundary); expect(next.usageOffset).toBe(boundary); expect(next.estimatedCost).toBe(0); expect(next.costComplete).toBe(true);
@@ -208,4 +215,10 @@ test("missing saved model in the registry never selects a substitute", async () 
   const { task, pi, ctx, receipt } = fixture(); receipt(await exitedOwnedPid());
   ctx.modelRegistry.find = () => undefined;
   await expect(validateContinuation(pi, ctx, task, [])).rejects.toThrow("no substitute");
+});
+
+test("a suspended worker resumes the exact saved conversation without requiring stop", async () => {
+  const { task, pi, ctx, receipt } = fixture(); receipt(await exitedOwnedPid());
+  task.state = "suspended"; task.presence = "lost"; task.completionNotifiedAt = undefined;
+  expect((await validateContinuation(pi, ctx, task, [task])).path).toBe(realpathSync(task.sessionPath!));
 });

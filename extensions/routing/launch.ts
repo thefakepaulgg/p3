@@ -2,11 +2,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { classifyDelegation, classifyModelRoute, type CapabilityTier, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./policy.ts";
-import { normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
+import { isActiveTask, normalizeTaskOwner, type TaskHandle, type TaskOwner } from "./state.ts";
 import { prepareEvidence } from "./evidence.ts";
 import { pathForResultRef } from "./artifacts.ts";
 import { classifyRoute, routingClassifierConfig } from "./classifier.ts";
-import { launchHerdrAgent, type HerdrLaunch, type RoutedWorkerCapability } from "./herdr.ts";
+import { recoverAbsentTask, launchHerdrAgent, type HerdrLaunch, type RoutedWorkerCapability } from "./herdr.ts";
 import { validateContinuation, withSessionStartLock } from "./continuation.ts";
 import { orchestrationError, OrchestrationError } from "./errors.ts";
 import { ExplicitRouteRetryGuard, inferPhase, normalizeOwnedPaths, validateWorkflowLaunch, type TaskPhase } from "./workflow.ts";
@@ -169,6 +169,9 @@ export async function launchRoutedTask(deps: LaunchDependencies, ctx: ExtensionC
 export async function continueRoutedTask(deps: LaunchDependencies, ctx: ExtensionContext, previous: TaskHandle, message: string, files?: string[]): Promise<RoutedTaskLaunchResult> {
   if (!message?.trim() || message.length > MAX_TASK_LENGTH) throw new Error("Continuation requires a bounded explicit follow-up instruction");
   const evidence = prepareEvidence(files, ctx.cwd, pathForResultRef);
+  if (previous.parentSessionId !== ctx.sessionManager.getSessionId()) throw new Error("Continuation is limited to this parent's owned session history");
+  const recovered = isActiveTask(previous) ? await recoverAbsentTask(deps.pi, previous) : undefined;
+  if (recovered) { Object.assign(previous, recovered); deps.trackTask(previous); }
   const initial = await validateContinuation(deps.pi, ctx, previous, deps.taskHandles.values());
   return withSessionStartLock(initial.path, async () => {
     const saved = await validateContinuation(deps.pi, ctx, previous, deps.taskHandles.values());
