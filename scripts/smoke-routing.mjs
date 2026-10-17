@@ -222,6 +222,7 @@ for (const module of ["node:http", "node:https"]) { const api = require(module);
     const launch = correlatedResult(history, "subagent");
     assert.ok(launch?.details?.assignmentId, "No actual delegated assignment ID");
     const id = launch.details.assignmentId;
+    assert.ok(!history.some(entry => entry.customType === "routed-task" && entry.data?.assignmentId === id && entry.data.state === "unknown"), "Live worker was falsely marked unknown before completing");
     const directory = join(env.PI_CODING_AGENT_DIR, "state", "routed-assignments", id);
     const receipt = JSON.parse(await readFile(join(directory, "outcome.json"), "utf8"));
     assert.equal(receipt.outcome, "completed");
