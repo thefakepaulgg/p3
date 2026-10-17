@@ -8,7 +8,7 @@ export function registerRoutedSessionIdentity(pi: ExtensionAPI): void {
     const pane = process.env.HERDR_PANE_ID;
     const path = ctx.sessionManager.getSessionFile();
     if (ctx.mode !== "tui" || process.env.HERDR_ENV !== "1" || !pane || !path) return;
-    const identity = [pane, "--source", "p3:routed-session", "--agent", "pi", "--agent-session-path", path];
+    const identity = [pane, "--source", "herdr:pi", "--agent", "pi", "--agent-session-path", path];
     await runHerdr(pi, ["pane", "report-agent-session", ...identity, "--seq", String(++sequence),
       ...(reason ? ["--session-start-source", reason] : [])], 5000);
     // Herdr exposes the session belonging to the current lifecycle authority. A
