@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { registerRoutedSessionIdentity } from "./session-identity.ts";
-import { verifyTaskAgent } from "./herdr.ts";
+import { setHerdrTestTransportForTests, verifyTaskAgent } from "./herdr.ts";
 
 const previous = { HERDR_ENV: process.env.HERDR_ENV, HERDR_PANE_ID: process.env.HERDR_PANE_ID, HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH };
 afterEach(() => { for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
 
 test("a routed worker publishes its own identity over Herdr's socket without the account integration", async () => {
+  setHerdrTestTransportForTests(undefined);
   const root = mkdtempSync(join(tmpdir(), "p3-session-")); const socket = join(root, "herdr.sock"); const path = join(root, "session.jsonl");
   writeFileSync(path, JSON.stringify({ type: "session", version: 3, id: "owned-session", cwd: root }) + "\n");
   const requests: any[] = []; const agent: any = { pane_id: "w1:p2", terminal_id: "terminal" };
