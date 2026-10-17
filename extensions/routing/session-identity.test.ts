@@ -1,12 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { registerRoutedSessionIdentity } from "./session-identity.ts";
 import { setHerdrTestTransportForTests, verifyTaskAgent } from "./herdr.ts";
 
-const previous = { HERDR_ENV: process.env.HERDR_ENV, HERDR_PANE_ID: process.env.HERDR_PANE_ID, HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH };
+const previous = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, HERDR_ENV: process.env.HERDR_ENV, HERDR_PANE_ID: process.env.HERDR_PANE_ID, HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH };
 afterEach(() => { for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
 
 test("a routed worker publishes its own identity over Herdr's socket without the account integration", async () => {
@@ -24,7 +24,7 @@ test("a routed worker publishes its own identity over Herdr's socket without the
     });
   });
   await new Promise<void>(resolve => server.listen(socket, resolve));
-  Object.assign(process.env, { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: socket });
+  Object.assign(process.env, { PI_CODING_AGENT_DIR: root, HERDR_ENV: "1", HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: socket });
   const handlers = new Map<string, Function>();
   const pi: any = { on: (event: string, handler: Function) => handlers.set(event, handler) };
   let savedPath: string | undefined;
@@ -44,8 +44,19 @@ test("a routed worker publishes its own identity over Herdr's socket without the
     const next = join(root, "new.jsonl"); writeFileSync(next, JSON.stringify({ type: "session", id: "different" }) + "\n"); savedPath = next;
     await handlers.get("session_start")!({ reason: "new" }, ctx);
     expect(requests[1].params.session_start_source).toBe("new");
-    expect(requests.every(r => r.params.seq === undefined)).toBe(true); // Do not compete with native lifecycle sequence counters.
+    expect(requests[1].params.seq).toBeGreaterThan(requests[0].params.seq);
     expect(() => verifyTaskAgent(task, agent)).toThrow("session identity"); // Real drift is still refused.
     ctx.mode = "rpc"; await handlers.get("agent_start")!({}, ctx); expect(requests).toHaveLength(2);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("the installed native account integration remains the sole publisher", () => {
+  const root = mkdtempSync(join(tmpdir(), "p3-native-integration-"));
+  try {
+    process.env.PI_CODING_AGENT_DIR = root;
+    mkdirSync(join(root, "extensions")); writeFileSync(join(root, "extensions", "herdr-agent-state.ts"), "");
+    let hooks = 0; registerRoutedSessionIdentity({ on: () => { hooks++; } } as any);
+    expect(hooks).toBe(0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
