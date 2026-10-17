@@ -39,7 +39,7 @@ test("a routed worker publishes its own identity over Herdr's socket without the
     await handlers.get("agent_start")!({}, ctx);
     expect(() => verifyTaskAgent(task, agent)).not.toThrow();
     expect(requests[0].method).toBe("pane.report_agent_session");
-    expect(requests[0].params).toMatchObject({ pane_id: "w1:p2", source: "p3:routed-session", agent: "pi", agent_session_path: path });
+    expect(requests[0].params).toMatchObject({ pane_id: "w1:p2", source: "herdr:pi", agent: "pi", agent_session_path: path });
     expect(requests.every(r => ["pane.report_agent_session", "pane.report_agent"].includes(r.method))).toBe(true); // No prompt, tool or settings mutation.
     const next = join(root, "new.jsonl"); writeFileSync(next, JSON.stringify({ type: "session", id: "different" }) + "\n"); savedPath = next;
     await handlers.get("session_start")!({ reason: "new" }, ctx);
