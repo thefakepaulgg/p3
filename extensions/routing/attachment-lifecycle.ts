@@ -1,3 +1,4 @@
+import { registerRoutedSessionIdentity } from "./session-identity.ts";
 import { chmodSync, realpathSync, rmSync, statSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -15,6 +16,7 @@ const canonical = (path?: string) => { try { return path ? realpathSync(path) : 
 export default function attachmentLifecycle(pi: ExtensionAPI): void {
   const attachmentId = process.env.PI_ROUTED_ATTACHMENT_ID;
   if (!attachmentId) return;
+  registerRoutedSessionIdentity(pi);
   registerReadonlyWorkerPolicy(pi);
   let context: ExtensionContext | undefined;
   let server: Server | undefined;

@@ -1,3 +1,4 @@
+import { registerRoutedSessionIdentity } from "./session-identity.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { hasCancellationIntent, readAssignmentReceipt, saveAssignmentResult, writeAssignmentReceipt, type AssignmentOutcome, type AssignmentReceipt } from "./artifacts.ts";
 import { parseJson, runHerdr } from "./herdr.ts";
@@ -9,6 +10,7 @@ import { cancelAssignmentAsk, readPendingAssignmentAsk, registerAssignmentQuesti
 export default function routedWorkerLifecycle(pi: ExtensionAPI): void {
   const assignmentId = process.env.PI_ROUTED_ASSIGNMENT_ID;
   if (!assignmentId) return;
+  registerRoutedSessionIdentity(pi);
   registerWorkerEditorGuard(pi, assignmentId);
   registerAssignmentQuestions(pi, assignmentId);
   registerReadonlyWorkerPolicy(pi);
