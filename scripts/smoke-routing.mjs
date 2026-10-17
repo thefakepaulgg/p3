@@ -107,7 +107,13 @@ for (const module of ["node:http", "node:https"]) { const api = require(module);
       extensions: [join(source, "extensions", "model-routing.ts"), join(source, "scripts", "smoke-routing-provider.ts")],
     }), { mode: 0o600 });
     await writeFile(join(env.HOME, ".zshrc"), `export PATH=${quote([env.PATH])}\n`);
-    // Deliberately omit Herdr's optional account-level Pi integration: routed panes must publish their own identity.
+    // Only the fixture root gets the account integration. Workers and attachments must
+    // publish their own production identity, reproducing accounts without that setup.
+    await run("herdr", ["integration", "install", "pi"], env);
+    const rootIntegration = join(root, "root-herdr-integration.ts");
+    const installedIntegration = join(env.PI_CODING_AGENT_DIR, "extensions", "herdr-agent-state.ts");
+    await copyFile(installedIntegration, rootIntegration);
+    await rm(installedIntegration);
     const clear = Object.keys(process.env).filter((key) => secret(key) || /^PI_ROUT(ED|ING)_|^PI_SUBAGENT_/.test(key)).flatMap((key) => ["--env", `${key}=`]);
     const overrides = ["HOME", "ZDOTDIR", "NODE_OPTIONS", "P3_SMOKE_ROOT", "HERDR_CONFIG_PATH", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "TMPDIR", "PI_OFFLINE"].flatMap((key) => ["--env", `${key}=${env[key]}`]);
     const host = await herdr(["tab", "create", "--workspace", process.env.HERDR_WORKSPACE_ID, "--cwd", cwd, "--label", name, "--no-focus", ...overrides, ...clear], process.env);
@@ -172,7 +178,7 @@ for (const module of ["node:http", "node:https"]) { const api = require(module);
       const tab = created.tab.tab_id;
       tabs.add(tab);
       const agentName = `smoke-${randomUUID().slice(0, 8)}`;
-      try { await herdr(["agent", "start", agentName, "--kind", "pi", "--pane", created.root_pane.pane_id, "--timeout", "30000", "--", "--approve", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "--model", "smoke-routing/root", ...(savedSession ? ["--session", savedSession] : [])], env); } catch (error) {
+      try { await herdr(["agent", "start", agentName, "--kind", "pi", "--pane", created.root_pane.pane_id, "--timeout", "30000", "--", "--approve", "--extension", rootIntegration, "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "--model", "smoke-routing/root", ...(savedSession ? ["--session", savedSession] : [])], env); } catch (error) {
         await writeFile(join(root, `startup-${agentName}.txt`), await run("herdr", ["pane", "read", created.root_pane.pane_id], env)); throw error;
       }
       await herdr(["agent", "prompt", agentName, prompt, "--wait", "--until", "working", "--until", "done", "--timeout", "10000"], env);

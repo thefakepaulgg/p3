@@ -1,8 +1,13 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { runHerdr } from "./herdr.ts";
 
 /** Routed panes identify themselves even without Herdr's optional account-level Pi integration. */
 export function registerRoutedSessionIdentity(pi: ExtensionAPI): void {
+  // Worker launches retain normal extension discovery. Do not compete with the
+  // canonical integration's sequence counter when it is installed in this account.
+  if (existsSync(join(getAgentDir(), "extensions", "herdr-agent-state.ts"))) return;
   let sequence = Date.now() * 1000;
   const publish = async (ctx: ExtensionContext, reason?: string) => {
     const pane = process.env.HERDR_PANE_ID;

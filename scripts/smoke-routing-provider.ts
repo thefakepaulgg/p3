@@ -1,4 +1,3 @@
-import { registerRoutedSessionIdentity } from "../extensions/routing/session-identity.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createConnection } from "node:net";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -110,8 +109,6 @@ function decide(model: string, messages: any[]) {
 export default function smokeProvider(pi: ExtensionAPI) {
   const root = process.env.P3_SMOKE_ROOT!;
   const assignment = process.env.PI_ROUTED_ASSIGNMENT_ID;
-  // Only the fixture root needs a reporter here; workers/attachments must supply their own production lifecycle.
-  if (!assignment && !process.env.PI_ROUTED_ATTACHMENT_ID) registerRoutedSessionIdentity(pi);
   if (!assignment) process.env.HERDR_SOCKET_PATH = join(root, "herdr-proxy.sock");
   const trace = (event: string, details: any = {}) => appendFileSync(join(root, "trace.jsonl"), JSON.stringify({ event, at: Date.now(), assignment, pid: process.pid, ...details }) + "\n");
   let editorProbe: ReturnType<typeof setInterval> | undefined;
