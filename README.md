@@ -49,6 +49,8 @@ In the interactive TUI, p3 replaces the built-in `bash` tool. A command that fin
 - Print, JSON, and RPC modes keep the built-in synchronous `bash`, because nothing guarantees the process stays alive to deliver a completion.
 - If another extension or SDK tool already provides `bash` (for example a sandbox or remote backend), p3 leaves it in place and shows a warning. p3 checks at `session_start`, after every extension has loaded, so load-time `bash` registrations in any order are detected. A `bash` registered later at runtime by an extension loaded after p3, or an SDK `baseToolsOverride` (reported as built-in), is not detected and would be displaced.
 - Jobs are in memory only. They do not survive a Pi crash or restart, and user `!` shell commands are unaffected.
+- A completion that arrives while Pi is settling a run is held and starts a fresh turn after that run settles, rather than being steered into a run that has already made its last queue check.
+- A bounded routed worker that goes idle while it still has running jobs, or completions not yet admitted into its conversation, is not finished: its receipt stays `running` (with `backgroundJobs`), the parent keeps showing it as running, and no result is delivered or pane closed. It settles only when a completion wake run settles with no background work left. Stopping the last job from `/bash-jobs` while the worker is idle, or a parent `stop` (its Escape stops the jobs), records the assignment as interrupted. A turn aborted while jobs remain is still recorded as interrupted. Background-mode workers are unchanged.
 
 ## Delegation evidence and recovery
 

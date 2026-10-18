@@ -445,7 +445,10 @@ export function watchHerdrTask(options: {
         const status = String(agent.agent_status);
         updateUsage(agent.agent_session?.value);
         errors = 0;
-        const state = ask || status === "blocked" ? "blocked" : status === "working" || task.background ? "running" : receipt && receipt.requestId === task.requestId && receipt.outcome === "aborted" ? "interrupted" : "unknown";
+        // A worker idle only while its background bash jobs run is still executing its assignment.
+        const awaitingBackground = !!receipt && receipt.requestId === task.requestId && receipt.generation >= (task.minimumGeneration ?? 1) &&
+          receipt.outcome === "running" && (receipt.backgroundJobs ?? 0) > 0;
+        const state = ask || status === "blocked" ? "blocked" : status === "working" || task.background || awaitingBackground ? "running" : receipt && receipt.requestId === task.requestId && receipt.outcome === "aborted" ? "interrupted" : "unknown";
         update({ state, presence: "live" }, task.state !== state || task.presence !== "live");
         if (ask) options.question?.(ask);
         else if (state === "blocked") notify(`blocked#${receipt?.generation ?? 0}`, `Subagent ${task.handle} is blocked; supply the missing decision with steer.`);

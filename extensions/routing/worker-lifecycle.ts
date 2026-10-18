@@ -1,5 +1,7 @@
 import { registerRoutedSessionIdentity } from "./session-identity.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
+import { BASH_PENDING_EVENT, BASH_STOP_EVENT } from "../bash-background.ts";
 import { hasCancellationIntent, readAssignmentReceipt, saveAssignmentResult, writeAssignmentReceipt, type AssignmentOutcome, type AssignmentReceipt } from "./artifacts.ts";
 import { parseJson, runHerdr } from "./herdr.ts";
 import { readRoutingManifest } from "./manifest.ts";
@@ -20,6 +22,10 @@ export default function routedWorkerLifecycle(pi: ExtensionAPI): void {
   let responseText = "";
   let lastWrite = 0;
   let ownedRun = true;
+  /** Background bash work that can still wake this worker; see BASH_PENDING_EVENT. */
+  let backgroundJobs = 0;
+  /** Settled idle while background work remains: the assignment is unresolved until a wake run settles. */
+  let awaitingBackground = false;
   const resolved = () => {
     const previous = readAssignmentReceipt(assignmentId);
     const owner = readRoutingManifest(process.env.PI_ROUTING_MANIFEST)?.tasks.find((task) => task.assignmentId === assignmentId);
@@ -39,7 +45,27 @@ export default function routedWorkerLifecycle(pi: ExtensionAPI): void {
     receipt.lastActivityAt = Date.now();
     if (Date.now() - lastWrite >= 1000) publish();
   };
+  pi.events.on(BASH_PENDING_EVENT, (data) => {
+    const pending = (data as { pending?: unknown } | undefined)?.pending;
+    backgroundJobs = typeof pending === "number" && pending > 0 ? pending : 0;
+    if (!awaitingBackground || !receipt) return;
+    if (backgroundJobs > 0) { receipt.backgroundJobs = backgroundJobs; publish(); return; }
+    // Every job ended without a completion wake (stopped while idle), so no follow-up can produce a result.
+    awaitingBackground = false;
+    const { backgroundJobs: _, ...rest } = receipt;
+    receipt = { ...rest, outcome: "aborted", lastActivityAt: Date.now() };
+    publish();
+  });
+  pi.on("session_start", (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    // Parent stop sends Esc; an idle Pi ignores it, so stop the background work that keeps this assignment open.
+    ctx.ui.onTerminalInput((data) => {
+      if (awaitingBackground && receipt && matchesKey(data, "escape") && hasCancellationIntent(receipt)) pi.events.emit(BASH_STOP_EVENT, {});
+      return undefined;
+    });
+  });
   pi.on("agent_start", async (_event, ctx) => {
+    awaitingBackground = false;
     ownedRun = !resolved();
     if (!ownedRun) return;
     const paneId = process.env.HERDR_PANE_ID;
@@ -86,6 +112,13 @@ export default function routedWorkerLifecycle(pi: ExtensionAPI): void {
     if (outcome === "aborted") cancelAssignmentAsk(assignmentId);
     if (readPendingAssignmentAsk(assignmentId)) { touch(); return; }
     if (process.env.PI_SUBAGENT_MODE === "background") { touch(); return; }
+    if (outcome !== "aborted" && backgroundJobs > 0) {
+      awaitingBackground = true;
+      receipt.backgroundJobs = backgroundJobs;
+      receipt.lastActivityAt = Date.now();
+      publish();
+      return;
+    }
     const verifiedResponse = entry?.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "stop";
     const completed = outcome === "completed" && verifiedResponse && !!responseText;
     const next: AssignmentReceipt = { ...receipt, outcome: outcome === "aborted" ? "aborted" : completed ? "completed" : "error", lastActivityAt: Date.now(), responseEntryId };

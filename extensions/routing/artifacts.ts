@@ -40,6 +40,8 @@ export interface AssignmentReceipt {
   responseEntryId?: string;
   resultHash?: string;
   error?: string;
+  /** While outcome is running: settled idle with this much background bash work able to wake it. */
+  backgroundJobs?: number;
 }
 
 export const askPathForAssignment = (id: string) => join(assignmentDirectory(id), "ask.json");
