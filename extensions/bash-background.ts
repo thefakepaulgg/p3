@@ -17,6 +17,13 @@ const STOP_WAIT_MS = 5_000;
 const COMPLETION_TYPE = "bash-job-complete";
 const PREVIEW_LINES = 5;
 const WIDGET_KEY = "p3-bash-jobs";
+/**
+ * Same-process lifecycle signal: `{ pending }` counts running jobs plus completions not yet admitted into
+ * the conversation, so a routed worker never settles while background work can still wake it.
+ */
+export const BASH_PENDING_EVENT = "bash-background:pending";
+/** Request to stop every running job, e.g. when a routed worker is cancelled while idle. */
+export const BASH_STOP_EVENT = "bash-background:stop";
 
 type BashResult = AgentToolResult<BashToolDetails | undefined>;
 type Outcome = { result: BashResult } | { error: unknown };
@@ -63,6 +70,19 @@ export default function bashBackground(pi: ExtensionAPI) {
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let refreshView: (() => void) | undefined;
   let closeView: (() => void) | undefined;
+  /** Jobs whose completion message has been sent or deferred but not yet admitted (message_start). */
+  const undelivered = new Set<string>();
+  /** Completions held during the settle tail, where a steer could be stranded after Pi's last queue check. */
+  let deferred: Job[] = [];
+  let settling = false;
+  let lastPending = 0;
+  const publishPending = () => {
+    if (disposed) return;
+    const pending = [...jobs.values()].filter((job) => job.state === "running").length + undelivered.size;
+    if (pending === lastPending) return;
+    lastPending = pending;
+    pi.events.emit(BASH_PENDING_EVENT, { pending });
+  };
 
   const isLive = (job: Job) => !disposed && jobs.get(job.id) === job;
   const statusOf = (job: Job) => job.state === "completed" ? `completed, exit code ${job.exitCode}` : job.state;
@@ -97,6 +117,7 @@ export default function bashBackground(pi: ExtensionAPI) {
     job.state = "stopped";
     job.controller.abort();
     refreshUi();
+    publishPending();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([job.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, STOP_WAIT_MS); })]);
@@ -170,7 +191,7 @@ export default function bashBackground(pi: ExtensionAPI) {
     },
   });
 
-  const notifyCompletion = (job: Job) => {
+  const sendCompletion = (job: Job) => {
     const status = job.state === "completed"
       ? `exited with code ${job.exitCode}`
       : "failed";
@@ -186,7 +207,13 @@ export default function bashBackground(pi: ExtensionAPI) {
       }, { deliverAs: "steer", triggerTurn: true });
     } catch {
       // The runtime was replaced; never deliver into another session.
+      undelivered.delete(job.id);
     }
+  };
+  const notifyCompletion = (job: Job) => {
+    undelivered.add(job.id);
+    if (settling) deferred.push(job);
+    else sendCompletion(job);
   };
 
   const install = (cwd: string) => {
@@ -272,8 +299,11 @@ export default function bashBackground(pi: ExtensionAPI) {
           job.latest = undefined;
           refreshUi();
           if (!stopped && !disposed) notifyCompletion(job);
+          // After notifyCompletion so a finished job moves from running to undelivered without a transient zero.
+          publishPending();
         });
         refreshUi();
+        publishPending();
 
         const soFar = textOf(latest);
         const details = latest?.details;
@@ -332,6 +362,27 @@ export default function bashBackground(pi: ExtensionAPI) {
     ].join("\n"), 1, 1);
   });
 
+  pi.on("message_start", (event) => {
+    const message = event.message;
+    if (message.role !== "custom" || message.customType !== COMPLETION_TYPE) return;
+    const jobId = (message.details as { jobId?: unknown } | undefined)?.jobId;
+    if (typeof jobId === "string" && undelivered.delete(jobId)) publishPending();
+  });
+  // Pi's last queued-message check happens after agent_before_settle handlers return, so a steer sent
+  // from here until agent_settled may be stranded. Hold those completions and start a fresh run instead:
+  // a triggerTurn message sent during agent_settled is queued by Pi until that run has fully settled.
+  pi.on("agent_before_settle", () => { settling = true; });
+  pi.on("turn_start", () => { settling = false; });
+  pi.on("agent_settled", () => {
+    settling = false;
+    const held = deferred;
+    deferred = [];
+    if (!disposed) for (const job of held) sendCompletion(job);
+  });
+  const unwatchStop = pi.events.on(BASH_STOP_EVENT, () => {
+    for (const job of jobs.values()) void stopJob(job);
+  });
+
   pi.on("session_start", (_event, ctx) => {
     if (installed || ctx.mode !== "tui") return;
     const current = pi.getAllTools().find((tool) => tool.name === "bash");
@@ -347,6 +398,7 @@ export default function bashBackground(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     disposed = true;
+    unwatchStop();
     clearInterval(refreshTimer);
     refreshTimer = undefined;
     refreshView = undefined;

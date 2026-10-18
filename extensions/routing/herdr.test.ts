@@ -338,6 +338,16 @@ describe("watcher notifications", () => {
     expect(task.result).toBeUndefined();
   });
 
+  test("an idle worker awaiting background bash stays running without a completion", async () => {
+    const task = herdrTask();
+    const file = sessionWith("Started the build in the background");
+    seedReceipt(task, file, "", { outcome: "running", backgroundJobs: 2 });
+    const { notifications } = await drive(task, "idle", file);
+    expect(task.state).toBe("running");
+    expect(task.result).toBeUndefined();
+    expect(notifications).toEqual([]);
+  });
+
   for (const field of ["sessionId", "terminalId", "requestId"] as const) {
     test(`rejects a completed receipt with the wrong ${field}`, async () => {
       const task = herdrTask();
