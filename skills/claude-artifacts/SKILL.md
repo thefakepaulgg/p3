@@ -1,11 +1,11 @@
 ---
 name: claude-artifacts
-description: Create, edit, and preview Claude Artifacts canvases and UI mockups through p3's claude-artifacts MCP bridge. Use for Artifacts links, canvas creation, private-link preview failures, or new Claude design mockups; use the legacy claude-design workflow only when the user explicitly wants an existing legacy Design project.
+description: Create, edit, and preview Claude Artifacts canvases and UI mockups through p3's claude-artifacts MCP bridge. Use for Artifacts links, canvas creation, private-link preview failures, and all design work: designs, mockups, prototypes, and decks.
 ---
 
 # Claude Artifacts
 
-Use `claude_artifacts` MCP tools for the current Artifacts canvas workflow. A type named **Design** in `list_types` is an Artifact type, not a legacy `claude_design` project.
+Use `claude_artifacts` MCP tools for the current Artifacts canvas workflow. A type named **Design** in `list_types` is an Artifact type.
 
 ## Create or resume
 
