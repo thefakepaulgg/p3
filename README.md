@@ -155,7 +155,7 @@ The [Pi 1.0.0 MCP Events reference slice](extensions/mcp-events/README.md) is no
 
 Run `/artifacts-login` in Pi, approve the browser's unofficial PKCE login, then paste `CODE#STATE` into Pi. `/artifacts-status` shows expiry and scopes; `/artifacts-logout` deletes local credentials without revoking the remote grant. Credentials are isolated in `~/.config/pi-claude-artifacts/credentials.json` (mode `0600`), reused and refreshed on demand. Connector authentication is unchanged.
 
-This is a **local stdio MCP server** wrapping undocumented native Artifacts APIs, not the legacy Claude Design MCP. The bundled [Claude Artifacts skill](skills/claude-artifacts/SKILL.md) describes the create → publish → browser-preview workflow. The type called **Design** belongs to Artifacts; it is not a legacy Design project.
+This is a **local stdio MCP server** wrapping undocumented native Artifacts APIs. The bundled [Claude Artifacts skill](skills/claude-artifacts/SKILL.md) describes the create → publish → browser-preview workflow. The type called **Design** belongs to Artifacts.
 
 ### Create and open a canvas
 
