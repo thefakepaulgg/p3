@@ -173,7 +173,10 @@ export const coreMux: Mux = {
       argv: [piExecutable(), ...args], cwd: slot.cwd, name,
       env: { ...(process.env.PI_CODING_AGENT_DIR ? { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR } : {}), ...slot.env },
       labels: { ...slot.labels, [LABEL_HANDLE]: name },
-      caller: callerId(), outlive_parent: true, no_notify: true,
+      // A peer (worktree placement) is independent, as under the TUI: no core parent, so the App lists it as its
+      // own agent rather than under this session. Attachments stay this session's children.
+      ...(slot.labels[LABEL_WORKTREE] ? { no_parent: true } : { caller: callerId() }),
+      outlive_parent: true, no_notify: true,
     }, 30_000);
     slots.delete(paneId);
     return normalizeCoreTerminal(run);

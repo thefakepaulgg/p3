@@ -103,7 +103,8 @@ describe("workspace agents on Herdr Core", () => {
     expect(text(result)).toContain("Started independent agent");
     const runCall = calls.find((call) => call.method === "terminal.run")!.params;
     const worktree = realpathSync(join(process.env.HOME!, ".herdr", "worktrees", "repo", "peer-one"));
-    expect(runCall).toMatchObject({ cwd: worktree, caller: "t1", outlive_parent: true, no_notify: true });
+    expect(runCall).toMatchObject({ cwd: worktree, no_parent: true, outlive_parent: true, no_notify: true });
+    expect(runCall.caller).toBeUndefined();
     expect(runCall.labels["herdr.space"]).toMatch(/^p3-[0-9a-f]{12}$/);
     expect(runCall.labels).toMatchObject({ "herdr.tab": runCall.labels["p3.tab"], "p3.branch": "peer-one", "p3.worktree": worktree });
     expect(Object.keys(runCall.env).filter((key) => key.startsWith("HERDR_"))).toEqual([]);
