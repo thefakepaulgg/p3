@@ -6,7 +6,8 @@ import { assertSessionUnattached } from "./attachment-lifecycle.ts";
 import { readAssignmentReceipt } from "./artifacts.ts";
 import { readPendingAssignmentAsk } from "./questions.ts";
 import { orchestrationError } from "./errors.ts";
-import { parseJson, readHerdrSessionId, runHerdr } from "./herdr.ts";
+import { readHerdrSessionId } from "./herdr.ts";
+import { mux } from "./mux.ts";
 import { isActiveTask, type TaskHandle } from "./state.ts";
 
 export interface SavedRoutedSession { path: string; id: string; cwd: string; model: { provider: string; modelId: string }; thinking: TaskHandle["thinking"]; bytes: number }
@@ -36,11 +37,11 @@ export async function validateContinuation(pi: ExtensionAPI, ctx: ExtensionConte
   if ([...tasks].some((task) => task !== previous && task.sessionId === saved.id && isActiveTask(task))) throw new Error("The saved Pi session already has active or unresolved managed work");
   const model = ctx.modelRegistry.find(saved.model.provider, saved.model.modelId);
   if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) throw new Error(`Saved model unavailable: ${saved.model.provider}/${saved.model.modelId}; no substitute was selected`);
-  const agents = parseJson(await runHerdr(pi, ["agent", "list"], 5000), "continuation inventory")?.result?.agents;
-  if (!Array.isArray(agents)) throw new Error("Current session inventory is unverified; do not start a second writer");
+  const agents = await mux().listAgents(pi);
+  if (!agents) throw new Error("Current session inventory is unverified; do not start a second writer");
   for (const agent of agents) {
-    if (agent.pane_id === previous.paneId || agent.terminal_id === previous.terminalId || readHerdrSessionId(agent.agent_session?.value) === saved.id || agent.agent_session?.value === saved.path) throw new Error("Saved session still has a live representation; close its retained pane before continuation");
-    if (agent.agent === "pi" && agent.launch_pending) throw new Error("A pending Pi startup makes session absence ambiguous; inspect before continuation");
+    if (agent.paneId === previous.paneId || agent.terminalId === previous.terminalId || readHerdrSessionId(agent.sessionPath) === saved.id || agent.sessionPath === saved.path) throw new Error("Saved session still has a live representation; close its retained pane before continuation");
+    if (agent.kind === "pi" && agent.launchPending) throw new Error("A pending Pi startup makes session absence ambiguous; inspect before continuation");
   }
   return saved;
 }

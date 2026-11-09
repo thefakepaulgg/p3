@@ -6,6 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { StringEnum, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { selfIdentity } from "./routing/mux.ts";
 
 const TOOL_NAME = "notify_user";
 const STATUS_KEY = "telegram-notify";
@@ -124,9 +125,11 @@ export function isEligiblePrimary(ctx: Pick<ExtensionContext, "mode" | "hasUI">,
   if (ctx.mode !== "tui" || !ctx.hasUI) return false;
   // Background subagents never report to the primary, so Telegram is their only outbound channel.
   if (isBackgroundSubagent(env)) return true;
-  if (env.HERDR_ROLE === "helper") return false;
-  const routedRootTab = env.PI_ROUTED_ROOT_TAB_ID?.trim();
-  const currentTab = env.HERDR_TAB_ID?.trim();
+  const self = selfIdentity(env);
+  if (self.role === "helper") return false;
+  // rootTabId is the routed-root override when set, otherwise the pane's own tab, so only an override can mismatch.
+  const routedRootTab = self.rootTabId?.trim();
+  const currentTab = self.tabId?.trim();
   if (routedRootTab && currentTab !== routedRootTab) return false;
   return true;
 }

@@ -1,7 +1,7 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { runHerdr } from "./herdr.ts";
+import { mux, selfIdentity } from "./mux.ts";
 
 /** Routed panes identify themselves even without Herdr's optional account-level Pi integration. */
 export function registerRoutedSessionIdentity(pi: ExtensionAPI): void {
@@ -10,13 +10,12 @@ export function registerRoutedSessionIdentity(pi: ExtensionAPI): void {
   if (existsSync(join(getAgentDir(), "extensions", "herdr-agent-state.ts"))) return;
   let sequence = Date.now() * 1000;
   const publish = async (ctx: ExtensionContext, reason?: string) => {
-    const pane = process.env.HERDR_PANE_ID;
+    const { backend, id: pane } = selfIdentity();
     const path = ctx.sessionManager.getSessionFile();
-    if (ctx.mode !== "tui" || process.env.HERDR_ENV !== "1" || !pane || !path) return;
+    if (ctx.mode !== "tui" || !backend || !pane || !path) return;
     // Herdr selects Pi session identity from this canonical source. A custom source
     // is accepted but invisible to agent.get. Leave lifecycle state to Herdr/native hooks.
-    await runHerdr(pi, ["pane", "report-agent-session", pane, "--source", "herdr:pi", "--agent", "pi", "--seq", String(++sequence), "--agent-session-path", path,
-      ...(reason ? ["--session-start-source", reason] : [])], 5000);
+    await mux().reportSession(pi, pane, path, ++sequence, reason);
   };
   pi.on("session_start", (event, ctx) => publish(ctx, event.reason));
   // A new Pi session may not have a file until its first turn starts.

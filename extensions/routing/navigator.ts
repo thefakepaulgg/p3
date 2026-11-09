@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, truncateToWidth, type Component, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
-import { parseJson, runHerdr } from "./herdr.ts";
+import { mux, selfIdentity } from "./mux.ts";
 
 export interface RoutedWidgetTarget { handle: string; paneId?: string; paneClosedAt?: number; sessionPath?: string }
 
@@ -83,9 +83,7 @@ export class RoutedTaskWidget implements Component {
 }
 
 export async function focusManifestPane(pi: ExtensionAPI, paneId: string): Promise<void> {
-  const workspaceId = process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID;
-  const raw = await runHerdr(pi, ["pane", "list", ...(workspaceId ? ["--workspace", workspaceId] : [])], 5000);
-  const panes = parseJson(raw, "herdr pane list")?.result?.panes ?? [];
-  if (!panes.some((pane: any) => pane.pane_id === paneId)) throw new Error(`Subagent pane ${paneId} no longer exists`);
-  await runHerdr(pi, ["pane", "focus", paneId], 5000);
+  const panes = await mux().listPanes(pi, selfIdentity().rootWorkspaceId || undefined) ?? [];
+  if (!panes.some((pane) => pane.paneId === paneId)) throw new Error(`Subagent pane ${paneId} no longer exists`);
+  await mux().focusPane(pi, paneId);
 }

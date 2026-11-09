@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { requestHerdrSocket } from "./routing/herdr.ts";
+import { mux, selfIdentity } from "./routing/mux.ts";
 
 const directory = join(homedir(), ".pi", "agent", "agent-grants");
 const storePath = join(directory, "grants.json");
@@ -32,8 +32,9 @@ const GrantParams = Type.Object({
 });
 
 function paneId(): string {
-  if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) throw new Error("Agent grants require a Herdr-managed pane");
-  return process.env.HERDR_PANE_ID;
+  const { backend, id } = selfIdentity();
+  if (!backend || !id) throw new Error("Agent grants require a Herdr-managed pane");
+  return id;
 }
 
 async function readGrants(): Promise<Grant[]> {
@@ -87,15 +88,14 @@ export default function registerAgentGrants(pi: ExtensionAPI): void {
 
       if (!params.target || !params.repository || !params.prNumbers?.length) throw new Error("target, repository, and prNumbers are required to propose a grant");
       if (!/^[^/\s]+\/[^/\s]+$/.test(params.repository) || params.prNumbers.some((number) => !Number.isSafeInteger(number) || number < 1)) throw new Error("Invalid repository or PR numbers");
-      const response = await requestHerdrSocket("agent.get", { target: params.target }, 5000);
-      const recipient = response.result.agent as { pane_id?: string; name?: string; agent_session?: { value?: string } } | undefined;
-      if (!recipient?.pane_id || !recipient.name || !recipient.agent_session?.value) throw new Error("Herdr did not return the recipient pane, name, and Pi session");
-      if (recipient.pane_id === issuerPane) throw new Error("Cannot grant yourself agent authorization");
+      const recipient = await mux().getAgent(pi, params.target);
+      if (!recipient?.paneId || !recipient.name || !recipient.sessionPath) throw new Error("Herdr did not return the recipient pane, name, and Pi session");
+      if (recipient.paneId === issuerPane) throw new Error("Cannot grant yourself agent authorization");
       const scope: Grant["scope"] = { action: "merge", repository: params.repository, prNumbers: [...new Set(params.prNumbers)], ...(params.condition ? { condition: params.condition } : {}) };
-      const approved = await ctx.ui.confirm("Authorize agent merge grant?", `Recipient: ${recipient.name} (pane ${recipient.pane_id})\nAction: merge\nRepository: ${scope.repository}\nPR numbers: ${scope.prNumbers.join(", ")}${scope.condition ? `\nCondition: ${scope.condition}` : ""}\nExpires in 24 hours or when the recipient changes Pi sessions.`);
+      const approved = await ctx.ui.confirm("Authorize agent merge grant?", `Recipient: ${recipient.name} (pane ${recipient.paneId})\nAction: merge\nRepository: ${scope.repository}\nPR numbers: ${scope.prNumbers.join(", ")}${scope.condition ? `\nCondition: ${scope.condition}` : ""}\nExpires in 24 hours or when the recipient changes Pi sessions.`);
       if (!approved) return result({ confirmed: false });
-      const grant: Grant = { id: randomUUID(), issuerPane, recipientPane: recipient.pane_id, recipientName: recipient.name,
-        recipientSession: recipient.agent_session.value, scope, createdAt: new Date().toISOString(),
+      const grant: Grant = { id: randomUUID(), issuerPane, recipientPane: recipient.paneId, recipientName: recipient.name,
+        recipientSession: recipient.sessionPath, scope, createdAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() };
       const grants = await readGrants();
       grants.push(grant);

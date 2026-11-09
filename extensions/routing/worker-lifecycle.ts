@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { matchesKey } from "@earendil-works/pi-tui";
 import { BASH_PENDING_EVENT, BASH_STOP_EVENT } from "../bash-background.ts";
 import { hasCancellationIntent, readAssignmentReceipt, saveAssignmentResult, writeAssignmentReceipt, type AssignmentOutcome, type AssignmentReceipt } from "./artifacts.ts";
-import { parseJson, runHerdr } from "./herdr.ts";
+import { mux, selfIdentity } from "./mux.ts";
 import { readRoutingManifest } from "./manifest.ts";
 import { registerWorkerEditorGuard } from "./editor-guard.ts";
 import { registerReadonlyWorkerPolicy } from "./worker-policy.ts";
@@ -68,16 +68,16 @@ export default function routedWorkerLifecycle(pi: ExtensionAPI): void {
     awaitingBackground = false;
     ownedRun = !resolved();
     if (!ownedRun) return;
-    const paneId = process.env.HERDR_PANE_ID;
+    const paneId = selfIdentity().id;
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (!paneId || !sessionPath) throw new Error("Routed worker requires a persisted Pi session and exact pane identity");
-    const agent = parseJson(await runHerdr(pi, ["agent", "get", paneId], 5000), "routed worker identity")?.result?.agent;
-    if (agent?.pane_id !== paneId || !agent.terminal_id) throw new Error("Routed worker terminal identity is unverified");
+    const agent = await mux().getAgent(pi, paneId);
+    if (agent?.paneId !== paneId || !agent.terminalId) throw new Error("Routed worker terminal identity is unverified");
     const previous = readAssignmentReceipt(assignmentId);
     if (previous && previous.sessionId !== ctx.sessionManager.getSessionId()) throw new Error("Routed assignment belongs to another Pi session");
     receipt = {
       version: 1, assignmentId, requestId: previous?.requestId ?? assignmentId, generation: (previous?.generation ?? 0) + 1,
-      sessionId: ctx.sessionManager.getSessionId(), sessionPath, paneId, terminalId: agent.terminal_id,
+      sessionId: ctx.sessionManager.getSessionId(), sessionPath, paneId, terminalId: agent.terminalId,
       outcome: "running", workerPid: process.pid, lastActivityAt: Date.now(),
     };
     outcome = undefined; responseEntryId = undefined; responseText = "";

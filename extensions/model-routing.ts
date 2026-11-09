@@ -6,7 +6,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { classifyDelegation, classifyModelRoute, planFallback, routes, selectEligibleRoute, clampThinkingLevel, routeTier, type CapabilityTier, type Route, type RouteName, type RoutingDecision, type ThinkingLevel } from "./routing/policy.ts";
 import { availableTaskActions, buildCompletionMessage, canDeliverCompletion, boundNotification, COMPLETION_KIND, formatModelLabel, formatTaskWidget, isActiveTask, markCompletionDelivered, markNotified, recommendEscalation, resetCompletionDelivery, taskMetadata, taskWidgetItems, telemetryRecord, WIDGET_KEY, type TaskHandle, type TaskWidgetItem } from "./routing/state.ts";
-import { parseJson, proveTaskAbsent, recoverAbsentTask, readHerdrResult, runHerdr, verifyTaskAgent, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
+import { proveTaskAbsent, recoverAbsentTask, readHerdrResult, verifyTaskAgent, watchHerdrTask as startHerdrWatcher } from "./routing/herdr.ts";
+import { mux, selfIdentity } from "./routing/mux.ts";
 import { pathForResultRef, askPathForAssignment, readAssignmentReceipt, readAssignmentResult, writeCancellationIntent } from "./routing/artifacts.ts";
 import { readAssignmentAsk, readPendingAssignmentAsk, writeAssignmentReply, cancelAssignmentAsk, type AssignmentAsk } from "./routing/questions.ts";
 import { orchestrationError, orchestrationErrorResult } from "./routing/errors.ts";
@@ -129,7 +130,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     const coverage = aggregateUsageCoverage(primary, [...tasks, ...attachments.map((record) => ({ ...record, state: record.status === "starting" ? "queued" as const : record.status === "open" ? "running" as const : "stopped" as const }))]);
     routingManifest = {
       version: ROUTING_MANIFEST_VERSION,
-      parentSessionId: activeCtx.sessionManager.getSessionId(), parentPaneId: process.env.HERDR_PANE_ID!, parentInbox: parentInboxPath,
+      parentSessionId: activeCtx.sessionManager.getSessionId(), parentPaneId: selfIdentity().id!, parentInbox: parentInboxPath,
       parentSessionPath: activeCtx.sessionManager.getSessionFile(), primaryCost: primary.cost, primaryCostKnown: primary.known,
       sessionTotal: coverage.cost, sessionTotalKnown: coverage.known, sessionCostComplete: coverage.complete, missingCostSources: coverage.missingSources, pendingCostSources: coverage.pendingSources, usageScope: coverage.scope, updatedAt: Date.now(), tasks, attachments,
     };
@@ -153,7 +154,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }
     const targets = [...shown];
     const parentPaneId = routingManifest?.parentPaneId;
-    const isChildPane = !ownsManifest && parentPaneId && process.env.HERDR_PANE_ID !== parentPaneId;
+    const isChildPane = !ownsManifest && parentPaneId && selfIdentity().id !== parentPaneId;
     if (isChildPane) {
       if (!lines.length) lines.push("Subagents");
       lines.splice(1, 0, "↩ Parent · main");
@@ -231,19 +232,12 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   };
 
   const refreshParentMetadata = () => {
-    const paneId = process.env.HERDR_PANE_ID;
+    const paneId = selfIdentity().id;
     if (!ownsManifest || !paneId) return;
     const count = [...taskHandles.values()].filter(isActiveTask).length;
     if (count === parentMetadataCount) return;
     parentMetadataCount = count;
-    const routedArgs = count > 0
-      ? ["--token", `subagents=${count} subagents active`]
-      : ["--clear-token", "subagents"];
-    void runHerdr(pi, [
-      "pane", "report-metadata", paneId,
-      "--source", "pi-routing:delegation",
-      ...routedArgs,
-    ], 5000).catch(() => undefined);
+    void mux().reportMetadata(pi, paneId, "pi-routing:delegation", { subagents: count > 0 ? `${count} subagents active` : null }).catch(() => undefined);
   };
 
   const updateStatus = (ctx: ExtensionContext) => {
@@ -302,9 +296,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   };
 
   const verifiedAgent = async (task: TaskHandle) => {
-    const agent = parseJson(await runHerdr(pi, ["agent", "get", task.agentName!], 5000), "worker control identity")?.result?.agent;
+    const agent = await mux().getAgent(pi, task.agentName!);
     verifyTaskAgent(task, agent);
-    return agent;
+    return agent!;
   };
 
   const closeAfterReceipt = async (task: TaskHandle) => {
@@ -322,7 +316,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
         }
       }
       await verifiedAgent(task);
-      await runHerdr(pi, ["pane", "close", task.paneId], 5000);
+      await mux().closePane(pi, task.paneId);
       updateTask(task, { paneClosedAt: Date.now() });
     } catch (error) {
       updateTask(task, { error: `Result delivered; retained pane because cleanup identity could not be verified: ${error instanceof Error ? error.message : String(error)}` });
@@ -384,7 +378,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       if (!isActiveTask(task) || !task.assignmentId) continue;
       const ask = readPendingAssignmentAsk(task.assignmentId);
       if (ask) {
-        try { const agent = await verifiedAgent(task); if (["working", "blocked"].includes(agent.agent_status)) submitQuestion(task, ask); } catch { /* Observer will report unverified/lost execution. */ }
+        try { const agent = await verifiedAgent(task); if (["working", "blocked"].includes(agent.status)) submitQuestion(task, ask); } catch { /* Observer will report unverified/lost execution. */ }
       }
     }
   };
@@ -504,7 +498,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       if (ownsManifest) throw new Error("Only subagents can message a parent");
       const manifest = readRoutingManifest(manifestPath);
-      const task = manifest?.tasks.find((candidate) => candidate.paneId === process.env.HERDR_PANE_ID);
+      const task = manifest?.tasks.find((candidate) => candidate.paneId === selfIdentity().id);
       if (!manifest?.parentInbox || !task?.messageToken) throw new Error("Parent inbox is unavailable");
       await sendParentMessage(manifest.parentInbox, { handle: task.handle, paneId: task.paneId, token: task.messageToken, text: params.text });
       return { content: [{ type: "text", text: "Message delivered to parent" }], details: { handle: task.handle } };
@@ -562,9 +556,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (task.pendingCompletion) throw new Error("Result delivery is pending; retain the pane until receipt is proven");
     if (!task.paneClosedAt) {
       const agent = await verifiedAgent(task);
-      if (!["idle", "done"].includes(agent.agent_status)) throw new Error("Worker is still executing or blocked; explicitly stop it before closing");
+      if (!["idle", "done"].includes(agent.status)) throw new Error("Worker is still executing or blocked; explicitly stop it before closing");
       await ensureWorkerEditor(task, false, true);
-      await runHerdr(pi, ["pane", "close", task.paneId], 5000);
+      await mux().closePane(pi, task.paneId);
       task.paneClosedAt = Date.now();
       persistTask(task);
       syncManifest();
@@ -578,7 +572,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (result !== undefined) return { text: result.slice(0, 12000), cached: task.result !== undefined, durable: !!task.resultHash, requestId: task.requestId, resultHash: task.resultHash, truncated: result.length > 12000, consumedManually: false, resultRef: task.resultRef };
     if (task.state === "failed") return { text: task.error ?? "Pi execution failed; no successful result", cached: false, truncated: false, consumedManually: false };
     const agent = await verifiedAgent(task);
-    const partial = readHerdrResult(agent.agent_session?.value);
+    const partial = readHerdrResult(agent.sessionPath);
     return { text: partial ? `Partial output, NOT a completed result:\n${partial.slice(0, 12000)}` : "No verified result available yet", cached: false, truncated: partial.length > 12000, consumedManually: false };
   };
 
@@ -598,7 +592,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     try {
       const agent = await verifiedAgent(task);
       updateTask(task, { presence: "live" }, false);
-      return agent.agent_status;
+      return agent.status;
     } catch (error) {
       const recovered = isActiveTask(task) || task.state === "failed" ? await recoverAbsentTask(pi, task) : undefined;
       if (recovered) updateTask(task, recovered);
@@ -612,7 +606,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     while (Date.now() < deadline) {
       const agent = await verifiedAgent(task);
       const receipt = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
-      if (receipt && receipt.sessionId === task.sessionId && receipt.paneId === task.paneId && receipt.terminalId === task.terminalId && receipt.generation >= generation && receipt.outcome !== "running" && ["idle", "done"].includes(agent.agent_status)) return receipt;
+      if (receipt && receipt.sessionId === task.sessionId && receipt.paneId === task.paneId && receipt.terminalId === task.terminalId && receipt.generation >= generation && receipt.outcome !== "running" && ["idle", "done"].includes(agent.status)) return receipt;
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
     }
     throw new Error("Worker did not reach a verified settled boundary after interruption");
@@ -643,7 +637,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     watchers.get(task.handle)?.abort();
     try {
       writeCancellationIntent(original);
-      await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000);
+      await mux().sendKeys(pi, task.agentName!, ["esc"]);
       await waitForSettledWorker(task, original.generation);
       if (task.assignmentId && readPendingAssignmentAsk(task.assignmentId)) cancelAssignmentAsk(task.assignmentId);
     } catch (error) {
@@ -654,7 +648,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     updateTask(task, { state: "stopped", pendingCompletion: false, pendingAskId: undefined, endedAt: Date.now() });
     if (closePane && task.paneId) {
       await verifiedAgent(task);
-      await runHerdr(pi, ["pane", "close", task.paneId], 5000);
+      await mux().closePane(pi, task.paneId);
       updateTask(task, { paneClosedAt: Date.now() });
     }
     return `Stopped subagent ${task.handle}${closePane ? " and closed its pane" : ""}; external effects were not rolled back`;
@@ -676,7 +670,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     updateTask(task, { requestId, instructionIds: [...(task.instructionIds ?? []), requestId].slice(-32), state: "queued", outcomeGeneration: undefined, pendingCompletion: false, result: undefined, resultHash: undefined, resultRef: undefined, resultPath: undefined, error: undefined });
     persistTask(task);
     try {
-      await runHerdr(pi, ["agent", "prompt", task.agentName!, prompt], 10000);
+      await mux().prompt(pi, task.agentName!, prompt);
       updateTask(task, { state: "running" });
     } catch (error) {
       updateTask(task, { state: "unknown", presence: "unknown", error: `Steering submission is unresolved; do not resubmit blindly: ${error instanceof Error ? error.message : String(error)}` });
@@ -689,11 +683,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (!task.assignmentId || readPendingAssignmentAsk(task.assignmentId)) throw new Error("Reply to the outstanding question or explicitly stop it; there is no interruptible working operation");
     const before = await verifiedAgent(task);
     const original = readAssignmentReceipt(task.assignmentId);
-    if (before.agent_status !== "working" || !original || original.outcome !== "running") throw new Error("Worker has no verified current operation to interrupt");
+    if (before.status !== "working" || !original || original.outcome !== "running") throw new Error("Worker has no verified current operation to interrupt");
     watchers.get(task.handle)?.abort();
     try {
       writeCancellationIntent(original);
-      await runHerdr(pi, ["agent", "send-keys", task.agentName!, "esc"], 5000);
+      await mux().sendKeys(pi, task.agentName!, ["esc"]);
       const settled = await waitForSettledWorker(task, original.generation);
       if (settled.outcome === "completed") {
         updateTask(task, { requestId: settled.requestId, state: "running" });
@@ -711,7 +705,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
   const replyTask = async (task: TaskHandle, askId: string, message: string, files?: string[]) => {
     const evidence = prepareEvidence(files, activeCtx!.cwd, pathForResultRef);
     const agent = await verifiedAgent(task);
-    if (!task.assignmentId || !task.requestId || !task.sessionId || !task.terminalId || !["working", "blocked"].includes(agent.agent_status)) throw new Error("Worker is not live and waiting for this reply");
+    if (!task.assignmentId || !task.requestId || !task.sessionId || !task.terminalId || !["working", "blocked"].includes(agent.status)) throw new Error("Worker is not live and waiting for this reply");
     let answered: AssignmentAsk;
     try { answered = writeAssignmentReply(task.assignmentId, askId, [message, evidence.text].filter(Boolean).join("\n\n"), {
       requestId: task.requestId, parentSessionId: activeCtx!.sessionManager.getSessionId(), sessionId: task.sessionId, paneId: task.paneId!, terminalId: task.terminalId,
@@ -1055,8 +1049,9 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (attachmentTimer) clearInterval(attachmentTimer);
     terminalInputUnsubscribe?.();
     const inheritedManifest = process.env.PI_ROUTING_MANIFEST?.trim();
-    ownsManifest = !inheritedManifest && process.env.HERDR_ENV === "1" && !!process.env.HERDR_PANE_ID;
-    manifestPath = inheritedManifest || (ownsManifest ? manifestPathForPane(ctx.sessionManager.getSessionDir(), process.env.HERDR_PANE_ID!) : undefined);
+    const self = selfIdentity();
+    ownsManifest = !inheritedManifest && !!self.backend && !!self.id;
+    manifestPath = inheritedManifest || (ownsManifest ? manifestPathForPane(ctx.sessionManager.getSessionDir(), self.id!) : undefined);
     taskHandles.clear();
     routingManifest = readRoutingManifest(manifestPath);
     if (ownsManifest && routingManifest?.parentSessionId !== ctx.sessionManager.getSessionId()) routingManifest = undefined;

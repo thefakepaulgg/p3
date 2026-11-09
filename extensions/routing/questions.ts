@@ -6,6 +6,7 @@ import { Type } from "typebox";
 import { assignmentDirectory, atomicWriteArtifact, pathForResultRef, readAssignmentReceipt, askPathForAssignment } from "./artifacts.ts";
 import { prepareEvidence } from "./evidence.ts";
 import { readRoutingManifest } from "./manifest.ts";
+import { selfIdentity } from "./mux.ts";
 
 export interface AskIdentity {
   requestId: string;
@@ -83,7 +84,7 @@ function owner(assignmentId: string, ctx: ExtensionContext): AskIdentity {
   const tasks = manifest?.tasks.filter((task) => task.assignmentId === assignmentId);
   const task = tasks?.length === 1 ? tasks[0] : undefined;
   if (process.env.PI_ROUTED_ASSIGNMENT_ID !== assignmentId || !receipt || receipt.outcome !== "running" ||
-    receipt.sessionId !== ctx.sessionManager.getSessionId() || receipt.paneId !== process.env.HERDR_PANE_ID || !task ||
+    receipt.sessionId !== ctx.sessionManager.getSessionId() || receipt.paneId !== selfIdentity().id || !task ||
     task.sessionId !== receipt.sessionId || task.paneId !== receipt.paneId || task.terminalId !== receipt.terminalId ||
     task.requestId !== receipt.requestId || !task.parentSessionId || task.parentSessionId !== manifest?.parentSessionId) {
     throw new Error("Question owner does not match the current routed manifest and receipt");

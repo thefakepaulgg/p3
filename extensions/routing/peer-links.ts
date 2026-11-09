@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { MuxAgent } from "./mux.ts";
 
 // Herdr's terminal ID identifies the live terminal behind a pane without tying links to a Pi session restart.
 export interface PeerIdentity { pane: string; terminal: string }
@@ -76,9 +77,9 @@ export function canMessage(sender: PeerIdentity, recipient: PeerIdentity): boole
     childOf(edge.parent, sender) && childOf(edge.parent, recipient);
 }
 
-export const peerIdentity = (agent: any, pane: string): PeerIdentity => {
-  if (agent?.pane_id !== pane || agent?.agent !== "pi" || typeof agent?.terminal_id !== "string" || !agent.terminal_id) {
+export const peerIdentity = (agent: MuxAgent | undefined, pane: string): PeerIdentity => {
+  if (agent?.paneId !== pane || agent?.kind !== "pi" || typeof agent?.terminalId !== "string" || !agent.terminalId) {
     throw new Error(`No live Pi agent identity for pane ${pane}`);
   }
-  return { pane, terminal: agent.terminal_id };
+  return { pane, terminal: agent.terminalId };
 };

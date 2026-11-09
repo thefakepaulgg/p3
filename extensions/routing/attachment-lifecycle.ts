@@ -3,6 +3,7 @@ import { chmodSync, realpathSync, rmSync, statSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerReadonlyWorkerPolicy } from "./worker-policy.ts";
+import { selfIdentity } from "./mux.ts";
 import { attachmentSocketPath, readAttachmentControlToken, readAttachmentPresence, readAttachmentRecord, writeAttachmentPresence, type AttachmentPresence } from "./attachment-store.ts";
 
 export * from "./attachment-store.ts";
@@ -33,7 +34,7 @@ export default function attachmentLifecycle(pi: ExtensionAPI): void {
     const token = readAttachmentControlToken(attachmentId);
     const ctx = context;
     if (!ctx || !onClaimedSession || !record || !token || request.token !== token || request.attachmentId !== attachmentId ||
-      request.parentSessionId !== record.parentSessionId || request.paneId !== record.paneId || request.paneId !== process.env.HERDR_PANE_ID ||
+      request.parentSessionId !== record.parentSessionId || request.paneId !== record.paneId || request.paneId !== selfIdentity().id ||
       request.terminalId !== record.terminalId || request.sessionId !== record.sessionId || ctx.sessionManager.getSessionId() !== record.sessionId) {
       throw new Error("Attachment control identity is unverified");
     }
@@ -52,7 +53,7 @@ export default function attachmentLifecycle(pi: ExtensionAPI): void {
     const record = readAttachmentRecord(attachmentId);
     const previous = readAttachmentPresence(attachmentId);
     const sessionPath = canonical(ctx.sessionManager.getSessionFile());
-    const paneId = process.env.HERDR_PANE_ID;
+    const paneId = selfIdentity().id;
     const sameProcess = !previous || previous.pid === process.pid;
     onClaimedSession = !!record && !!paneId && sameProcess && !previous?.drift && ["starting", "open"].includes(record.status) &&
       sessionPath === record.sessionPath && ctx.sessionManager.getSessionId() === record.sessionId && paneId === record.paneId;

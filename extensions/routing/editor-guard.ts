@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { assignmentDirectory, atomicWriteArtifact } from "./artifacts.ts";
 import { readRoutingManifest } from "./manifest.ts";
+import { selfIdentity } from "./mux.ts";
 import type { TaskHandle } from "./state.ts";
 
 const socketPath = (id: string) => join(tmpdir(), `p3-editor-${process.getuid?.() ?? "local"}-${createHash("sha256").update(id).digest("hex").slice(0, 20)}.sock`);
@@ -50,7 +51,7 @@ export function registerWorkerEditorGuard(pi: ExtensionAPI, assignmentId: string
           const request = JSON.parse(input.slice(0, end));
           const manifest = readRoutingManifest(process.env.PI_ROUTING_MANIFEST);
           const task = manifest?.tasks.find((task) => task.assignmentId === assignmentId && task.handle === request.handle);
-          if (!context?.hasUI || !task || task.messageToken !== request.token || task.paneId !== request.paneId || task.paneId !== process.env.HERDR_PANE_ID ||
+          if (!context?.hasUI || !task || task.messageToken !== request.token || task.paneId !== request.paneId || task.paneId !== selfIdentity().id ||
             task.terminalId !== request.terminalId || task.sessionId !== context.sessionManager.getSessionId() || task.sessionId !== request.sessionId ||
             task.parentSessionId !== request.parentSessionId || manifest?.parentSessionId !== request.parentSessionId || request.assignmentId !== assignmentId ||
             !Array.isArray(request.instructions) || request.instructions.length > 32) throw new Error("Worker editor identity is unverified");

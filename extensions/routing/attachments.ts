@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { validateContinuation, withSessionStartLock } from "./continuation.ts";
 import { orchestrationError } from "./errors.ts";
-import { buildRoutedWorkerPiArgs, parseJson, readHerdrSessionId, runHerdr, verifyTaskAgent, waitForHerdrAgentReady } from "./herdr.ts";
+import { buildRoutedWorkerPiArgs, readHerdrSessionId, verifyTaskAgent, waitForHerdrAgentReady } from "./herdr.ts";
+import { mux, selfIdentity, type MuxAgent } from "./mux.ts";
 import { isActiveTask, type TaskHandle } from "./state.ts";
 import { readIncrementalUsage } from "./usage.ts";
 import {
@@ -39,11 +40,11 @@ function requireOwned(ctx: ExtensionContext, id: string): AttachmentRecord {
 
 /** Exact pane → terminal → saved session chain for the recorded attachment. */
 async function verifyLive(pi: ExtensionAPI, record: AttachmentRecord): Promise<void> {
-  const agent = parseJson(await runHerdr(pi, ["agent", "get", record.paneId!], 5000), "attachment identity")?.result?.agent;
-  const path = agent?.agent_session?.value;
+  const agent = await mux().getAgent(pi, record.paneId!);
+  const path = agent?.sessionPath;
   let canonical: string | undefined;
   try { canonical = path ? realpathSync(path) : undefined; } catch { /* unverified */ }
-  if (agent?.pane_id !== record.paneId || !record.terminalId || agent.terminal_id !== record.terminalId) throw new Error("Attachment terminal identity is unverified or replaced");
+  if (agent?.paneId !== record.paneId || !record.terminalId || agent?.terminalId !== record.terminalId) throw new Error("Attachment terminal identity is unverified or replaced");
   if (canonical !== record.sessionPath || readHerdrSessionId(path) !== record.sessionId) throw new Error("Attachment Pi session identity is unverified or replaced");
   const presence = readAttachmentPresence(record.attachmentId);
   if (presence?.drift) throw new Error("Attachment session drift was recorded; parent control is refused");
@@ -51,10 +52,10 @@ async function verifyLive(pi: ExtensionAPI, record: AttachmentRecord): Promise<v
 }
 
 async function proveAbsent(pi: ExtensionAPI, record: AttachmentRecord): Promise<boolean> {
-  const agents = parseJson(await runHerdr(pi, ["agent", "list"], 5000), "attachment inventory")?.result?.agents;
-  if (!Array.isArray(agents)) return false;
-  return !agents.some((agent: any) => (record.paneId && agent.pane_id === record.paneId) || (record.terminalId && agent.terminal_id === record.terminalId) ||
-    readHerdrSessionId(agent.agent_session?.value) === record.sessionId || agent.agent_session?.value === record.sessionPath);
+  const agents = await mux().listAgents(pi);
+  if (!agents) return false;
+  return !agents.some((agent) => (record.paneId && agent.paneId === record.paneId) || (record.terminalId && agent.terminalId === record.terminalId) ||
+    readHerdrSessionId(agent.sessionPath) === record.sessionId || agent.sessionPath === record.sessionPath);
 }
 
 /** Final window: the attached process's own shutdown size when it ended on the claimed session; otherwise partial. */
@@ -114,7 +115,7 @@ export async function focusAttachment(pi: ExtensionAPI, ctx: ExtensionContext, i
   const record = await refreshAttachment(pi, requireOwned(ctx, id).attachmentId);
   if (record.status !== "open") throw new Error(`Attachment ${id} is ${record.status}; it cannot be focused`);
   await verifyLive(pi, record);
-  await runHerdr(pi, ["pane", "focus", record.paneId!], 5000);
+  await mux().focusPane(pi, record.paneId!);
   return { record, text: `Focused attached session ${record.sessionId} (${record.sourceHandle}) in pane ${record.paneId}.${record.error ? ` ${record.error}` : ""}` };
 }
 
@@ -128,12 +129,12 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
   if (task.parentSessionId !== parentSessionId) throw new Error("Attachment is limited to this parent's owned session history");
   // Any retained original pane is focused for inspection; a saved session is only activated once that executor is gone.
   if (task.paneId && !task.paneClosedAt) {
-    let agent: any;
-    try { agent = parseJson(await runHerdr(pi, ["agent", "get", task.agentName ?? task.paneId], 5000), "worker identity")?.result?.agent; }
+    let agent: MuxAgent | undefined;
+    try { agent = await mux().getAgent(pi, task.agentName ?? task.paneId); }
     catch (error) { if (isActiveTask(task) || !/agent_not_found/.test(error instanceof Error ? error.message : String(error))) throw error; }
     if (agent) {
       verifyTaskAgent({ ...task }, agent); // copy: the source task is never rewritten
-      await runHerdr(pi, ["pane", "focus", task.paneId], 5000);
+      await mux().focusPane(pi, task.paneId);
       return { text: `Focused ${isActiveTask(task) ? "active" : "retained"} worker ${task.handle} in its original pane ${task.paneId}.` };
     }
   }
@@ -148,9 +149,8 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
   return withSessionStartLock(initial.path, async () => {
     const saved = await validateContinuation(pi, ctx, task, tasks);
     assertSessionUnattached(saved.path);
-    const workspaceId = process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID;
-    const rootTabId = process.env.PI_ROUTED_ROOT_TAB_ID ?? process.env.HERDR_TAB_ID;
-    if (process.env.HERDR_ENV !== "1" || !workspaceId || !rootTabId) throw new Error("Attachment requires a Herdr-managed parent with workspace and tab context");
+    const { backend, rootWorkspaceId: workspaceId, rootTabId } = selfIdentity();
+    if (!backend || !workspaceId || !rootTabId) throw new Error("Attachment requires a Herdr-managed parent with workspace and tab context");
     const record: AttachmentRecord = {
       version: 1, attachmentId: randomUUID(), parentSessionId, handle: task.handle, sourceHandle: task.handle, sourceAssignmentId: task.assignmentId,
       sessionPath: saved.path, sessionId: saved.id, cwd: saved.cwd, model: saved.model, thinking: saved.thinking, readonly: task.readonly,
@@ -167,18 +167,19 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
       else writeAttachmentRecord(record);
     };
 
-    let created: any;
+    let created: { paneId?: string; tabId?: string };
     try {
-      created = parseJson(await runHerdr(pi, ["tab", "create", "--workspace", workspaceId, "--cwd", saved.cwd, "--label", `Attached · ${task.label}`.slice(0, 80),
-        "--env", `PI_ROUTED_ROOT_WORKSPACE_ID=${workspaceId}`, "--env", `PI_ROUTED_ROOT_TAB_ID=${rootTabId}`,
-        ...(manifestPath ? ["--env", `PI_ROUTING_MANIFEST=${manifestPath}`] : []),
-        "--env", `PI_ROUTED_ATTACHMENT_ID=${record.attachmentId}`, ...(task.readonly ? ["--env", "PI_ROUTED_READONLY=1"] : [])], 10000), "attachment tab create");
+      created = await mux().createTab(pi, { workspaceId, cwd: saved.cwd, label: `Attached · ${task.label}`.slice(0, 80), focus: true, env: {
+        PI_ROUTED_ROOT_WORKSPACE_ID: workspaceId, PI_ROUTED_ROOT_TAB_ID: rootTabId,
+        ...(manifestPath ? { PI_ROUTING_MANIFEST: manifestPath } : {}),
+        PI_ROUTED_ATTACHMENT_ID: record.attachmentId, ...(task.readonly ? { PI_ROUTED_READONLY: "1" } : {}),
+      } });
     } catch (error) {
       fail("unknown", error);
       throw orchestrationError(error, "attach", { stage: "tab_create", retrySafe: "unknown", ids: { sessionId: saved.id }, nextAction: `Inspect attachment ${record.attachmentId}; its claim is retained until the tab outcome is known.` });
     }
-    record.paneId = created?.result?.root_pane?.pane_id;
-    record.tabId = created?.result?.tab?.tab_id;
+    record.paneId = created.paneId;
+    record.tabId = created.tabId;
     if (!record.paneId || !record.tabId) {
       fail("unknown", "Herdr tab creation returned no exact tab/root pane identity");
       throw orchestrationError(new Error("Herdr tab creation returned no exact tab/root pane identity"), "attach", { stage: "tab_create", retrySafe: "unknown", nextAction: "Inspect Herdr before retrying; no guessed tab was removed." });
@@ -196,16 +197,16 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
       for (const delay of [150, 350, 750, 1500]) {
         await pause(delay);
         try {
-          const agent = parseJson(await runHerdr(pi, ["agent", "start", record.agentName, "--kind", "pi", "--pane", record.paneId, "--timeout", "30000", "--", ...args], 40000), "attachment start")?.result?.agent;
-          if (!(agent?.interactive_ready === true && agent.launch_pending !== true)) await waitForHerdrAgentReady(pi, record.agentName);
+          const agent = await mux().startAgent(pi, record.agentName, record.paneId, args);
+          if (!(agent?.interactiveReady === true && agent.launchPending !== true)) await waitForHerdrAgentReady(pi, record.agentName);
           started = true;
           break;
         } catch (error) { if (!/agent_pane_busy/.test(error instanceof Error ? error.message : String(error))) throw error; }
       }
       if (!started) throw new Error("Attachment pane did not become available");
-      const info = parseJson(await runHerdr(pi, ["agent", "get", record.agentName], 5000), "attachment identity")?.result?.agent;
-      if (info?.pane_id !== record.paneId || !info.terminal_id) throw new Error("Attachment terminal identity is unverified");
-      record.terminalId = info.terminal_id;
+      const info = await mux().getAgent(pi, record.agentName);
+      if (info?.paneId !== record.paneId || !info.terminalId) throw new Error("Attachment terminal identity is unverified");
+      record.terminalId = info.terminalId;
       const presence = readAttachmentPresence(record.attachmentId);
       if (!presence || presence.drift || presence.sessionId !== saved.id || presence.sessionPath !== saved.path || presence.paneId !== record.paneId || pidState(presence.pid) !== "alive") throw new Error("Attached Pi process did not publish its exact session identity");
       record.workerPid = presence.pid;
@@ -216,7 +217,7 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
       // Roll back only when the exact fresh tab demonstrably holds no Pi process.
       let rolledBack = false;
       try {
-        if (!readAttachmentPresence(record.attachmentId) && await proveAbsent(pi, record)) { await runHerdr(pi, ["tab", "close", record.tabId], 5000); rolledBack = true; }
+        if (!readAttachmentPresence(record.attachmentId) && await proveAbsent(pi, record)) { await mux().closeTab(pi, record.tabId); rolledBack = true; }
       } catch { /* retained for inspection */ }
       fail(rolledBack ? "failed" : "unknown", error);
       throw orchestrationError(error, "attach", { stage: "agent_start", rollbackOccurred: rolledBack, retrySafe: rolledBack ? true : "unknown", ids: { sessionId: saved.id, paneId: record.paneId, tabId: record.tabId },
@@ -238,10 +239,10 @@ export async function closeAttachment(pi: ExtensionAPI, ctx: ExtensionContext, i
   while (pidState(record.workerPid) === "alive" && Date.now() < deadline) await pause(100);
   if (pidState(record.workerPid) !== "exited") throw new Error(`Attached Pi process ${record.workerPid} has not exited; the claim is retained`);
   try {
-    const panes = parseJson(await runHerdr(pi, ["pane", "list", "--workspace", process.env.PI_ROUTED_ROOT_WORKSPACE_ID ?? process.env.HERDR_WORKSPACE_ID ?? ""], 5000), "attachment topology")?.result?.panes;
-    const tabPanes = Array.isArray(panes) ? panes.filter((pane: any) => pane.tab_id === record.tabId) : [];
-    if (tabPanes.length === 1 && tabPanes[0].pane_id === record.paneId) await runHerdr(pi, ["tab", "close", record.tabId!], 5000);
-    else if (tabPanes.some((pane: any) => pane.pane_id === record.paneId)) await runHerdr(pi, ["pane", "close", record.paneId!], 5000);
+    const panes = await mux().listPanes(pi, selfIdentity().rootWorkspaceId ?? "");
+    const tabPanes = panes ? panes.filter((pane) => pane.tabId === record.tabId) : [];
+    if (tabPanes.length === 1 && tabPanes[0].paneId === record.paneId) await mux().closeTab(pi, record.tabId!);
+    else if (tabPanes.some((pane) => pane.paneId === record.paneId)) await mux().closePane(pi, record.paneId!);
   } catch (error) {
     throw orchestrationError(error, "attach.close", { stage: "pane_cleanup", retrySafe: "unknown", ids: { attachmentId: id, paneId: record.paneId }, nextAction: "The Pi process exited; verify the exact leftover pane before retrying cleanup. Its claim remains held." });
   }
