@@ -35,6 +35,17 @@ install -m 700 scripts/pi-telegram-notify ~/.local/bin/pi-telegram-notify
 
 Telegram replies default to off. Run `/notify replies-on` or `/notify replies-off` to control them independently from notifications. When enabled in a private chat with the bot, reply to a notification within one hour to send that reply back to the Pi session that produced it. Replies must come from the user represented by the configured private chat ID; Telegram input is passed to Pi as literal text without slash-command or prompt-template expansion. The extension remains disabled when the helper is unavailable.
 
+## Herdr TUI and Herdr Core
+
+Routing works under either Herdr backend; they do not share agents. A session inside a Herdr Core terminal (`HC_TERMINAL_ID` set, as in the Herdr App) uses the core socket. Otherwise a Herdr TUI pane (`HERDR_ENV=1`, `HERDR_PANE_ID`) uses the TUI socket. All access goes through `extensions/routing/mux.ts`.
+
+On Herdr Core:
+
+- Subagents run as child terminals of the primary (`outlive_parent`, `no_notify`) and appear under it in the Herdr App's agent list instead of in dedicated tabs. Pi reports its own status. `focus` does nothing and points you to the sidebar, and closing a worker kills and removes its terminal.
+- `workspace_agent` runs `git worktree add` itself (`~/.herdr/worktrees/<repo>/<branch>`) and starts the peer with `herdr.space`/`herdr.tab` labels. The Herdr App then shows it in its own space, nested under the repository's main checkout when that has a space. Attachments open as a new tab in the primary's space.
+- Peer messages keep p3's own protocol and receipts; the primary and peer must share a user and `TMPDIR`.
+- Workers never receive `HERDR_*` variables. The core gives terminals the environment it started with, so start it outside any Herdr TUI pane (for example from a login service).
+
 ## Background bash
 
 In the interactive TUI, p3 replaces the built-in `bash` tool. A command that finishes within 10 seconds returns exactly the built-in result (same text, renderer, and `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }` value). A command still running after 10 seconds keeps running in the Pi process and the tool returns immediately with `{ status: "running", job_id, output, truncated, full_output_path?, wall_time_seconds }` and no `exit_code`, so the agent is free to chat. When the job ends, one `bash-job-complete` message with the exit code (or failure/timeout reason) and the built-in-bounded output (last 2000 lines or 50KB, with a full-output path when truncated) is delivered as a steer and starts a turn if the agent is idle. `bash_job` reads a job's current status and output, or stops it.

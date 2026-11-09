@@ -24,7 +24,7 @@ interface Grant {
 
 const GrantParams = Type.Object({
   action: StringEnum(["propose", "revoke", "list"] as const),
-  target: Type.Optional(Type.String({ minLength: 1, description: "Herdr agent name or pane ID (propose)" })),
+  target: Type.Optional(Type.String({ minLength: 1, description: "Herdr agent name, pane ID, or terminal ID (propose)" })),
   repository: Type.Optional(Type.String({ pattern: "^[^/\\s]+/[^/\\s]+$", description: "Repository owner/name (propose)" })),
   prNumbers: Type.Optional(Type.Array(Type.Integer({ minimum: 1 }), { minItems: 1, description: "PR numbers (propose)" })),
   condition: Type.Optional(Type.String({ minLength: 1, description: "Optional grant condition (propose)" })),
@@ -107,7 +107,7 @@ export default function registerAgentGrants(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "agent_grants",
     label: "Agent Grants",
-    description: "List only active, user-confirmed merge grants addressed to this Herdr pane, directly from the local grants store. Grants do not intercept commands.",
+    description: "List only active, user-confirmed merge grants addressed to this Herdr pane or terminal, directly from the local grants store. Grants do not intercept commands.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const recipientPane = paneId();

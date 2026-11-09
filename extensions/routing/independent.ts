@@ -17,7 +17,7 @@ import { shouldInterruptPeer } from "./peer-priority.ts";
 import { canMessage, connectSiblings, connectUserDirected, disconnectSiblings, disconnectUserDirected, peerIdentity, recordChild } from "./peer-links.ts";
 
 const WorkspaceAgentParams = Type.Object({
-  action: StringEnum(["create", "open"] as const, { description: "Create a worktree or open an existing one as a Herdr workspace" }),
+  action: StringEnum(["create", "open"] as const, { description: "Create a worktree or open an existing one as a Herdr workspace (a space in the Herdr App)" }),
   branch: Type.Optional(Type.String({ minLength: 1, description: "Branch to create or open" })),
   repo: Type.Optional(Type.String({ minLength: 1, description: "Repository checkout path. Omit to use the current workspace's repository." })),
   path: Type.Optional(Type.String({ minLength: 1, description: "Existing worktree path (open only)" })),
@@ -27,7 +27,7 @@ const WorkspaceAgentParams = Type.Object({
 });
 
 const MessageAgentParams = Type.Object({
-  target: Type.String({ minLength: 1, description: "Recipient's Herdr agent name or pane ID, including across workspaces" }),
+  target: Type.String({ minLength: 1, description: "Recipient's Herdr agent name, pane ID, or Herdr Core terminal ID, including across workspaces" }),
   text: Type.String({ minLength: 1, maxLength: 4000, description: "Message to the other agent" }),
   supersedes: Type.Optional(Type.String({ description: "ID of your previous message to replace if it is outdated" })),
   files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32 })),
@@ -35,15 +35,15 @@ const MessageAgentParams = Type.Object({
 
 const PeerConnectionParams = Type.Object({
   action: StringEnum(["connect", "disconnect"] as const),
-  first: Type.String({ minLength: 1, description: "First agent name or pane ID" }),
-  second: Type.String({ minLength: 1, description: "Second agent name or pane ID" }),
+  first: Type.String({ minLength: 1, description: "First agent name, pane ID, or terminal ID" }),
+  second: Type.String({ minLength: 1, description: "Second agent name, pane ID, or terminal ID" }),
   task: Type.Optional(Type.String({ minLength: 1, description: "Named task (required on connect)" })),
 });
 
 const PeerInboxParams = Type.Object({});
 
 const MessageStatusParams = Type.Object({
-  target: Type.String({ minLength: 1, description: "Recipient's agent name or pane ID" }),
+  target: Type.String({ minLength: 1, description: "Recipient's agent name, pane ID, or terminal ID" }),
   id: Type.String({ minLength: 1, description: "ID returned by message_agent" }),
 });
 
@@ -229,7 +229,7 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "workspace_agent",
     label: "Workspace Agent",
-    description: "At the user's request, create or open a Git worktree from the current or a specified repository in its own Herdr workspace and start an independent Pi agent there. Unlike a subagent, it remains available for direct interaction and does not report completion here. Uses Herdr's socket API, not the CLI.",
+    description: "At the user's request, create or open a Git worktree from the current or a specified repository in its own Herdr workspace (a space in the Herdr App) and start an independent Pi agent there. Unlike a subagent, it remains available for direct interaction and does not report completion here. Uses the Herdr socket API, not the CLI.",
     parameters: WorkspaceAgentParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const failure: Partial<OrchestrationErrorDetails> = { stage: "preflight", retrySafe: true, ids: {} };

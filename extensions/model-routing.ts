@@ -48,7 +48,7 @@ const RoutedTaskParams = Type.Object({
     description: "Optional paths this task owns, relative to cwd unless absolute. Launch is refused only if another active task in the same tree declared overlapping paths.",
   })),
   pane_retention: Type.Optional(StringEnum(["keep", "close"] as const, {
-    description: "Herdr-only completed-pane policy. close (default for bounded tasks) removes it only after persisting the result and proving receipt in the parent conversation. keep explicitly preserves it; background workers stay open.",
+    description: "Herdr-only completed-pane policy (on Herdr Core, the worker's terminal). close (default for bounded tasks) removes it only after persisting the result and proving receipt in the parent conversation. keep explicitly preserves it; background workers stay open.",
   })),
   files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32, description: "Explicit evidence files or durable result:<UUID> references; small UTF-8 files are snapshotted, larger files remain canonical references." })),
   readonly: Type.Optional(Type.Boolean({ description: "Restrict this worker to read/search and parent reporting; no bash, edits, writes, delegation, or MCP tools." })),
@@ -66,7 +66,7 @@ const RoutedTaskControlParams = Type.Object({
   message: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "Explicit direction for steer/interrupt/resume, or the answer for reply. Original tasks are never replayed." })),
   ask_id: Type.Optional(Type.String({ minLength: 1, description: "Exact outstanding question ID; required for reply." })),
   files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32, description: "Explicit evidence accompanying steer." })), 
-  close_pane: Type.Optional(Type.Boolean({ description: "For Herdr stop, also close the owned pane. Default false." })),
+  close_pane: Type.Optional(Type.Boolean({ description: "For Herdr stop, also close the owned pane (on Herdr Core, kill and remove its terminal). Default false." })),
 });
 
 export { classifyDelegation, classifyModelRoute, planFallback } from "./routing/policy.ts";
