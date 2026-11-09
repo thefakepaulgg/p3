@@ -7,7 +7,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { formatProgramStatus, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type TSchema } from "typebox";
 import { redactSensitiveText } from "./advisor/context.ts";
 
@@ -76,8 +76,27 @@ export default function bashBackground(pi: ExtensionAPI) {
   let deferred: Job[] = [];
   let settling = false;
   let lastPending = 0;
+  /**
+   * Herdr Core shows the status Pi reports over OSC 7501, and Pi reports its resting state as soon as a run
+   * settles, even while jobs it started are still running. While idle with running jobs, report `working`
+   * instead, and Pi's resting state again once they finish without starting a run.
+   */
+  const reportsStatus = !!process.env.HC_TERMINAL_ID && process.env.PI_PROGRAM_STATUS !== "0";
+  let runActive = false;
+  let restingState: "done" | "idle" = "idle";
+  let reportedJobs = 0;
+  const syncProgramStatus = () => {
+    if (!reportsStatus || !installed || disposed || runActive) return;
+    const running = [...jobs.values()].filter((job) => job.state === "running").length;
+    if (running === reportedJobs) return;
+    reportedJobs = running;
+    process.stdout.write(formatProgramStatus(running
+      ? { state: "working", app: "pi", message: `Waiting on ${running} bash job${running === 1 ? "" : "s"}` }
+      : { state: restingState, app: "pi" }));
+  };
   const publishPending = () => {
     if (disposed) return;
+    syncProgramStatus();
     const pending = [...jobs.values()].filter((job) => job.state === "running").length + undelivered.size;
     if (pending === lastPending) return;
     lastPending = pending;
@@ -368,12 +387,21 @@ export default function bashBackground(pi: ExtensionAPI) {
     const jobId = (message.details as { jobId?: unknown } | undefined)?.jobId;
     if (typeof jobId === "string" && undelivered.delete(jobId)) publishPending();
   });
+  pi.on("agent_start", () => {
+    runActive = true;
+    // Pi reports its own run; a later override starts from scratch.
+    reportedJobs = 0;
+  });
   // Pi's last queued-message check happens after agent_before_settle handlers return, so a steer sent
   // from here until agent_settled may be stranded. Hold those completions and start a fresh run instead:
   // a triggerTurn message sent during agent_settled is queued by Pi until that run has fully settled.
   pi.on("agent_before_settle", () => { settling = true; });
   pi.on("turn_start", () => { settling = false; });
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (event) => {
+    runActive = false;
+    restingState = event.aborted ? "idle" : "done";
+    // After Pi's own settled report, which would otherwise replace this one.
+    setTimeout(syncProgramStatus, 0);
     settling = false;
     const held = deferred;
     deferred = [];
