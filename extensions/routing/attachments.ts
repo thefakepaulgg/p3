@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { validateContinuation, withSessionStartLock } from "./continuation.ts";
 import { orchestrationError } from "./errors.ts";
 import { buildRoutedWorkerPiArgs, readHerdrSessionId, verifyTaskAgent, waitForHerdrAgentReady } from "./herdr.ts";
-import { mux, selfIdentity, type MuxAgent } from "./mux.ts";
+import { mux, selfPlacement, type MuxAgent } from "./mux.ts";
 import { isActiveTask, type TaskHandle } from "./state.ts";
 import { readIncrementalUsage } from "./usage.ts";
 import {
@@ -149,8 +149,9 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
   return withSessionStartLock(initial.path, async () => {
     const saved = await validateContinuation(pi, ctx, task, tasks);
     assertSessionUnattached(saved.path);
-    const { backend, rootWorkspaceId: workspaceId, rootTabId } = selfIdentity();
-    if (!backend || !workspaceId || !rootTabId) throw new Error("Attachment requires a Herdr-managed parent with workspace and tab context");
+    const { backend, rootWorkspaceId: workspaceId, rootTabId } = await selfPlacement(pi);
+    // A core parent without App placement labels is still valid: its attachment is then listed in the sidebar only.
+    if (!backend || (backend === "tui" && (!workspaceId || !rootTabId))) throw new Error("Attachment requires a Herdr-managed parent with workspace and tab context");
     const record: AttachmentRecord = {
       version: 1, attachmentId: randomUUID(), parentSessionId, handle: task.handle, sourceHandle: task.handle, sourceAssignmentId: task.assignmentId,
       sessionPath: saved.path, sessionId: saved.id, cwd: saved.cwd, model: saved.model, thinking: saved.thinking, readonly: task.readonly,
@@ -169,8 +170,8 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
 
     let created: { paneId?: string; tabId?: string };
     try {
-      created = await mux().createTab(pi, { workspaceId, cwd: saved.cwd, label: `Attached · ${task.label}`.slice(0, 80), focus: true, env: {
-        PI_ROUTED_ROOT_WORKSPACE_ID: workspaceId, PI_ROUTED_ROOT_TAB_ID: rootTabId,
+      created = await mux().createTab(pi, { workspaceId: workspaceId ?? "", cwd: saved.cwd, label: `Attached · ${task.label}`.slice(0, 80), focus: true, labels: { "p3.attachment": record.attachmentId }, env: {
+        ...(workspaceId ? { PI_ROUTED_ROOT_WORKSPACE_ID: workspaceId } : {}), ...(rootTabId ? { PI_ROUTED_ROOT_TAB_ID: rootTabId } : {}),
         ...(manifestPath ? { PI_ROUTING_MANIFEST: manifestPath } : {}),
         PI_ROUTED_ATTACHMENT_ID: record.attachmentId, ...(task.readonly ? { PI_ROUTED_READONLY: "1" } : {}),
       } });
@@ -198,6 +199,8 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
         await pause(delay);
         try {
           const agent = await mux().startAgent(pi, record.agentName, record.paneId, args);
+          // Core: the reserved placement becomes the started terminal's address.
+          if (agent?.paneId && agent.paneId !== record.paneId) { record.paneId = agent.paneId; writeAttachmentRecord(record); }
           if (!(agent?.interactiveReady === true && agent.launchPending !== true)) await waitForHerdrAgentReady(pi, record.agentName);
           started = true;
           break;
@@ -239,7 +242,7 @@ export async function closeAttachment(pi: ExtensionAPI, ctx: ExtensionContext, i
   while (pidState(record.workerPid) === "alive" && Date.now() < deadline) await pause(100);
   if (pidState(record.workerPid) !== "exited") throw new Error(`Attached Pi process ${record.workerPid} has not exited; the claim is retained`);
   try {
-    const panes = await mux().listPanes(pi, selfIdentity().rootWorkspaceId ?? "");
+    const panes = await mux().listPanes(pi, (await selfPlacement(pi)).rootWorkspaceId ?? "");
     const tabPanes = panes ? panes.filter((pane) => pane.tabId === record.tabId) : [];
     if (tabPanes.length === 1 && tabPanes[0].paneId === record.paneId) await mux().closeTab(pi, record.tabId!);
     else if (tabPanes.some((pane) => pane.paneId === record.paneId)) await mux().closePane(pi, record.paneId!);

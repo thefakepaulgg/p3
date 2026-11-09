@@ -3,7 +3,7 @@ import { chmodSync, realpathSync, rmSync, statSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerReadonlyWorkerPolicy } from "./worker-policy.ts";
-import { selfIdentity } from "./mux.ts";
+import { isReservedPane, selfIdentity } from "./mux.ts";
 import { attachmentSocketPath, readAttachmentControlToken, readAttachmentPresence, readAttachmentRecord, writeAttachmentPresence, type AttachmentPresence } from "./attachment-store.ts";
 
 export * from "./attachment-store.ts";
@@ -56,7 +56,9 @@ export default function attachmentLifecycle(pi: ExtensionAPI): void {
     const paneId = selfIdentity().id;
     const sameProcess = !previous || previous.pid === process.pid;
     onClaimedSession = !!record && !!paneId && sameProcess && !previous?.drift && ["starting", "open"].includes(record.status) &&
-      sessionPath === record.sessionPath && ctx.sessionManager.getSessionId() === record.sessionId && paneId === record.paneId;
+      sessionPath === record.sessionPath && ctx.sessionManager.getSessionId() === record.sessionId &&
+      // Core: the parent records the terminal address once its launch returns, possibly after this starts; it verifies the pane afterwards.
+      (paneId === record.paneId || isReservedPane(record.paneId));
     if (!onClaimedSession) {
       // Report drift instead of guessing which session the parent should control.
       const presence: AttachmentPresence = previous && !sameProcess ? previous : {

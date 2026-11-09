@@ -6,7 +6,8 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readHerdrSessionId, waitForHerdrAgentReady } from "./herdr.ts";
-import { mux, selfIdentity } from "./mux.ts";
+import { mux, detectMux, selfIdentity, selfPlacement } from "./mux.ts";
+import { registerRoutedSessionIdentity } from "./session-identity.ts";
 import { orchestrationErrorResult, type OrchestrationErrorDetails } from "./errors.ts";
 import { pathForResultRef } from "./artifacts.ts";
 import { prepareEvidence } from "./evidence.ts";
@@ -46,13 +47,19 @@ const MessageStatusParams = Type.Object({
   id: Type.String({ minLength: 1, description: "ID returned by message_agent" }),
 });
 
-const requirePane = () => {
-  const { backend, id, workspaceId } = selfIdentity();
-  if (!backend || !id || !workspaceId) {
+/**
+ * TUI panes always have a workspace. A core terminal has one only when the Herdr App placed it (or
+ * p3 launched it with a space label); without one it is still a valid peer, in no shared workspace.
+ */
+const requirePane = async (pi: ExtensionAPI): Promise<{ paneId: string; workspaceId?: string }> => {
+  const { backend, id, workspaceId } = await selfPlacement(pi);
+  if (!backend || !id || (backend === "tui" && !workspaceId)) {
     throw new Error("This tool requires a Herdr-managed pane");
   }
   return { paneId: id, workspaceId };
 };
+
+const sameWorkspace = (a?: string, b?: string) => a !== undefined && a === b;
 
 async function promptAgent(pi: ExtensionAPI, target: string, text: string) {
   try {
@@ -65,6 +72,8 @@ async function promptAgent(pi: ExtensionAPI, target: string, text: string) {
 }
 
 export function registerIndependentAgentTools(pi: ExtensionAPI) {
+  // Peers are identified by the Pi session label core terminals carry; Herdr TUI learns it from its own integration.
+  if (detectMux() === "core") registerRoutedSessionIdentity(pi);
   let inbox: Server | undefined;
   let inboxPath: string | undefined;
   let activeContext: import("@earendil-works/pi-coding-agent").ExtensionContext | undefined;
@@ -168,7 +177,7 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
         !message.text.trim() || message.text.length > 4000 || message.evidence !== undefined && (typeof message.evidence !== "string" || Buffer.byteLength(message.evidence) > 256 * 1024) || message.senderPane === paneId) throw new Error("Invalid peer message");
       const sender = await getAgent(message.senderPane);
       const recipient = await getAgent(paneId);
-      if (sender.workspaceId === selfIdentity().workspaceId) throw new Error("Recipient must be in another workspace");
+      if (sameWorkspace(sender.workspaceId, (await selfPlacement(pi)).workspaceId)) throw new Error("Recipient must be in another workspace");
       const senderIdentity = peerIdentity(sender, message.senderPane);
       const recipientIdentity = peerIdentity(recipient, paneId);
       if (!canMessage(senderIdentity, recipientIdentity)) throw unauthorized();
@@ -225,10 +234,11 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const failure: Partial<OrchestrationErrorDetails> = { stage: "preflight", retrySafe: true, ids: {} };
       try {
-      const { paneId: primaryPaneId, workspaceId } = requirePane();
+      const { paneId: primaryPaneId, workspaceId } = await requirePane(pi);
       if (params.action === "create" && params.path) throw new Error("path is only supported when opening a worktree");
       if (params.action === "open" && (!!params.branch === !!params.path)) throw new Error("Open by exactly one of branch or path");
-      const source = await mux().worktreeList(pi, params.repo ? { cwd: resolve(ctx.cwd, params.repo) } : { workspaceId });
+      // Core spaces are not repositories: without an explicit repo it starts from this session's folder.
+      const source = await mux().worktreeList(pi, params.repo || detectMux() === "core" ? { cwd: resolve(ctx.cwd, params.repo ?? ".") } : { workspaceId });
       const evidence = prepareEvidence(params.files, ctx.cwd, pathForResultRef);
       const repo = await repositoryKey(source.repoRoot);
       const branch = params.branch ?? await gitText(resolve(ctx.cwd, params.path!), ["symbolic-ref", "--quiet", "--short", "HEAD"]);
@@ -246,7 +256,7 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
       const newWorkspaceId = createdWorkspace.workspaceId;
       let paneId = createdWorkspace.rootPaneId;
       if (createdWorkspace.alreadyOpen) {
-        paneId = (await mux().createTab(pi, { workspaceId: newWorkspaceId, cwd: createdWorkspace.worktreePath, label: params.description, focus: false })).paneId!;
+        paneId = (await mux().createTab(pi, { workspaceId: newWorkspaceId, cwd: createdWorkspace.worktreePath, label: params.description, focus: false, labels: { "p3.worktree": createdWorkspace.worktreePath, "p3.branch": branch } })).paneId!;
       }
       failure.stage = "agent_start"; failure.ids = { branch, paneId, workspaceId: newWorkspaceId };
       const agent = `i-${randomUUID().slice(0, 12)}`;
@@ -255,11 +265,16 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
       const startArgs = [...model, "--session-id", assignedSessionId, "--name", params.description];
       for (const delay of [150, 350, 750, 1500]) {
         await new Promise((resolve) => setTimeout(resolve, delay));
-        try { await mux().startAgent(pi, agent, paneId, startArgs); break; }
+        try {
+          // Core replaces the reserved placement with the started terminal's address.
+          paneId = (await mux().startAgent(pi, agent, paneId, startArgs))?.paneId ?? paneId;
+          break;
+        }
         catch (error) {
           if (!/agent_pane_busy/.test(error instanceof Error ? error.message : String(error)) || delay === 1500) throw error;
         }
       }
+      failure.ids = { branch, paneId, workspaceId: newWorkspaceId };
       await waitForHerdrAgentReady(pi, agent);
       const executor = await getAgent(paneId);
       const identity = peerIdentity(executor, paneId);
@@ -319,16 +334,16 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
           if (readHerdrSessionId(work.executor.sessionPath) !== work.executor.sessionId) throw new Error("Saved Pi session identity is unverified");
           const inventory = await mux().listAgents(pi);
           if (!inventory || inventory.some((agent) => agent.paneId === work.executor.pane || agent.terminalId === work.executor.terminal || readHerdrSessionId(agent.sessionPath) === work.executor.sessionId)) throw new Error("Original executor is present, moved, or ambiguous; do not start another process");
-          const placed = await mux().worktreeOpen(pi, "open", { cwd: work.worktree, branch: work.branch });
+          const placed = await mux().worktreeOpen(pi, "open", { cwd: work.worktree, branch: work.branch, reuseSpace: work.executor.workspace });
           if (realpathSync(placed.worktreePath) !== work.worktree) throw new Error("Reopened checkout differs from the recorded worktree");
           const fresh = await mux().listAgents(pi);
           if (!fresh || fresh.some((agent) => agent.workspaceId === placed.workspaceId)) throw new Error("Worktree is occupied or unverified; no second writer was started");
           let pane: string | undefined = placed.rootPaneId;
-          if (placed.alreadyOpen) pane = (await mux().createTab(pi, { workspaceId: placed.workspaceId, cwd: work.worktree, label: work.description, focus: false })).paneId;
+          if (placed.alreadyOpen) pane = (await mux().createTab(pi, { workspaceId: placed.workspaceId, cwd: work.worktree, label: work.description, focus: false, labels: { "p3.worktree": work.worktree, "p3.branch": work.branch } })).paneId;
           if (!pane) throw new Error("No exact resume pane was returned");
           const name = `i-${randomUUID().slice(0, 12)}`;
           // Continue the saved conversation once, never re-submit the original objective.
-          await mux().startAgent(pi, name, pane, ["--session", work.executor.sessionPath, "--name", work.description]);
+          pane = (await mux().startAgent(pi, name, pane, ["--session", work.executor.sessionPath, "--name", work.description]))?.paneId ?? pane;
           await waitForHerdrAgentReady(pi, name);
           const resumed = await getAgent(pane);
           const identity = peerIdentity(resumed, pane);
@@ -337,7 +352,8 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
           work.status = "paused"; work.updatedAt = Date.now(); writeBranchWork(work);
           executor = await verifyWorkExecutor(work);
         }
-        const self = peerIdentity(await getAgent(requirePane().paneId), requirePane().paneId);
+        const selfPane = (await requirePane(pi)).paneId;
+        const self = peerIdentity(await getAgent(selfPane), selfPane);
         const target = peerIdentity(executor, work.executor.pane);
         if (!canMessage(self, target) && (!directTurn || Date.now() - directTurn.at > 300000)) throw unauthorized();
         if (params.action === "pause") {
@@ -364,7 +380,7 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
     description: "Connect two workspace_agent children as their common launching primary for a named task. Alternatively, when the user directly asks you to coordinate with an existing agent in this interactive turn, connect yourself to that live agent for a named task without a second confirmation. Resolve a uniquely identified agent by role or name; ask only if multiple agents match. Either endpoint may disconnect a user-directed connection. Do not connect unsolicited agents discovered while browsing PRs.",
     parameters: PeerConnectionParams,
     async execute(_id, params) {
-      const { paneId } = requirePane();
+      const { paneId } = await requirePane(pi);
       const parent = peerIdentity(await getAgent(paneId), paneId);
       const firstAgent = await getAgent(params.first);
       const secondAgent = await getAgent(params.second);
@@ -377,7 +393,7 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
         } else {
           const other = first.pane === parent.pane ? second : first;
           const otherAgent = first.pane === parent.pane ? secondAgent : firstAgent;
-          if (otherAgent.workspaceId === (first.pane === parent.pane ? firstAgent : secondAgent).workspaceId) {
+          if (sameWorkspace(otherAgent.workspaceId, (first.pane === parent.pane ? firstAgent : secondAgent).workspaceId)) {
             throw new Error("Connected agents must be in different workspaces to exchange peer messages");
           }
           if (!directTurn || Date.now() - directTurn.at > 300_000) {
@@ -402,10 +418,10 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
       const failure: Partial<OrchestrationErrorDetails> = { stage: "preflight", retrySafe: true, ids: {} };
       try {
       const evidence = prepareEvidence(params.files, ctx.cwd, pathForResultRef);
-      const { paneId, workspaceId } = requirePane();
+      const { paneId, workspaceId } = await requirePane(pi);
       const recipient = await getAgent(params.target);
       if (recipient.paneId === paneId) throw new Error("Cannot message yourself");
-      if (recipient.workspaceId === workspaceId || recipient.paneId?.startsWith(`${workspaceId}:`)) throw new Error("Recipient must be in another workspace");
+      if (sameWorkspace(recipient.workspaceId, workspaceId) || (workspaceId !== undefined && recipient.paneId?.startsWith(`${workspaceId}:`))) throw new Error("Recipient must be in another workspace");
       if (!canMessage(peerIdentity(await getAgent(paneId), paneId), peerIdentity(recipient, recipient.paneId!))) throw unauthorized();
       const id = randomUUID();
       failure.stage = "message_submission"; failure.retrySafe = "unknown"; failure.ids = { messageId: id, recipientPaneId: recipient.paneId };
@@ -435,7 +451,7 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
     description: "Check the current queued, delivered, acknowledged, or superseded receipt for one of your messages. Acknowledged means the recipient finished a turn after delivery, not that it agreed with the message.",
     parameters: MessageStatusParams,
     async execute(_id, params) {
-      const { paneId } = requirePane();
+      const { paneId } = await requirePane(pi);
       const recipient = await getAgent(params.target);
       const state = await peerMessageStatus(peerInboxPath(recipient.paneId!), params.id, paneId);
       return { content: [{ type: "text" as const, text: `${params.id}: ${state}` }], details: { id: params.id, state } };

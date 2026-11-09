@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoreRpcError, requestCore, resolveCoreSocketPath, setCoreTestTransportForTests } from "./core-socket.ts";
 import { launchHerdrAgent } from "./herdr.ts";
 import { routes } from "./policy.ts";
-import { coreMux } from "./mux-core.ts";
-import { detectMux, mux, selfIdentity, setMuxForTests } from "./mux.ts";
+import { coreMux, normalizeCoreTerminal } from "./mux-core.ts";
+import { detectMux, isReservedPane, mux, selfIdentity, setMuxForTests } from "./mux.ts";
 
 const pi = {} as any;
 type Call = { method: string; params: any };
@@ -39,7 +40,9 @@ const installFakeCore = () => {
         return created;
       }
       case "terminal.get": return find();
-      case "terminal.list": return { terminals: [...terminals.values()].filter((t) => t.state === "live"), hidden_finished: 0, machines: [] };
+      case "terminal.list": return {
+        terminals: [...terminals.values()].filter((t) => t.state === "live" && Object.entries(params.labels ?? {}).every(([key, value]) => t.labels[key] === value)), hidden_finished: 0, machines: [],
+      };
       case "terminal.send": return { turn: find().turn, started: terminals.get(params.terminal).startsOnSend ?? true };
       case "terminal.keys": find(); return { turn: 0 };
       case "terminal.read": return { text: `screen of ${find().address}`, complete: true, how: "screen" };
@@ -196,11 +199,97 @@ describe("core mux operations", () => {
     expect(terminals.get("t7").labels["p3.subagents"]).toBeUndefined();
   });
 
-  test("peer-agent operations are explicitly unsupported", async () => {
-    await expect(coreMux.worktreeOpen(pi, "create", {})).rejects.toThrow(/not supported on Herdr Core yet/);
-    await expect(coreMux.worktreeList(pi, {})).rejects.toThrow(/not supported on Herdr Core yet/);
-    await expect(coreMux.createTab(pi, { workspaceId: "w", cwd: "/", label: "x", focus: false })).rejects.toThrow(/not supported on Herdr Core yet/);
-    await expect(coreMux.startAgent(pi, "n", "t1", [])).rejects.toThrow(/not supported on Herdr Core yet/);
+  test("a terminal's space and tab labels are its workspace and tab", () => {
+    expect(normalizeCoreTerminal(terminal("t4", { labels: { "herdr.space": "sp", "herdr.tab": "tb", "p3.session": "/s" }, status: { state: "idle" } }))).toMatchObject({ workspaceId: "sp", tabId: "tb", kind: "pi" });
+    expect(normalizeCoreTerminal(terminal("t5")).workspaceId).toBeUndefined();
+  });
+});
+
+describe("peer agent placement on core", () => {
+  const git = (cwd: string, ...args: string[]) => {
+    const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+    return { code: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
+  };
+  const gitPi = { exec: async (_command: string, args: string[]) => { const [, cwd, ...rest] = args; return git(cwd, ...rest); } } as any;
+  let repo: string;
+  let home: string;
+  let savedHome: string | undefined;
+  beforeEach(() => {
+    repo = join(temp, "repo");
+    mkdirSync(repo);
+    git(repo, "init", "-q", "-b", "main");
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
+    home = join(temp, "home");
+    mkdirSync(home);
+    savedHome = process.env.HOME;
+    process.env.HOME = home;
+  });
+  afterEach(() => { if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome; });
+
+  test("createTab reserves a placement that startAgent turns into a labeled, detached terminal", async () => {
+    process.env.HERDR_ENV = "1"; process.env.HERDR_PANE_ID = "w:p";
+    const placed = await coreMux.createTab(pi, { workspaceId: "sp-1", cwd: "/repo", label: "Attached", focus: true, env: { PI_ROUTED_ATTACHMENT_ID: "att" }, labels: { "p3.attachment": "att" } });
+    expect(isReservedPane(placed.paneId)).toBe(true);
+    expect(calls).toEqual([]);
+    const started = await coreMux.startAgent(pi, "a-one", placed.paneId!, ["--session", "/s.jsonl"]);
+    expect(started).toMatchObject({ id: "t7", paneId: "t7", workspaceId: "sp-1", tabId: placed.tabId });
+    const run = calls.find((call) => call.method === "terminal.run")!.params;
+    expect(run).toMatchObject({ cwd: "/repo", name: "a-one", caller: "t1", outlive_parent: true, no_notify: true });
+    expect(run.argv.slice(1)).toEqual(["--session", "/s.jsonl"]);
+    expect(run.argv[0]).toMatch(/(^|\/)pi$/);
+    expect(run.env).toEqual({ PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, PI_ROUTED_ATTACHMENT_ID: "att" });
+    expect(run.labels).toEqual({ "p3.attachment": "att", "p3.handle": "a-one", "p3.tab": placed.tabId, "herdr.space": "sp-1", "herdr.tab": placed.tabId });
+    await expect(coreMux.startAgent(pi, "again", placed.paneId!, [])).rejects.toThrow(/no pane/);
+  });
+
+  test("without a space the terminal gets no App placement labels", async () => {
+    const placed = await coreMux.createTab(pi, { workspaceId: "", cwd: "/repo", label: "Attached", focus: true });
+    await coreMux.startAgent(pi, "a-two", placed.paneId!, []);
+    const labels = calls.find((call) => call.method === "terminal.run")!.params.labels;
+    expect(labels["herdr.space"]).toBeUndefined();
+    expect(labels["herdr.tab"]).toBeUndefined();
+    expect(labels["p3.tab"]).toBe(placed.tabId);
+  });
+
+  test("closeTab ends and removes every terminal of that tab, listPanes reports tabs per space", async () => {
+    const placed = await coreMux.createTab(pi, { workspaceId: "sp-1", cwd: "/repo", label: "x", focus: false });
+    const agent = await coreMux.startAgent(pi, "a-three", placed.paneId!, []);
+    terminals.set("t99", terminal("t99", { labels: { "herdr.space": "other" } }));
+    expect(await coreMux.listPanes(pi, "sp-1")).toEqual([{ paneId: agent!.paneId!, tabId: placed.tabId }]);
+    await coreMux.closeTab(pi, placed.tabId!);
+    expect(terminals.has(agent!.paneId!)).toBe(false);
+    expect(terminals.has("t99")).toBe(true);
+  });
+
+  test("worktreeList finds the main checkout from a linked worktree", async () => {
+    expect((await coreMux.worktreeList(gitPi, { cwd: repo })).repoRoot).toBe(repo);
+    const linked = join(temp, "linked");
+    git(repo, "worktree", "add", "-q", "-b", "side", linked);
+    expect((await coreMux.worktreeList(gitPi, { cwd: linked })).repoRoot).toBe(repo);
+  });
+
+  test("worktreeOpen create uses the App's ~/.herdr/worktrees/<repo>/<branch> path and a new space", async () => {
+    const placement = await coreMux.worktreeOpen(gitPi, "create", { cwd: repo, branch: "Feature/Login-Fix" });
+    const expected = join(home, ".herdr", "worktrees", "repo", "feature-login-fix");
+    expect(placement).toMatchObject({ worktreePath: realpathSync(expected), alreadyOpen: false });
+    expect(placement.workspaceId).toMatch(/^p3-[0-9a-f]{12}$/);
+    expect(git(expected, "symbolic-ref", "--short", "HEAD").stdout.trim()).toBe("Feature/Login-Fix");
+    expect(isReservedPane(placement.rootPaneId)).toBe(true);
+    await expect(coreMux.worktreeOpen(gitPi, "create", { cwd: repo, branch: "Feature/Login-Fix" })).rejects.toThrow(/already checked out/);
+    const agent = await coreMux.startAgent(pi, "i-1", placement.rootPaneId, []);
+    const labels = calls.find((call) => call.method === "terminal.run")!.params.labels;
+    expect(labels).toMatchObject({ "herdr.space": placement.workspaceId, "p3.branch": "Feature/Login-Fix", "p3.worktree": placement.worktreePath, "p3.handle": "i-1" });
+    expect(agent?.workspaceId).toBe(placement.workspaceId);
+  });
+
+  test("open joins the space of a live terminal serving the checkout, or the recorded one", async () => {
+    const created = await coreMux.worktreeOpen(gitPi, "create", { cwd: repo, branch: "work" });
+    terminals.set("t40", terminal("t40", { labels: { "herdr.space": "live-space", "herdr.tab": "x" }, cwd: created.worktreePath }));
+    const joined = await coreMux.worktreeOpen(gitPi, "open", { cwd: repo, branch: "work" });
+    expect(joined).toMatchObject({ workspaceId: "live-space", alreadyOpen: true, rootPaneId: "" });
+    const recorded = await coreMux.worktreeOpen(gitPi, "open", { cwd: created.worktreePath, branch: "work", reuseSpace: "old-space" });
+    expect(recorded).toMatchObject({ workspaceId: "old-space", alreadyOpen: false, worktreePath: created.worktreePath });
+    await expect(coreMux.worktreeOpen(gitPi, "open", { cwd: repo, branch: "missing" })).rejects.toThrow(/git worktree add failed/);
   });
 });
 
@@ -224,8 +313,9 @@ describe("routed worker launch on core", () => {
     expect(allocated).toEqual([worker]);
     expect(progress).toMatchObject({ attempted: true, started: true, worker });
     const run = calls.find((call) => call.method === "terminal.run")!.params;
+    expect(run.argv[0]).toMatch(/(^|\/)pi$/); // resolved through PATH: a core terminal's own PATH may lack pi
     expect(run).toEqual({
-      argv: ["pi", "--name", "task"], cwd: "/repo", name: "r-task-abc", caller: "t1", outlive_parent: true, no_notify: true,
+      argv: [run.argv[0], "--name", "task"], cwd: "/repo", name: "r-task-abc", caller: "t1", outlive_parent: true, no_notify: true,
       env: { PI_ROUTING_MANIFEST: "/m.json", PI_SUBAGENT_MODE: "background", PI_ROUTED_ASSIGNMENT_ID: "a-1", PI_ROUTED_READONLY: "1", PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR },
       labels: { "p3.handle": "sa-1", "p3.assignment": "a-1", "p3.session": "/s/saved.jsonl" },
     });
