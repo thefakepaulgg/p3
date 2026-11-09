@@ -177,10 +177,12 @@ describe("core mux operations", () => {
     await expect(coreMux.wait(pi, "t7", ["working"], 300)).rejects.toThrow(/agent_wait_timeout/);
   });
 
-  test("closing a worker kills then removes its terminal; focus is a no-op note", async () => {
+  test("focus asks Herdr App clients through a label; closing a worker kills then removes its terminal", async () => {
     terminals.set("t7", terminal("t7"));
-    expect(await coreMux.focusPane(pi, "t7")).toMatch(/Herdr App sidebar/);
-    expect(calls.some((call) => call.method.includes("focus"))).toBe(false);
+    const before = Date.now();
+    expect(await coreMux.focusPane(pi, "t7")).toBeUndefined();
+    expect(calls.at(-1)!.method).toBe("terminal.label");
+    expect(Number(terminals.get("t7").labels["p3.focus"])).toBeGreaterThanOrEqual(before);
     expect(await coreMux.listPanes(pi)).toEqual([{ paneId: "t7" }]);
     await coreMux.closePane(pi, "t7");
     expect(calls.map((call) => call.method).slice(-2)).toEqual(["terminal.kill", "terminal.rm"]);

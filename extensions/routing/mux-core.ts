@@ -20,6 +20,8 @@ export const LABEL_TAB = "herdr.tab";
 export const LABEL_P3_TAB = "p3.tab";
 export const LABEL_BRANCH = "p3.branch";
 export const LABEL_WORKTREE = "p3.worktree";
+/** A request, as a millisecond timestamp, for Herdr App clients to show this terminal; core itself has no focus. */
+export const LABEL_FOCUS = "p3.focus";
 
 const callerId = () => process.env.HC_TERMINAL_ID || undefined;
 
@@ -145,7 +147,7 @@ export const coreMux: Mux = {
     }
   },
   async read(_pi, target, lines) { return String((await call("terminal.read", { terminal: target, lines }, 5000))?.text ?? ""); },
-  async focusPane(_pi, paneId) { return `Herdr Core has no panes to focus; ${paneId} is listed in the Herdr App sidebar under its parent.`; },
+  async focusPane(_pi, paneId) { await call("terminal.label", { terminal: paneId, labels: { [LABEL_FOCUS]: String(Date.now()) } }); return undefined; },
   async listPanes(_pi, workspaceId) {
     const listed = await call("terminal.list", workspaceId ? { labels: { [LABEL_SPACE]: workspaceId } } : {});
     return Array.isArray(listed?.terminals)
