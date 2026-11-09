@@ -115,8 +115,8 @@ export async function focusAttachment(pi: ExtensionAPI, ctx: ExtensionContext, i
   const record = await refreshAttachment(pi, requireOwned(ctx, id).attachmentId);
   if (record.status !== "open") throw new Error(`Attachment ${id} is ${record.status}; it cannot be focused`);
   await verifyLive(pi, record);
-  await mux().focusPane(pi, record.paneId!);
-  return { record, text: `Focused attached session ${record.sessionId} (${record.sourceHandle}) in pane ${record.paneId}.${record.error ? ` ${record.error}` : ""}` };
+  const note = await mux().focusPane(pi, record.paneId!);
+  return { record, text: note ?? `Focused attached session ${record.sessionId} (${record.sourceHandle}) in pane ${record.paneId}.${record.error ? ` ${record.error}` : ""}` };
 }
 
 /**
@@ -134,8 +134,8 @@ export async function openSavedAttachment(pi: ExtensionAPI, ctx: ExtensionContex
     catch (error) { if (isActiveTask(task) || !/agent_not_found/.test(error instanceof Error ? error.message : String(error))) throw error; }
     if (agent) {
       verifyTaskAgent({ ...task }, agent); // copy: the source task is never rewritten
-      await mux().focusPane(pi, task.paneId);
-      return { text: `Focused ${isActiveTask(task) ? "active" : "retained"} worker ${task.handle} in its original pane ${task.paneId}.` };
+      const note = await mux().focusPane(pi, task.paneId);
+      return { text: note ?? `Focused ${isActiveTask(task) ? "active" : "retained"} worker ${task.handle} in its original pane ${task.paneId}.` };
     }
   }
   if (isActiveTask(task)) throw new Error("Active worker pane is unavailable; inspect it before attaching its session");

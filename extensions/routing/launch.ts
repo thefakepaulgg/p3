@@ -117,7 +117,7 @@ async function launchRoutedTaskOnce(deps: LaunchDependencies, ctx: ExtensionCont
   let launched: HerdrLaunch;
   try {
     launched = await launchHerdrAgent(deps.pi, prompt, description, routeName, route, cwd, undefined, deps.manifestPath, params.capabilities, background, {
-      assignmentId: tracked.assignmentId, readonly: params.readonly,
+      assignmentId: tracked.assignmentId, readonly: params.readonly, handle,
       onAllocated: (launch) => {
         Object.assign(tracked, { agentName: launch.agent, paneId: launch.paneId, tabId: launch.tabId, sessionId: launch.sessionId, sessionPath: launch.sessionPath });
         deps.trackTask(tracked);
@@ -189,7 +189,7 @@ export async function continueRoutedTask(deps: LaunchDependencies, ctx: Extensio
     const route: Route = { label: previous.label, provider: saved.model.provider, model: saved.model.modelId, thinking: saved.thinking, purpose: "Saved-session continuation" };
     try {
       const launched = await launchHerdrAgent(deps.pi, [message.trim(), evidence.text].filter(Boolean).join("\n\n"), previous.label, tracked.route, route, saved.cwd,
-        undefined, deps.manifestPath, previous.capabilities, false, { assignmentId, readonly: previous.readonly, continuation: { path: saved.path, id: saved.id },
+        undefined, deps.manifestPath, previous.capabilities, false, { assignmentId, readonly: previous.readonly, handle: tracked.handle, continuation: { path: saved.path, id: saved.id },
           onAllocated: (launch) => { Object.assign(tracked, { agentName: launch.agent, paneId: launch.paneId, tabId: launch.tabId }); deps.trackTask(tracked); },
           onStarted: (launch) => { Object.assign(tracked, { terminalId: launch.terminalId }); deps.trackTask(tracked); },
         });

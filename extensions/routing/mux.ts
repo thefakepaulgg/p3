@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { coreMux } from "./mux-core.ts";
 import { tuiMux } from "./mux-tui.ts";
 
 /** Terminal multiplexer behind this Pi session: Herdr TUI or Herdr Core / Herdr App. */
@@ -22,8 +23,23 @@ export interface MuxAgent {
 }
 
 export interface MuxPane { paneId: string; tabId?: string }
-export interface WorkerPane { paneId: string; tabId: string; createdTab: boolean }
 export interface WorkerPaneOptions { manifestPath?: string; background?: boolean; assignmentId?: string; readonly?: boolean }
+/** Where a launched worker lives. Core has no panes or tabs: `paneId` is then the terminal address and `tabId` is absent. */
+export interface WorkerIdentity { agent: string; paneId: string; tabId?: string; terminalId?: string }
+export interface WorkerLaunchRequest extends WorkerPaneOptions {
+  /** Suggested agent name; the backend may return a different `agent` target id (core: the terminal address). */
+  name: string;
+  cwd: string;
+  /** Pi arguments, without the `pi` executable. */
+  args: string[];
+  /** Subagent handle and (continuations) saved session path, recorded as backend labels where supported. */
+  handle?: string;
+  sessionPath?: string;
+  /** Called as soon as the worker has an identity, before it is started or ready. */
+  onAllocated?: (worker: WorkerIdentity) => void;
+}
+/** Mutated by launchWorker so a failing launch can be classified (rolled back vs ambiguous) by the caller. */
+export interface WorkerLaunchProgress { stage: string; attempted: boolean; started: boolean; retryAttempted: boolean; worker?: WorkerIdentity }
 export interface CreateTabOptions { workspaceId: string; cwd: string; label: string; env?: Record<string, string>; focus: boolean }
 export interface WorktreeSource { repoRoot: string; sourceWorkspaceId?: string }
 export interface WorktreeRequest { workspaceId?: string; cwd?: string; branch?: string; path?: string; label?: string }
@@ -37,20 +53,24 @@ export interface Mux {
   readonly backend: MuxBackend;
   getAgent(pi: ExtensionAPI, target: string): Promise<MuxAgent | undefined>;
   listAgents(pi: ExtensionAPI): Promise<MuxAgent[] | undefined>;
-  /** Start a Pi agent process in an existing pane; resolves once the backend acknowledges the launch. */
+  /** Start a Pi agent process in an existing pane; resolves once the backend acknowledges the launch. Peer/attachment paths only. */
   startAgent(pi: ExtensionAPI, name: string, paneId: string, args: string[]): Promise<MuxAgent | undefined>;
   /** With `awaitStart`, also waits (bounded) for the agent to leave idle; may reject `agent_prompt_stalled`. */
   prompt(pi: ExtensionAPI, target: string, text: string, opts?: { awaitStart?: boolean }): Promise<void>;
   sendKeys(pi: ExtensionAPI, target: string, keys: string[]): Promise<void>;
   wait(pi: ExtensionAPI, target: string, until: string[], timeoutMs: number): Promise<void>;
   read(pi: ExtensionAPI, target: string, lines: number): Promise<string>;
-  focusPane(pi: ExtensionAPI, paneId: string): Promise<void>;
+  /** Resolves a user-facing note when the backend cannot focus (core). */
+  focusPane(pi: ExtensionAPI, paneId: string): Promise<string | undefined>;
   listPanes(pi: ExtensionAPI, workspaceId?: string): Promise<MuxPane[] | undefined>;
   closePane(pi: ExtensionAPI, paneId: string): Promise<void>;
   closeTab(pi: ExtensionAPI, tabId: string): Promise<void>;
   createTab(pi: ExtensionAPI, options: CreateTabOptions): Promise<{ paneId?: string; tabId?: string }>;
-  /** Find or create a pane for a routed worker inside this session's isolated subagent tabs. */
-  allocateWorkerPane(pi: ExtensionAPI, cwd: string, options?: WorkerPaneOptions): Promise<WorkerPane>;
+  /**
+   * Allocate and start a routed Pi worker. Resolves once the process is started (the TUI also returns the
+   * backend's start record); readiness is observed afterwards through getAgent.
+   */
+  launchWorker(pi: ExtensionAPI, request: WorkerLaunchRequest, progress: WorkerLaunchProgress): Promise<WorkerIdentity & { started?: MuxAgent }>;
   reportSession(pi: ExtensionAPI, paneId: string, sessionPath: string, sequence: number, startSource?: string): Promise<void>;
   /** String values set a token; null clears it. */
   reportMetadata(pi: ExtensionAPI, paneId: string, source: string, tokens: Record<string, string | null>): Promise<void>;
@@ -103,16 +123,6 @@ export function selfIdentity(env: NodeJS.ProcessEnv = process.env): SelfIdentity
     role: env.HERDR_ROLE,
   };
 }
-
-const notImplemented = async (): Promise<never> => { throw new Error("Herdr Core backend is not implemented yet (Phase 2)"); };
-
-const coreMux: Mux = {
-  backend: "core",
-  getAgent: notImplemented, listAgents: notImplemented, startAgent: notImplemented, prompt: notImplemented, sendKeys: notImplemented,
-  wait: notImplemented, read: notImplemented, focusPane: notImplemented, listPanes: notImplemented, closePane: notImplemented,
-  closeTab: notImplemented, createTab: notImplemented, allocateWorkerPane: notImplemented, reportSession: notImplemented,
-  reportMetadata: notImplemented, worktreeList: notImplemented, worktreeOpen: notImplemented,
-};
 
 /** Operations always have an implementation; the Herdr TUI one serves unmanaged environments as before. */
 export function mux(): Mux {

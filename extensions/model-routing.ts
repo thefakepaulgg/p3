@@ -530,8 +530,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (!task.paneId) throw new Error("This task does not have a retained Herdr pane");
     if (task.paneClosedAt) throw new Error(`Pane for ${task.label} has already been closed`);
     await verifiedAgent(task);
-    await focusManifestPane(pi, task.paneId);
-    return `Opened ${task.label}`;
+    return await focusManifestPane(pi, task.paneId) ?? `Opened ${task.label}`;
   };
 
   const openRoutedSession = async (task: TaskHandle, ctx: ExtensionContext) => {

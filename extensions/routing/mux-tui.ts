@@ -1,6 +1,6 @@
 import { orchestrationError } from "./errors.ts";
 import { parseJson, requestHerdrSocket, runHerdr } from "./herdr-socket.ts";
-import type { CreateTabOptions, Mux, MuxAgent, MuxPane, WorkerPane, WorkerPaneOptions, WorktreePlacement, WorktreeRequest, WorktreeSource } from "./mux.ts";
+import type { CreateTabOptions, Mux, MuxAgent, MuxPane, WorkerPaneOptions, WorktreePlacement, WorktreeRequest, WorktreeSource } from "./mux.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Herdr TUI backend: the only place that builds Herdr CLI-shaped requests or parses TUI-shaped results.
@@ -43,7 +43,7 @@ const splitDirection = (rect?: { width?: number; height?: number }) => {
   return width >= 120 && width >= height * 2 ? "right" : "down";
 };
 
-async function allocateRoutedAgentPane(pi: ExtensionAPI, cwd: string, { manifestPath, background = false, assignmentId, readonly = false }: WorkerPaneOptions = {}): Promise<WorkerPane> {
+async function allocateRoutedAgentPane(pi: ExtensionAPI, cwd: string, { manifestPath, background = false, assignmentId, readonly = false }: WorkerPaneOptions = {}): Promise<{ paneId: string; tabId: string; createdTab: boolean }> {
   return withAllocationLock(async () => {
     const { workspaceId, rootTabId } = rootContext();
     const manifestEnv = [
@@ -134,7 +134,7 @@ export const tuiMux: Mux = {
     await runHerdr(pi, ["agent", "wait", target, ...until.flatMap((state) => ["--until", state]), "--timeout", String(timeoutMs)], timeoutMs + 2000);
   },
   read(pi, target, lines) { return runHerdr(pi, ["agent", "read", target, "--source", "recent-unwrapped", "--lines", String(lines)], 2000); },
-  async focusPane(pi, paneId) { await runHerdr(pi, ["pane", "focus", paneId], 5000); },
+  async focusPane(pi, paneId) { await runHerdr(pi, ["pane", "focus", paneId], 5000); return undefined; },
   async listPanes(pi, workspaceId) {
     const panes = parseJson(await runHerdr(pi, ["pane", "list", ...(workspaceId !== undefined ? ["--workspace", workspaceId] : [])], 5000), "herdr pane list")?.result?.panes;
     return Array.isArray(panes) ? panes.map((pane: any): MuxPane => ({ paneId: pane.pane_id, tabId: pane.tab_id })) : undefined;
@@ -146,7 +146,30 @@ export const tuiMux: Mux = {
       ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]), ...(focus ? [] : ["--no-focus"])], 10000), "herdr tab create");
     return { paneId: created?.result?.root_pane?.pane_id, tabId: created?.result?.tab?.tab_id };
   },
-  allocateWorkerPane: allocateRoutedAgentPane,
+  async launchWorker(pi, request, progress) {
+    progress.stage = "pane_allocation";
+    const { paneId, tabId } = await allocateRoutedAgentPane(pi, request.cwd, request);
+    const worker = { agent: request.name, paneId, tabId };
+    progress.worker = worker;
+    progress.stage = "allocation_record";
+    request.onAllocated?.(worker);
+    progress.stage = "agent_start";
+    let lastStartError: unknown;
+    for (const delay of [150, 350, 750, 1500]) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      try {
+        progress.attempted = true;
+        const started = await tuiMux.startAgent(pi, request.name, paneId, request.args);
+        progress.started = true;
+        return { ...worker, started };
+      } catch (error) {
+        lastStartError = error;
+        if (!/agent_pane_busy/.test(error instanceof Error ? error.message : String(error))) throw error;
+        progress.attempted = false; progress.retryAttempted = true;
+      }
+    }
+    throw lastStartError ?? new Error("Herdr pane did not become available");
+  },
   async reportSession(pi, paneId, sessionPath, sequence, startSource) {
     await runHerdr(pi, ["pane", "report-agent-session", paneId, "--source", "herdr:pi", "--agent", "pi", "--seq", String(sequence), "--agent-session-path", sessionPath,
       ...(startSource ? ["--session-start-source", startSource] : [])], 5000);

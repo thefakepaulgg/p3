@@ -6,7 +6,7 @@ import { readPendingAssignmentAsk, type AssignmentAsk } from "./questions.ts";
 import { orchestrationError } from "./errors.ts";
 import { saveRoutedInstruction } from "./editor-guard.ts";
 import { workerPolicyArgs } from "./worker-policy.ts";
-import { mux, selfIdentity, type MuxAgent, type WorkerPane } from "./mux.ts";
+import { mux, selfIdentity, type MuxAgent, type WorkerLaunchProgress } from "./mux.ts";
 import { normalizeTuiAgent } from "./mux-tui.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { clampThinkingLevel, type Route } from "./policy.ts";
@@ -19,7 +19,7 @@ export { ROUTED_TAB_MAX_PANES } from "./mux-tui.ts";
 
 export type RoutedWorkerCapability = "memory";
 
-export interface HerdrLaunch { agent: string; paneId: string; tabId: string; route: string; terminalId?: string; sessionId?: string; sessionPath?: string }
+export interface HerdrLaunch { agent: string; paneId: string; tabId?: string; route: string; terminalId?: string; sessionId?: string; sessionPath?: string }
 
 /**
  * Pi ends an Esc-interrupted turn with an empty assistant message: stopReason "aborted" from
@@ -272,43 +272,33 @@ export async function waitForHerdrAgentReady(pi: ExtensionAPI, agentName: string
   throw new Error(`agent_start_timeout: ${agentName} did not become prompt-ready within ${timeout}ms (${lastState})`);
 }
 
-export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string, capabilities: RoutedWorkerCapability[] = [], background = false, options: { assignmentId?: string; readonly?: boolean; continuation?: { path: string; id: string }; onAllocated?: (launch: HerdrLaunch) => void; onStarted?: (launch: HerdrLaunch) => void } = {}): Promise<HerdrLaunch> {
-  let allocation: WorkerPane;
-  try { allocation = await mux().allocateWorkerPane(pi, cwd, { manifestPath, background, assignmentId: options.assignmentId, readonly: options.readonly }); }
-  catch (error) { throw orchestrationError(error, "launch", { stage: "pane_allocation", retrySafe: "unknown", nextAction: "Inspect allocation evidence before retrying; no guessed pane or tab was removed." }); }
-  const { paneId, tabId } = allocation;
+export async function launchHerdrAgent(pi: ExtensionAPI, task: string, description: string, routeName: string, route: Route, cwd: string, readyTimeout = HERDR_AGENT_READY_TIMEOUT_MS, manifestPath?: string, capabilities: RoutedWorkerCapability[] = [], background = false, options: { assignmentId?: string; readonly?: boolean; handle?: string; continuation?: { path: string; id: string }; onAllocated?: (launch: HerdrLaunch) => void; onStarted?: (launch: HerdrLaunch) => void } = {}): Promise<HerdrLaunch> {
   const slug = description.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "task";
-  const agent = `r-${slug}-${Date.now().toString(36).slice(-5)}`.slice(0, 32);
-  let started = false;
-  let attempted = false;
-  let retryAttempted = false;
-  let stage = "agent_start";
+  const name = `r-${slug}-${Date.now().toString(36).slice(-5)}`.slice(0, 32);
+  const progress: WorkerLaunchProgress = { stage: "pane_allocation", attempted: false, started: false, retryAttempted: false };
+  let agent = name;
+  let paneId: string | undefined;
+  let tabId: string | undefined;
   try {
-    stage = "allocation_record";
-    options.onAllocated?.({ agent, paneId, tabId, route: routeName, sessionId: options.continuation?.id ?? options.assignmentId, sessionPath: options.continuation?.path });
-    stage = "agent_start";
     const startArgs = buildRoutedWorkerPiArgs(description, route, capabilities, options.readonly, options.assignmentId, options.continuation);
-    let lastStartError: unknown;
-    for (const delay of [150, 350, 750, 1500]) {
-      await sleep(delay, new AbortController().signal);
-      try {
-        attempted = true;
-        const startedAgent = await mux().startAgent(pi, agent, paneId, startArgs);
-        started = true;
-        // Herdr 0.8.0's socket method acknowledges agent.start as soon as the process
-        // launches, often several seconds before the name is prompt-ready. The CLI waits
-        // for this transition internally; the direct socket transport must do the same.
-        stage = "interactive_readiness";
-        if (!isHerdrAgentReady(startedAgent)) await waitForHerdrAgentReady(pi, agent, readyTimeout);
-        break;
-      }
-      catch (error) { lastStartError = error; if (!/agent_pane_busy/.test(error instanceof Error ? error.message : String(error))) throw error; attempted = false; retryAttempted = true; }
-    }
-    if (!started) throw lastStartError ?? new Error("Herdr pane did not become available");
-    stage = "executor_identity";
+    const worker = await mux().launchWorker(pi, {
+      name, cwd, args: startArgs, manifestPath, background, assignmentId: options.assignmentId, readonly: options.readonly,
+      handle: options.handle, sessionPath: options.continuation?.path,
+      onAllocated: (allocated) => {
+        ({ agent, paneId, tabId } = allocated);
+        options.onAllocated?.({ agent, paneId, tabId, route: routeName, sessionId: options.continuation?.id ?? options.assignmentId, sessionPath: options.continuation?.path });
+      },
+    }, progress);
+    ({ agent, paneId, tabId } = worker);
+    // Herdr 0.8.0's socket method acknowledges agent.start as soon as the process
+    // launches, often several seconds before the name is prompt-ready. The CLI waits
+    // for this transition internally; the direct socket transport must do the same.
+    progress.stage = "interactive_readiness";
+    if (!isHerdrAgentReady(worker.started)) await waitForHerdrAgentReady(pi, agent, readyTimeout);
+    progress.stage = "executor_identity";
     const info = await mux().getAgent(pi, agent);
     const sessionPath = info?.sessionPath;
-    const launch: HerdrLaunch = { agent, paneId, tabId, route: routeName, terminalId: info?.terminalId, sessionPath, sessionId: readHerdrSessionId(sessionPath) ?? options.continuation?.id ?? options.assignmentId };
+    const launch: HerdrLaunch = { agent, paneId: paneId!, tabId, route: routeName, terminalId: info?.terminalId, sessionPath, sessionId: readHerdrSessionId(sessionPath) ?? options.continuation?.id ?? options.assignmentId };
     if (options.continuation && (launch.sessionId !== options.continuation.id || (!sessionPath || realpathSync(sessionPath) !== realpathSync(options.continuation.path)))) throw new Error("Continuation started with conflicting saved-session identity");
     options.onStarted?.(launch);
     const contract = background
@@ -316,7 +306,7 @@ export async function launchHerdrAgent(pi: ExtensionAPI, task: string, descripti
       : "Task contract: own only this assignment; do not broaden scope or delegate. Report the outcome, changed artifacts or findings, evidence actually observed, and concrete blockers or risks. Use ask_parent for a missing decision that blocks this assignment; do not finish with an unanswered question.";
     const prompt = [...(options.assignmentId ? [`p3:routed-request ${options.assignmentId}`] : []), task, "", contract].join("\n");
     if (options.assignmentId) saveRoutedInstruction(options.assignmentId, options.assignmentId, prompt);
-    stage = "task_submission";
+    progress.stage = "task_submission";
     // One socket request both submits and observes the first working transition. If Herdr
     // 0.8.0's delayed Enter is swallowed, submit only the existing composer text and verify
     // activity; never paste the prompt twice.
@@ -337,6 +327,8 @@ export async function launchHerdrAgent(pi: ExtensionAPI, task: string, descripti
     }
     return launch;
   } catch (error) {
+    if (!progress.worker) throw orchestrationError(error, "launch", { stage: "pane_allocation", retrySafe: "unknown", nextAction: "Inspect allocation evidence before retrying; no guessed pane or tab was removed." });
+    const { stage, started, attempted, retryAttempted } = progress;
     const ids = { agent, paneId, tabId, assignmentId: options.assignmentId, sessionId: options.continuation?.id ?? options.assignmentId };
     if (started || attempted || retryAttempted) throw orchestrationError(error, "launch", { category: "ambiguous_startup", stage, ids, retryAttempted, retrySafe: "unknown",
       nextAction: "Inspect the retained exact pane/session before retrying; startup or submission may have acted. No prompt was replayed or replacement started." });
@@ -345,7 +337,7 @@ export async function launchHerdrAgent(pi: ExtensionAPI, task: string, descripti
       const panes = await mux().listPanes(pi, selfIdentity().rootWorkspaceId);
       if (!panes || !panes.some((pane) => pane.paneId === paneId)) throw new Error("Original rollback pane could not be verified");
       // Another assignment may already have split this tab; roll back only this pane.
-      await mux().closePane(pi, paneId);
+      await mux().closePane(pi, paneId!);
     } catch (failure) { cleanupError = failure; }
     throw orchestrationError(error, "launch", { stage, ids, retryAttempted, rollbackOccurred: !cleanupError, retrySafe: !cleanupError,
       primary: { message: error instanceof Error ? error.message : String(error) }, ...(cleanupError ? { cleanup: { message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) } } : {}),

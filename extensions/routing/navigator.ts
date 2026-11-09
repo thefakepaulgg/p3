@@ -15,9 +15,9 @@ export class RoutedTaskWidget implements Component {
     private readonly tui: TUI,
     private readonly getTargets: () => RoutedWidgetTarget[],
     private readonly renderLines: (selectedHandle?: string) => string[],
-    private readonly focusPane: (paneId: string) => Promise<void>,
+    private readonly focusPane: (paneId: string) => Promise<string | undefined | void>,
     private readonly warn: (message: string) => void,
-    private readonly openSession?: (target: RoutedWidgetTarget) => Promise<void>,
+    private readonly openSession?: (target: RoutedWidgetTarget) => Promise<string | undefined | void>,
   ) {}
 
   handleTerminalInput(data: string, editorText: string): { consume: true } | undefined {
@@ -58,7 +58,7 @@ export class RoutedTaskWidget implements Component {
       const target = targets[selected];
       if (target && (this.openSession || target.paneId)) {
         this.leave();
-        void (this.openSession ? this.openSession(target) : this.focusPane(target.paneId!)).catch((error) => this.warn(error instanceof Error ? error.message : String(error)));
+        void (this.openSession ? this.openSession(target) : this.focusPane(target.paneId!)).then((note) => { if (typeof note === "string") this.warn(note); }).catch((error) => this.warn(error instanceof Error ? error.message : String(error)));
       }
     }
   }
@@ -82,8 +82,8 @@ export class RoutedTaskWidget implements Component {
   }
 }
 
-export async function focusManifestPane(pi: ExtensionAPI, paneId: string): Promise<void> {
+export async function focusManifestPane(pi: ExtensionAPI, paneId: string): Promise<string | undefined> {
   const panes = await mux().listPanes(pi, selfIdentity().rootWorkspaceId || undefined) ?? [];
   if (!panes.some((pane) => pane.paneId === paneId)) throw new Error(`Subagent pane ${paneId} no longer exists`);
-  await mux().focusPane(pi, paneId);
+  return mux().focusPane(pi, paneId);
 }
