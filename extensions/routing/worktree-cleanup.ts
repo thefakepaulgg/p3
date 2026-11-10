@@ -28,23 +28,32 @@ async function occupied(pi: ExtensionAPI, path: string): Promise<boolean> {
   } catch { return true; }
 }
 
-/** Why the checkout must stay, or undefined when it is safe to remove. */
-async function blocker(pi: ExtensionAPI, work: BranchWork): Promise<string | undefined> {
-  const path = work.worktree;
-  if (!existsSync(path)) return "checkout is missing";
-  if (await git(pi, path, ["symbolic-ref", "--quiet", "--short", "HEAD"]) !== work.branch) return "checkout is on another branch";
-  const [main, ...linked] = await registeredWorktrees(pi, path);
-  if (main === path || !linked.includes(path)) return "not a linked worktree";
-  if (linked.some((other) => other !== path && within(path, other))) return "another worktree is nested inside it";
-  if (await git(pi, path, ["status", "--porcelain"])) return "uncommitted changes";
-  if (await git(pi, path, ["log", "HEAD", "--not", "--remotes", "--oneline"])) return "unpushed commits";
-  if (await git(pi, path, ["submodule", "foreach", "--quiet", "--recursive", "git status --porcelain"])) return "submodules are not clean";
-  if (await occupied(pi, path)) return "a live agent, pane or process is using it";
+/** HEAD is the merged PR's head commit or an ancestor of it: everything here was merged, even if squashed. */
+async function mergedIntoPr(pi: ExtensionAPI, path: string, oid?: string): Promise<boolean> {
+  if (!oid) return false;
+  const result = await pi.exec("git", ["-C", path, "merge-base", "--is-ancestor", "HEAD", oid], { timeout: 30_000 });
+  return result.code === 0;
 }
 
-/** Remove a merged record's checkout, then its branch with `-d`. Returns the blocker, or undefined once removed. */
+/** Why the checkout must stay (or, when safe, whether the merged PR head proves it fully merged). */
+async function blocker(pi: ExtensionAPI, work: BranchWork): Promise<{ reason?: string; proven?: boolean }> {
+  const path = work.worktree;
+  if (!existsSync(path)) return { reason: "checkout is missing" };
+  if (await git(pi, path, ["symbolic-ref", "--quiet", "--short", "HEAD"]) !== work.branch) return { reason: "checkout is on another branch" };
+  const [main, ...linked] = await registeredWorktrees(pi, path);
+  if (main === path || !linked.includes(path)) return { reason: "not a linked worktree" };
+  if (linked.some((other) => other !== path && within(path, other))) return { reason: "another worktree is nested inside it" };
+  if (await git(pi, path, ["status", "--porcelain"])) return { reason: "uncommitted changes" };
+  const proven = await mergedIntoPr(pi, path, work.mergedHeadOid);
+  if (!proven && await git(pi, path, ["log", "HEAD", "--not", "--remotes", "--oneline"])) return { reason: "unpushed commits" };
+  if (await git(pi, path, ["submodule", "foreach", "--quiet", "--recursive", "git status --porcelain"])) return { reason: "submodules are not clean" };
+  if (await occupied(pi, path)) return { reason: "a live agent, pane or process is using it" };
+  return { proven };
+}
+
+/** Remove a merged record's checkout, then its branch. Returns the blocker, or undefined once removed. */
 async function removeWorktree(pi: ExtensionAPI, work: BranchWork): Promise<string | undefined> {
-  const reason = await blocker(pi, work);
+  const { reason, proven } = await blocker(pi, work);
   if (reason) return reason;
   const main = (await registeredWorktrees(pi, work.worktree))[0]!;
   // git refuses initialized submodules without --force; they were verified clean above.
@@ -53,12 +62,12 @@ async function removeWorktree(pi: ExtensionAPI, work: BranchWork): Promise<strin
   work.status = "removed";
   work.updatedAt = Date.now();
   writeBranchWork(work);
-  // An unmerged branch (for example after a squash merge) is kept.
-  await git(pi, main, ["branch", "-d", work.branch]).catch(() => undefined);
+  // -D only when the merged PR head proves nothing is lost (a squash merge leaves the branch "unmerged" to git).
+  await git(pi, main, ["branch", proven ? "-D" : "-d", work.branch]).catch(() => undefined);
 }
 
 /** Mark open branch work for `repository`'s merged PR head `branch`, so its checkout is removed once unoccupied. */
-export async function markBranchWorkMerged(pi: ExtensionAPI, repository: string, branch: string): Promise<void> {
+export async function markBranchWorkMerged(pi: ExtensionAPI, repository: string, branch: string, headOid: string): Promise<void> {
   for (const candidate of listBranchWork().filter((work) => work.branch === branch && (work.status === "open" || work.status === "paused"))) {
     try {
       const origin = await git(pi, candidate.worktree, ["remote", "get-url", "origin"]);
@@ -67,6 +76,7 @@ export async function markBranchWorkMerged(pi: ExtensionAPI, repository: string,
         const work = readBranchWork(candidate.repo, branch);
         if (work?.status !== "open" && work?.status !== "paused") return;
         work.status = "merged";
+        work.mergedHeadOid = headOid;
         work.updatedAt = Date.now();
         writeBranchWork(work);
       });
