@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import githubPullRequestWatchExtension, { describeChanges, fixSignal, PI_AGENT_MARKER, queuePrChanges, reviewFeedback } from "./github-pr-watch.ts";
 
 type Previous = Parameters<typeof describeChanges>[0];
@@ -141,5 +144,39 @@ describe("PR watch autofix", () => {
     expect((await subscribe.execute("2", { ...params, autofix: "off" })).details.autofix).toBe("off");
     expect(entries.at(-1).subscriptions[0].autofix).toBe("off");
     expect((await subscribe.execute("3", params)).details.autofix).toBe("off");
+  });
+});
+
+describe("PR watch fix checkouts", () => {
+  const saved = { HOME: process.env.HOME, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
+  let temp: string | undefined;
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    if (temp) rmSync(temp, { recursive: true, force: true });
+  });
+
+  const subscribeTo = async (state: string, number: number) => {
+    const tools = new Map<string, any>();
+    const fake: any = {
+      registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: () => {},
+      events: { on: () => () => {}, emit: () => {} }, appendEntry: () => {},
+      exec: async () => ({ code: 0, stdout: JSON.stringify({ data: { p0: { pullRequest: current({ state, headRefName: "feature" }) } } }), stderr: "" }),
+    };
+    githubPullRequestWatchExtension(fake);
+    await tools.get("pr_subscribe").execute("1", { repository: "example/repo", number });
+  };
+
+  test.each(["MERGED", "CLOSED"])("removes the checkout of a %s PR with no fix worker, and keeps it while open", async (state) => {
+    temp = mkdtempSync(join(tmpdir(), "pr-watch-checkout-"));
+    process.env.HOME = temp;
+    process.env.PI_CODING_AGENT_DIR = join(temp, "agent");
+    const checkout = join(temp, ".herdr", "worktrees", "pr-watch", "example", "repo-4");
+    const other = join(temp, ".herdr", "worktrees", "pr-watch", "example", "repo-5");
+    for (const dir of [checkout, other]) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "file"), "x"); }
+    await subscribeTo("OPEN", 4);
+    expect(existsSync(checkout)).toBe(true);
+    await subscribeTo(state, 4);
+    expect(existsSync(checkout)).toBe(false);
+    expect(existsSync(other)).toBe(true);
   });
 });

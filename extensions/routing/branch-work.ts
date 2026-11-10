@@ -13,7 +13,8 @@ export interface BranchWork {
   description: string;
   worktree: string;
   executor: { agent: string; pane: string; terminal: string; workspace: string; sessionId: string; sessionPath: string };
-  status: "open" | "paused";
+  /** merged: its PR merged, removal pending; removed: checkout deleted. */
+  status: "open" | "paused" | "merged" | "removed";
   createdAt: number;
   updatedAt: number;
 }
@@ -26,7 +27,7 @@ function validateRecord(value: unknown, repo: string, branch: string): BranchWor
   const record = value as BranchWork | undefined;
   if (!record || record.version !== 1 || !record.id || !repo || !branch || record.repo !== repo || record.branch !== branch ||
     !record.worktree || typeof record.objective !== "string" || !record.objective.trim() || typeof record.description !== "string" ||
-    !["open", "paused"].includes(record.status) || !Number.isFinite(record.createdAt) || !Number.isFinite(record.updatedAt) ||
+    !["open", "paused", "merged", "removed"].includes(record.status) || !Number.isFinite(record.createdAt) || !Number.isFinite(record.updatedAt) ||
     !record.executor || ["agent", "pane", "terminal", "workspace", "sessionId", "sessionPath"].some((field) => {
       const value = record.executor[field as keyof BranchWork["executor"]];
       return typeof value !== "string" || !value;
@@ -39,16 +40,16 @@ export function readBranchWork(repo: string, branch: string): BranchWork | undef
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
-export function listBranchWork(repo: string): BranchWork[] {
+export function listBranchWork(repo?: string): BranchWork[] {
   let names: string[];
   try { names = readdirSync(branchWorkRoot()); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   const records: BranchWork[] = [];
   for (const name of names.filter((name) => /^[0-9a-f]{64}\.json$/.test(name))) {
     const value = JSON.parse(readFileSync(join(branchWorkRoot(), name), "utf8"));
-    if (value.repo !== repo) continue;
-    const record = validateRecord(value, repo, value.branch);
-    if (name !== `${keyFor(repo, record.branch)}.json`) throw new Error("Branch-work record filename conflicts with its identity");
+    if (repo !== undefined && value.repo !== repo) continue;
+    const record = validateRecord(value, value.repo, value.branch);
+    if (name !== `${keyFor(record.repo, record.branch)}.json`) throw new Error("Branch-work record filename conflicts with its identity");
     records.push(record);
   }
   return records;

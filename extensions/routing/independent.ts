@@ -245,7 +245,7 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
       if (!branch) throw new Error("Branch work requires a named Git branch, not detached HEAD");
       return await withBranchWorkLock(repo, branch, async () => {
         const existing = readBranchWork(repo, branch);
-        if (existing) throw new Error(`Work is already recorded on ${branch}. Use workspace_agent_control status/resume; no second executor was started.`);
+        if (existing && existing.status !== "removed") throw new Error(`Work is already recorded on ${branch}. Use workspace_agent_control status/resume; no second executor was started.`);
       failure.stage = "worktree_placement"; failure.retrySafe = "unknown"; failure.ids = { branch };
       const createdWorkspace = await mux().worktreeOpen(pi, params.action as "create" | "open", {
         ...(source.sourceWorkspaceId ? { workspaceId: source.sourceWorkspaceId } : { cwd: source.repoRoot }),
