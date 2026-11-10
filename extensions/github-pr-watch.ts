@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ROUTING_RPC_CHANNELS } from "./routing/rpc.ts";
+import { describeRunChanges, emptySnapshot, fetchRun, RUN_APPEAR_TIMEOUT_MS, queueRunRoutine, resolveRunId, runKey, snapshotOfRun, summarizeRun, takeRunRoutine, type RunSubscription } from "./github-pr-watch/runs.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
@@ -40,6 +41,7 @@ interface Subscription extends PullRequestKey {
 interface PrJob { handle?: string; signature: string; fingerprint?: string; attempts: number; retryAt?: number; cwd?: string }
 interface WatchState {
   subscriptions: Subscription[];
+  runs?: RunSubscription[];
   pending?: string[];
   jobs?: Record<string, PrJob>;
 }
@@ -94,6 +96,17 @@ const SubscribeParams = Type.Object({
   })),
 });
 const UnsubscribeParams = Type.Object(RepositoryParams);
+const RunTargetParams = {
+  repository: RepositoryParams.repository,
+  run_id: Type.Optional(Type.Integer({ minimum: 1, description: "Actions run ID" })),
+  ref: Type.Optional(Type.String({ minLength: 1, description: "Tag or branch; with workflow, resolves to the newest matching run" })),
+  workflow: Type.Optional(Type.String({ minLength: 1, description: "Workflow file name or ID, such as release.yml" })),
+};
+const RunSubscribeParams = Type.Object({
+  ...RunTargetParams,
+  release: Type.Optional(Type.Boolean({ description: "Also report the GitHub Release for the run's tag (created, published, asset count)" })),
+});
+const RunUnsubscribeParams = Type.Object(RunTargetParams);
 const ListParams = Type.Object({});
 const FlushParams = Type.Object({});
 
@@ -278,6 +291,7 @@ export function queuePrChanges(pending: string[], key: string, title: string, ur
 
 export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void {
   let subscriptions: Subscription[] = [];
+  let runs: RunSubscription[] = [];
   let pending: string[] = [];
   let jobs: Record<string, PrJob> = {};
   let lastActivity = Date.now();
@@ -286,6 +300,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
   let activePoll: Promise<void> | undefined;
   let lifecycleGeneration = 0;
   let lastError = "";
+  let lastRunError = "";
   const unwatchTask = pi.events.on("routing:task:completed", (raw) => {
     const event = raw as { handle?: string; owner?: { kind?: string; key?: string }; state?: string };
     if (event.owner?.kind !== "pr" || !event.owner.key) return;
@@ -305,6 +320,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
 
   const persist = () => pi.appendEntry(STATE_ENTRY, {
     subscriptions: subscriptions.map((subscription) => ({ ...subscription })),
+    runs: structuredClone(runs),
     pending: [...pending],
     jobs: structuredClone(jobs),
   } satisfies WatchState);
@@ -313,15 +329,15 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
     if (!activeContext?.hasUI) return;
     activeContext.ui.setStatus(
       "github-pr-watch",
-      subscriptions.length || pending.length
-        ? activeContext.ui.theme.fg("muted", `PRs ${subscriptions.length}${pending.length ? ` · ${pending.length} update${pending.length === 1 ? "" : "s"} queued` : ""}`)
+      subscriptions.length || runs.length || pending.length
+        ? activeContext.ui.theme.fg("muted", `PRs ${subscriptions.length}${runs.length ? ` · runs ${runs.length}` : ""}${pending.length ? ` · ${pending.length} update${pending.length === 1 ? "" : "s"} queued` : ""}`)
         : undefined,
     );
   };
 
   /** Drain held updates into one message for the agent. */
   const takePending = () => {
-    const text = `Subscribed pull request updates:\n\n${pending.join("\n\n")}\n\n${HANDLING_NOTE}`;
+    const text = `Subscribed GitHub updates:\n\n${pending.join("\n\n")}\n\n${HANDLING_NOTE}`;
     pending = [];
     persist();
     updateStatus();
@@ -355,6 +371,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
 
   const restore = (ctx: ExtensionContext) => {
     subscriptions = [];
+    runs = [];
     pending = [];
     jobs = {};
     for (const entry of ctx.sessionManager.getBranch()) {
@@ -362,6 +379,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
       const state = entry.data as WatchState | undefined;
       if (!state || !Array.isArray(state.subscriptions)) continue;
       subscriptions = structuredClone(state.subscriptions);
+      runs = Array.isArray(state.runs) ? structuredClone(state.runs) : [];
       pending = Array.isArray(state.pending) ? [...state.pending] : [];
       jobs = state.jobs && typeof state.jobs === "object" ? structuredClone(state.jobs) : {};
     }
@@ -455,9 +473,59 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
     }
   };
 
+  /** Approval waits, failures and completion wake the session; job successes and release changes wait for a quiet moment. */
+  const pollRuns = async (generation: number) => {
+    if (!runs.length) return;
+    const queried = structuredClone(runs);
+    const results = await Promise.all(queried.map(async (run) => {
+      try {
+        const runId = run.runId ?? await resolveRunId(pi.exec, run.repository, run.ref!, run.workflow!, run.subscribedAt);
+        return runId ? { runId, data: await fetchRun(pi.exec, { ...run, runId }) } : undefined;
+      } catch (error) {
+        return error instanceof Error ? error : new Error(String(error));
+      }
+    }));
+    if (generation !== lifecycleGeneration) return;
+    const kept: RunSubscription[] = [];
+    const wakes: string[] = [];
+    let failure: Error | undefined;
+    let changed = false;
+    queried.forEach((queriedRun, index) => {
+      const result = results[index];
+      if (result instanceof Error) { failure ??= result; kept.push(queriedRun); return; }
+      if (!result) {
+        if (Date.now() - (queriedRun.subscribedAt ?? 0) < RUN_APPEAR_TIMEOUT_MS) { kept.push(queriedRun); return; }
+        changed = true;
+        wakes.push(`${runKey(queriedRun)}\n- No ${JSON.stringify(queriedRun.workflow)} run appeared for ${JSON.stringify(queriedRun.ref)} within ${RUN_APPEAR_TIMEOUT_MS / 60_000} minutes; unsubscribed.`);
+        return;
+      }
+      const { data } = result;
+      const run = { ...queriedRun, runId: result.runId, name: data.run.name, url: data.run.html_url };
+      const key = runKey(run);
+      const snapshot = snapshotOfRun(data);
+      if (JSON.stringify(snapshot) !== JSON.stringify(run.snapshot)) changed = true;
+      const changes = describeRunChanges(run.snapshot ?? emptySnapshot(data.run.run_attempt), data, run.release);
+      if (!queriedRun.runId) changes.routine.unshift("run started");
+      if (changes.wake.length) {
+        const taken = takeRunRoutine(pending, key);
+        pending = taken.pending;
+        wakes.push(`${key} — ${JSON.stringify(data.run.name)}\n${data.run.html_url}\n${[...taken.held, ...changes.routine, ...changes.wake].map((line) => `- ${line}`).join("\n")}`);
+      } else if (changes.routine.length) pending = queueRunRoutine(pending, key, changes.routine);
+      if (data.run.status === "completed") changed = true;
+      else kept.push({ ...run, snapshot });
+    });
+    runs = kept;
+    if (wakes.length) deliverNow(`Workflow run update:\n\n${wakes.join("\n\n")}\n\nCompleted runs are unsubscribed; call run_subscribe again to follow a re-run. ${UNTRUSTED_NOTE}`);
+    if (changed) persist();
+    updateStatus();
+    const message = failure?.message ?? "";
+    if (message && message !== lastRunError && activeContext?.hasUI) activeContext.ui.notify(`Workflow run polling failed: ${message}`, "warning");
+    lastRunError = message;
+  };
+
   const poll = async (notify: boolean) => {
     while (activePoll) await activePoll;
-    if (!subscriptions.length && !Object.values(jobs).some((job) => job.handle)) return;
+    if (!subscriptions.length && !runs.length && !Object.values(jobs).some((job) => job.handle)) return;
 
     const generation = lifecycleGeneration;
     const queriedSubscriptions = structuredClone(subscriptions);
@@ -474,6 +542,8 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
             }
           } catch { /* The routing extension may still be restoring; retry next poll. */ }
         }
+        await pollRuns(generation);
+        if (generation !== lifecycleGeneration) return;
         const results = await fetchPullRequests(queriedSubscriptions);
         if (generation !== lifecycleGeneration) return;
         let changed = false;
@@ -628,24 +698,92 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
     },
   });
 
+  const matchesRun = (run: RunSubscription, params: { repository: string; run_id?: number; ref?: string; workflow?: string }) =>
+    run.repository.toLowerCase() === params.repository.toLowerCase()
+    && (params.run_id ? run.runId === params.run_id : run.ref === params.ref && run.workflow === params.workflow);
+
+  pi.registerTool({
+    name: "run_subscribe",
+    label: "Subscribe to Workflow Run",
+    description: "Subscribe this Pi session to a GitHub Actions workflow run, by run_id or by ref (tag or branch) plus workflow file, which resolves to the newest matching run. It checks once per minute and follows re-run attempts. Deployment approval waits, job failures (with the failing step) and run completion (conclusion and duration) wake the session immediately; job successes and, with release=true, GitHub Release changes for the run's tag are held until the conversation has been quiet for 5 minutes. The subscription ends after the completion report. No fix workers are started.",
+    promptSnippet: "Subscribe this session to a GitHub Actions run you are waiting on",
+    promptGuidelines: ["Subscribe with run_subscribe instead of polling by hand when you wait on a GitHub Actions run, such as a release."],
+    parameters: RunSubscribeParams,
+    async execute(_toolCallId, params) {
+      while (activePoll) await activePoll;
+      const fail = (text: string) => ({ content: [{ type: "text" as const, text }], details: { repository: params.repository, subscribed: false }, isError: true });
+      if (!params.run_id && !(params.ref && params.workflow)) return fail("Provide run_id, or ref and workflow");
+      try {
+        const runId = params.run_id ?? await resolveRunId(pi.exec, params.repository, params.ref!, params.workflow!);
+        const existing = runs.find((run) => runId ? run.runId === runId && run.repository.toLowerCase() === params.repository.toLowerCase() : matchesRun(run, params));
+        if (existing) {
+          if (params.release !== undefined) { existing.release = params.release; persist(); }
+          return { content: [{ type: "text", text: `Already subscribed to ${runKey(existing)}` }], details: { repository: params.repository, runId, subscribed: true } };
+        }
+        const run: RunSubscription = { repository: params.repository, runId, name: "", url: "", ref: params.ref, workflow: params.workflow, release: params.release };
+        if (!runId) {
+          runs.push({ ...run, subscribedAt: Date.now() });
+          persist();
+          updateStatus();
+          return {
+            content: [{ type: "text", text: `No ${params.workflow} run for ${params.ref} yet; subscribed to ${runKey(run)} and waiting up to ${RUN_APPEAR_TIMEOUT_MS / 60_000} minutes for a new run to appear.` }],
+            details: { repository: params.repository, subscribed: true },
+          };
+        }
+        const data = await fetchRun(pi.exec, { ...run, runId });
+        const summary = `${runKey(run)} — ${JSON.stringify(data.run.name)}\n${data.run.html_url}\n${summarizeRun(data, run.release)}\n\n${UNTRUSTED_NOTE}`;
+        if (data.run.status === "completed") {
+          return { content: [{ type: "text", text: `Run already completed; not subscribed.\n${summary}` }], details: { repository: params.repository, runId, subscribed: false } };
+        }
+        runs.push({ ...run, name: data.run.name, url: data.run.html_url, snapshot: snapshotOfRun(data) });
+        persist();
+        updateStatus();
+        return { content: [{ type: "text", text: `Subscribed to ${summary}` }], details: { repository: params.repository, runId, subscribed: true } };
+      } catch (error) {
+        return fail(`Could not subscribe: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "run_unsubscribe",
+    label: "Unsubscribe from Workflow Run",
+    description: "Stop this Pi session from watching a GitHub Actions run, identified by run_id or by the ref and workflow it was subscribed with.",
+    parameters: RunUnsubscribeParams,
+    async execute(_toolCallId, params) {
+      while (activePoll) await activePoll;
+      const removed = runs.filter((run) => matchesRun(run, params));
+      if (!removed.length) return { content: [{ type: "text", text: "Not subscribed to that run" }], details: { subscribed: false } };
+      runs = runs.filter((run) => !removed.includes(run));
+      for (const run of removed) pending = discardPendingFor(pending, runKey(run));
+      persist();
+      updateStatus();
+      return { content: [{ type: "text", text: `Unsubscribed from ${removed.map(runKey).join(", ")}` }], details: { subscribed: false } };
+    },
+  });
+
   pi.registerTool({
     name: "pr_subscriptions",
-    label: "Pull Request Subscriptions",
-    description: "List the GitHub pull requests watched by this Pi session.",
+    label: "GitHub Subscriptions",
+    description: "List the GitHub pull requests and workflow runs watched by this Pi session.",
     parameters: ListParams,
     async execute() {
-      const text = subscriptions.length
-        ? subscriptions.map((subscription) => `${subscription.repository}#${subscription.number}${subscription.snapshot ? ` — ${subscription.snapshot.title} (${subscription.snapshot.state.toLowerCase()})` : ""} · autofix ${subscription.autofix ?? "checks"}`).join("\n")
-        : "No pull request subscriptions";
+      const lines = [
+        ...subscriptions.map((subscription) => `${subscription.repository}#${subscription.number}${subscription.snapshot ? ` — ${subscription.snapshot.title} (${subscription.snapshot.state.toLowerCase()})` : ""} · autofix ${subscription.autofix ?? "checks"}`),
+        ...runs.map((run) => run.runId
+          ? `${runKey(run)} — ${JSON.stringify(run.name)} (${run.snapshot?.status ?? "unknown"}, attempt ${run.snapshot?.attempt ?? "?"})${run.release ? " · release" : ""}\n${run.url}`
+          : `${runKey(run)} — waiting for the run to appear${run.release ? " · release" : ""}`),
+      ];
+      const text = lines.length ? lines.join("\n") : "No pull request or workflow run subscriptions";
       const held = pending.length ? `\n\n${pending.length} update${pending.length === 1 ? "" : "s"} pending; call pr_flush to read them.` : "";
-      return { content: [{ type: "text", text: text + held }], details: { subscriptions: subscriptions.map(({ repository, number }) => ({ repository, number })), pending: pending.length } };
+      return { content: [{ type: "text", text: text + held }], details: { subscriptions: subscriptions.map(({ repository, number }) => ({ repository, number })), runs: runs.map(({ repository, runId }) => ({ repository, runId })), pending: pending.length } };
     },
   });
 
   pi.registerTool({
     name: "pr_flush",
-    label: "Flush Pull Request Updates",
-    description: "Return pending pull request updates and clear them.",
+    label: "Flush GitHub Updates",
+    description: "Return pending pull request and workflow run updates and clear them.",
     parameters: FlushParams,
     async execute() {
       while (activePoll) await activePoll;

@@ -190,7 +190,7 @@ test("launches an explicitly requested model outside the programmed routes", asy
     expect(startArgs).toContain("openai-codex/gpt-6-astra");
     expect(startArgs).toContain("high");
     expect(startArgs).not.toContain("--no-extensions");
-    expect(startArgs).toContain("subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe");
+    expect(startArgs).toContain("subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe,run_subscribe,run_unsubscribe");
     await lifecycle.get("session_shutdown")?.();
   } finally {
     restoreEnv();
