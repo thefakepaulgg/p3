@@ -43,7 +43,7 @@ cleanup() {
 trap cleanup EXIT
 
 tsc -p tsconfig.extensions.json
-bun test --verbose ./extensions/github-pr-watch.test.ts ./extensions/claude-connectors.test.ts ./extensions/claude-connectors-auth.test.ts ./extensions/advisor ./extensions/telegram-notify ./extensions/tutor-mode ./extensions/routing ./extensions/workflows
+bun test --verbose ./extensions/github-pr-watch.test.ts ./extensions/github-pr-watch ./extensions/claude-connectors.test.ts ./extensions/claude-connectors-auth.test.ts ./extensions/advisor ./extensions/telegram-notify ./extensions/tutor-mode ./extensions/routing ./extensions/workflows
 tsc -p extensions/mcp-events/tsconfig.json
 node --experimental-strip-types --test extensions/mcp-events/tests/*.test.ts
 pi --list-models >/dev/null

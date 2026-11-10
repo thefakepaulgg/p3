@@ -46,7 +46,7 @@ describe("Herdr response parsing", () => {
 
 describe("routed worker Pi arguments", () => {
   const agentDir = "/tmp/pi-agent";
-  const rootTools = "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe";
+  const rootTools = "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe,run_subscribe,run_unsubscribe";
   const route = (provider: string, model: string, thinking: Route["thinking"] = "medium") => ({ provider, model, thinking } as Route);
   const withAgentDir = (check: () => void) => {
     const previous = process.env.PI_CODING_AGENT_DIR;
@@ -522,7 +522,7 @@ describe("routed agent tab isolation", () => {
       const start = calls.find((args) => args.slice(0, 2).join(" ") === "agent start")!;
       expect(start).toEqual([
         "agent", "start", launched.agent, "--kind", "pi", "--pane", "w1:p2", "--timeout", "30000", "--",
-        "--exclude-tools", "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe",
+        "--exclude-tools", "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe,run_subscribe,run_unsubscribe",
         "--model", `${routes.luna.provider}/${routes.luna.model}`, "--thinking", routes.luna.thinking, "--name", "Isolated task",
       ]);
       expect(start).not.toContain(fileURLToPath(new URL("../model-routing.ts", import.meta.url)));

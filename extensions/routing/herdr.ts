@@ -226,8 +226,8 @@ const HERDR_AGENT_READY_TIMEOUT_MS = 30_000;
 
 export function buildRoutedWorkerPiArgs(description: string, route: Route, _capabilities: RoutedWorkerCapability[] = [], readonly = false, assignmentId?: string, continuation?: { path: string; id: string }): string[] {
   return [
-    // PR subscriptions belong to the root session.
-    "--exclude-tools", "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe",
+    // PR and run subscriptions belong to the root session.
+    "--exclude-tools", "subagent,subagent_control,workspace_agent,workspace_agent_control,peer_connection,model_route,workflow_control,pr_subscribe,pr_unsubscribe,run_subscribe,run_unsubscribe",
     "--model", route.launchModel ?? `${route.provider}/${route.model}`,
     "--thinking", clampThinkingLevel(route.thinking),
     "--name", description,
