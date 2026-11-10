@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { ROUTING_RPC_CHANNELS } from "./routing/rpc.ts";
+import { markBranchWorkMerged, removeMergedWorktrees } from "./routing/worktree-cleanup.ts";
 import { describeRunChanges, emptySnapshot, fetchRun, RUN_APPEAR_TIMEOUT_MS, queueRunRoutine, resolveRunId, runKey, snapshotOfRun, summarizeRun, takeRunRoutine, type RunSubscription } from "./github-pr-watch/runs.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -75,6 +76,7 @@ interface PullRequestData {
   title: string;
   url: string;
   state: string;
+  headRefName?: string;
   headRefOid: string;
   reviewDecision?: string;
   mergeStateStatus: string;
@@ -167,7 +169,7 @@ function graphqlQuery(subscriptions: Subscription[]): string {
     const [owner, name] = subscription.repository.split("/");
     return `p${index}: repository(owner: ${quote(owner!)}, name: ${quote(name!)}) {
       pullRequest(number: ${subscription.number}) {
-        title url state headRefOid reviewDecision mergeStateStatus
+        title url state headRefName headRefOid reviewDecision mergeStateStatus
         comments(last: 20) { nodes { id author { login } authorAssociation body url } }
         reviewThreads(first: 100) { nodes { isResolved comments(last: 20) { nodes { id author { login } authorAssociation body url } } } }
         reviews(last: 20) { nodes { id author { login } authorAssociation body url state submittedAt } }
@@ -410,9 +412,22 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
     pi.events.emit(channel, { ...payload, requestId, version: 1 });
   });
 
-  const prepareCheckout = async (subscription: Subscription): Promise<string> => {
+  const checkoutRoot = () => join(process.env.HOME || homedir(), ".herdr", "worktrees", "pr-watch");
+  const checkoutPath = (subscription: PullRequestKey) => {
     const [owner, repo] = subscription.repository.split("/");
-    const cwd = join(homedir(), ".herdr", "worktrees", "pr-watch", owner!, `${repo}-${subscription.number}`);
+    return join(checkoutRoot(), owner!, `${repo}-${subscription.number}`);
+  };
+
+  /** The fix checkout is a plain `gh repo clone`, so removing it is deleting the directory. */
+  const removeCheckout = (cwd: string) => {
+    if (relative(checkoutRoot(), cwd).startsWith("..")) return;
+    try { rmSync(cwd, { recursive: true, force: true }); } catch { /* Leave it; nothing depends on its removal. */ }
+  };
+
+  const sweepWorktrees = () => removeMergedWorktrees(pi).catch(() => undefined);
+
+  const prepareCheckout = async (subscription: Subscription): Promise<string> => {
+    const cwd = checkoutPath(subscription);
     if (!existsSync(cwd)) {
       mkdirSync(join(cwd, ".."), { recursive: true });
       const cloned = await pi.exec("gh", ["repo", "clone", subscription.repository, cwd], { timeout: 120_000 });
@@ -551,7 +566,9 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
 
         const milestones: string[] = [];
         const fixes: Array<{ subscription: Subscription; pr: PullRequestData }> = [];
-        const closures: Array<{ key: string; handle: string }> = [];
+        const closures: Array<{ key: string; handle: string; cwd?: string }> = [];
+        const finished: string[] = [];
+        const merged: Array<{ repository: string; branch: string }> = [];
         queriedSubscriptions.forEach((subscription, index) => {
           const pullRequest = results[index];
           if (!pullRequest) {
@@ -580,8 +597,10 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
             changed = true;
             const key = keyOf(subscription);
             pending = discardPendingFor(pending, key);
-            if (jobs[key]?.handle) closures.push({ key, handle: jobs[key].handle! });
-            else delete jobs[key];
+            if (snapshot.state === "MERGED" && pullRequest.headRefName) merged.push({ repository: subscription.repository, branch: pullRequest.headRefName });
+            const cwd = checkoutPath(subscription);
+            if (jobs[key]?.handle) closures.push({ key, handle: jobs[key].handle!, cwd });
+            else { delete jobs[key]; finished.push(cwd); }
           }
         });
 
@@ -593,9 +612,17 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
         subscriptions = retained;
         if (changed) persist();
         updateStatus();
-        for (const { key, handle } of closures) {
-          try { await requestRouting(ROUTING_RPC_CHANNELS.stop, { handle, close_pane: true }, 15_000); delete jobs[key]; persist(); }
+        for (const { key, handle, cwd } of closures) {
+          try {
+            await requestRouting(ROUTING_RPC_CHANNELS.stop, { handle, close_pane: true }, 15_000); delete jobs[key]; persist();
+            if (cwd) removeCheckout(cwd);
+          }
           catch (error) { pending.push(`Could not stop PR worker ${handle} after closure: ${String(error)}`); persist(); updateStatus(); }
+        }
+        finished.forEach(removeCheckout);
+        if (merged.length) {
+          for (const { repository, branch } of merged) await markBranchWorkMerged(pi, repository, branch);
+          await sweepWorktrees();
         }
         for (const { subscription, pr } of fixes) await startFix(subscription, pr);
         lastError = "";
@@ -617,7 +644,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
 
   const startTimer = () => {
     if (timer) clearInterval(timer);
-    timer = setInterval(() => void poll(true).then(flushIfQuiet), POLL_INTERVAL_MS);
+    timer = setInterval(() => void poll(true).then(flushIfQuiet).then(sweepWorktrees), POLL_INTERVAL_MS);
     timer.unref?.();
   };
 
