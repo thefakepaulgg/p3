@@ -85,14 +85,16 @@ export default function bashBackground(pi: ExtensionAPI) {
   let runActive = false;
   let restingState: "done" | "idle" = "idle";
   let reportedJobs = 0;
+  // Pi's own working and done reports carry the session name; keep it first so clients still show which agent this is.
+  const withName = (text: string) => { const name = pi.getSessionName(); return name ? `${name} · ${text}` : text[0].toUpperCase() + text.slice(1); };
   const syncProgramStatus = () => {
     if (!reportsStatus || !installed || disposed || runActive) return;
     const running = [...jobs.values()].filter((job) => job.state === "running").length;
     if (running === reportedJobs) return;
     reportedJobs = running;
     process.stdout.write(formatProgramStatus(running
-      ? { state: "working", app: "pi", message: `Waiting on ${running} bash job${running === 1 ? "" : "s"}` }
-      : { state: restingState, app: "pi" }));
+      ? { state: "working", app: "pi", message: withName(`waiting on ${running} bash job${running === 1 ? "" : "s"}`) }
+      : { state: restingState, app: "pi", message: restingState === "done" ? pi.getSessionName() : undefined }));
   };
   const publishPending = () => {
     if (disposed) return;
