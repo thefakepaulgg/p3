@@ -3,6 +3,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import githubPullRequestWatchExtension from "../github-pr-watch.ts";
 import { readBranchWork, writeBranchWork, type BranchWork } from "./branch-work.ts";
 import { setMuxForTests, type Mux } from "./mux.ts";
 import { markBranchWorkMerged, removeMergedWorktrees } from "./worktree-cleanup.ts";
@@ -195,5 +196,53 @@ describe("marking branch work merged", () => {
     expect(readBranchWork(join(main, ".git"), "feature")!.status).toBe("open");
     await markBranchWorkMerged(fakePi, "example/repo", "feature", head);
     expect(readBranchWork(join(main, ".git"), "feature")).toMatchObject({ status: "merged", mergedHeadOid: head });
+  });
+});
+
+describe("removal after the subscribing peer is gone", () => {
+  const instance = (exec: (command: string, args: string[], options?: { cwd?: string }) => Promise<any>) => {
+    const tools = new Map<string, any>();
+    const handlers = new Map<string, (...args: any[]) => any>();
+    githubPullRequestWatchExtension({
+      registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (event: string, handler: any) => handlers.set(event, handler),
+      events: { on: () => () => {}, emit: () => {} }, appendEntry: () => {}, exec,
+    } as any);
+    return { tools, handlers };
+  };
+
+  test("another session's pr-watch tick removes a merged worktree once the peer's space is closed, with no subscription of its own", async () => {
+    const head = git(worktree, "rev-parse", "HEAD");
+    git(main, "remote", "set-url", "origin", "git@github.com:example/repo.git");
+    writeBranchWork(record({ status: "open" }));
+    agents = [{ raw: { cwd: worktree } }];
+    const pullRequest = {
+      title: "PR", url: "https://github.com/example/repo/pull/4", state: "MERGED", headRefName: "feature", headRefOid: head, mergeStateStatus: "UNKNOWN",
+      comments: { nodes: [] }, reviewThreads: { nodes: [] }, reviews: { nodes: [] }, commits: { nodes: [] },
+    };
+    const peer = instance(async (command, args, options) => command === "gh"
+      ? { code: 0, stdout: JSON.stringify({ data: { p0: { pullRequest } } }), stderr: "" } : fakePi.exec(command, args, options));
+    await peer.tools.get("pr_subscribe").execute("1", { repository: "example/repo", number: 4 });
+    expect(readBranchWork(join(main, ".git"), "feature")!.status).toBe("merged");
+    expect(existsSync(worktree)).toBe(true);
+    await peer.handlers.get("session_shutdown")!();
+
+    const realSetInterval = globalThis.setInterval;
+    const ticks: Array<() => void> = [];
+    globalThis.setInterval = ((callback: () => void) => { ticks.push(callback); return { unref() {} }; }) as unknown as typeof setInterval;
+    try {
+      const other = instance(async (command, args, options) => command === "gh"
+        ? { code: 1, stdout: "", stderr: "no subscriptions, no PR queries" } : fakePi.exec(command, args, options));
+      await other.handlers.get("session_start")!({}, { hasUI: false, sessionManager: { getBranch: () => [] }, isIdle: () => true, hasPendingMessages: () => false });
+      const tick = async () => { ticks.at(-1)!(); await Bun.sleep(1500); };
+      await tick();
+      expect(existsSync(worktree)).toBe(true);
+      agents = [];
+      await tick();
+      expect(existsSync(worktree)).toBe(false);
+      expect(readBranchWork(join(main, ".git"), "feature")!.status).toBe("removed");
+      expect(git(main, "branch", "--list", "feature")).toBe("");
+    } finally {
+      globalThis.setInterval = realSetInterval;
+    }
   });
 });
