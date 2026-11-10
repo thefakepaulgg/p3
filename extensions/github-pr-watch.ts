@@ -568,7 +568,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
         const fixes: Array<{ subscription: Subscription; pr: PullRequestData }> = [];
         const closures: Array<{ key: string; handle: string; cwd?: string }> = [];
         const finished: string[] = [];
-        const merged: Array<{ repository: string; branch: string }> = [];
+        const merged: Array<{ repository: string; branch: string; headOid: string }> = [];
         queriedSubscriptions.forEach((subscription, index) => {
           const pullRequest = results[index];
           if (!pullRequest) {
@@ -597,7 +597,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
             changed = true;
             const key = keyOf(subscription);
             pending = discardPendingFor(pending, key);
-            if (snapshot.state === "MERGED" && pullRequest.headRefName) merged.push({ repository: subscription.repository, branch: pullRequest.headRefName });
+            if (snapshot.state === "MERGED" && pullRequest.headRefName) merged.push({ repository: subscription.repository, branch: pullRequest.headRefName, headOid: pullRequest.headRefOid });
             const cwd = checkoutPath(subscription);
             if (jobs[key]?.handle) closures.push({ key, handle: jobs[key].handle!, cwd });
             else { delete jobs[key]; finished.push(cwd); }
@@ -621,7 +621,7 @@ export default function githubPullRequestWatchExtension(pi: ExtensionAPI): void 
         }
         finished.forEach(removeCheckout);
         if (merged.length) {
-          for (const { repository, branch } of merged) await markBranchWorkMerged(pi, repository, branch);
+          for (const { repository, branch, headOid } of merged) await markBranchWorkMerged(pi, repository, branch, headOid);
           await sweepWorktrees();
         }
         for (const { subscription, pr } of fixes) await startFix(subscription, pr);

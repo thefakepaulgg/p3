@@ -15,6 +15,8 @@ export interface BranchWork {
   executor: { agent: string; pane: string; terminal: string; workspace: string; sessionId: string; sessionPath: string };
   /** merged: its PR merged, removal pending; removed: checkout deleted. */
   status: "open" | "paused" | "merged" | "removed";
+  /** The merged PR's head commit, recorded with `merged`. */
+  mergedHeadOid?: string;
   createdAt: number;
   updatedAt: number;
 }

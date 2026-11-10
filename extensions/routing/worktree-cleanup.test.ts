@@ -80,6 +80,13 @@ describe("removing merged worktrees", () => {
     expect(readBranchWork(join(main, ".git"), "feature")!.status).toBe("removed");
   });
 
+  test("a merged head that does not match still passes through the all-pushed-to-remote test, keeping -d", async () => {
+    writeBranchWork(record({ mergedHeadOid: git(main, "rev-parse", "origin/main") }));
+    await removeMergedWorktrees(fakePi);
+    expect(existsSync(worktree)).toBe(false);
+    expect(git(main, "branch", "--list", "feature")).toBe("");
+  });
+
   test("only merged records are touched", async () => {
     writeBranchWork(record({ status: "open" }));
     await removeMergedWorktrees(fakePi);
@@ -131,15 +138,62 @@ describe("removing merged worktrees", () => {
   });
 });
 
+describe("squash-merged PRs whose remote branch was deleted", () => {
+  let head: string;
+  beforeEach(() => {
+    head = git(worktree, "rev-parse", "HEAD");
+    git(main, "reset", "--hard", "origin/main");
+    git(main, "merge", "--squash", "feature");
+    git(main, "commit", "-m", "squash");
+    git(main, "push", "origin", "main");
+    git(main, "push", "origin", "--delete", "feature");
+    git(main, "fetch", "--prune");
+    expect(git(main, "branch", "-r")).not.toContain("origin/feature");
+  });
+
+  test("without the merged head SHA the commits look unpushed and the worktree stays", async () => {
+    await kept();
+  });
+
+  test("HEAD equal to the merged PR head is proven pushed: worktree removed and branch force-deleted", async () => {
+    writeBranchWork(record({ mergedHeadOid: head }));
+    await removeMergedWorktrees(fakePi);
+    expect(existsSync(worktree)).toBe(false);
+    expect(git(main, "branch", "--list", "feature")).toBe("");
+    expect(readBranchWork(join(main, ".git"), "feature")!.status).toBe("removed");
+  });
+
+  test("HEAD that is an ancestor of the merged PR head is proven too", async () => {
+    writeFileSync(join(worktree, "d.txt"), "d");
+    git(worktree, "add", ".");
+    git(worktree, "commit", "-m", "later commit in the PR");
+    const prHead = git(worktree, "rev-parse", "HEAD");
+    git(worktree, "reset", "--hard", "HEAD^");
+    writeBranchWork(record({ mergedHeadOid: prHead }));
+    await removeMergedWorktrees(fakePi);
+    expect(existsSync(worktree)).toBe(false);
+  });
+
+  test("a commit made after the merged PR head is not proven and keeps the worktree and branch", async () => {
+    writeFileSync(join(worktree, "e.txt"), "e");
+    git(worktree, "add", ".");
+    git(worktree, "commit", "-m", "after merge");
+    writeBranchWork(record({ mergedHeadOid: head }));
+    await kept();
+    expect(git(main, "branch", "--list", "feature")).toContain("feature");
+  });
+});
+
 describe("marking branch work merged", () => {
   test("matches the record by branch and the checkout's origin remote", async () => {
     writeBranchWork(record({ status: "open" }));
+    const head = git(worktree, "rev-parse", "HEAD");
     git(main, "remote", "set-url", "origin", "git@github.com:Example/Repo.git");
-    await markBranchWorkMerged(fakePi, "example/other", "feature");
+    await markBranchWorkMerged(fakePi, "example/other", "feature", head);
     expect(readBranchWork(join(main, ".git"), "feature")!.status).toBe("open");
-    await markBranchWorkMerged(fakePi, "example/repo", "other-branch");
+    await markBranchWorkMerged(fakePi, "example/repo", "other-branch", head);
     expect(readBranchWork(join(main, ".git"), "feature")!.status).toBe("open");
-    await markBranchWorkMerged(fakePi, "example/repo", "feature");
-    expect(readBranchWork(join(main, ".git"), "feature")!.status).toBe("merged");
+    await markBranchWorkMerged(fakePi, "example/repo", "feature", head);
+    expect(readBranchWork(join(main, ".git"), "feature")).toMatchObject({ status: "merged", mergedHeadOid: head });
   });
 });
