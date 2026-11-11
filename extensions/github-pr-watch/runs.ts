@@ -43,8 +43,12 @@ export interface RunData {
   run: WorkflowRun;
   jobs: Job[];
   waiting: string[];
+  /** Deployment reviews; fetched only while a previous poll saw the run waiting. */
+  approvals?: Approval[];
   release?: Release;
 }
+
+interface Approval { state: string; user?: { login: string } | null; environments: Array<{ name: string }> }
 
 export type RunChanges = { wake: string[]; routine: string[] };
 
@@ -78,7 +82,7 @@ export async function resolveRunId(exec: Exec, repository: string, ref: string, 
   return run.id;
 }
 
-export async function fetchRun(exec: Exec, subscription: { repository: string; runId: number; release?: boolean }): Promise<RunData> {
+export async function fetchRun(exec: Exec, subscription: { repository: string; runId: number; release?: boolean; snapshot?: RunSnapshot }): Promise<RunData> {
   const base = `repos/${subscription.repository}/actions/runs/${subscription.runId}`;
   const run = await ghJson<WorkflowRun>(exec, base);
   const { jobs } = await ghJson<{ jobs: Job[] }>(exec, `${base}/jobs?filter=latest&per_page=100`);
@@ -88,7 +92,30 @@ export async function fetchRun(exec: Exec, subscription: { repository: string; r
   const release = subscription.release && run.head_branch
     ? (await ghJson<Release[]>(exec, `repos/${subscription.repository}/releases?per_page=30`)).find((candidate) => candidate.tag_name === run.head_branch)
     : undefined;
-  return { run, jobs, waiting, release };
+  const approvals = subscription.snapshot?.waiting.some((environment) => !waiting.includes(environment))
+    ? await ghJson<Approval[]>(exec, `${base}/approvals`)
+    : undefined;
+  return { run, jobs, waiting, approvals, release };
+}
+
+/** Report environments whose deployment wait cleared since the last poll, grouped by reviewer and outcome. */
+function reviewLines(cleared: string[], data: RunData): string[] {
+  const grouped = new Map<string, { state?: string; reviewer?: string; environments: string[] }>();
+  for (const environment of cleared) {
+    const review = data.approvals?.find((candidate) => candidate.environments.some((env) => env.name === environment));
+    const key = `${review?.state ?? ""}:${review?.user?.login ?? ""}`;
+    const group = grouped.get(key) ?? { state: review?.state, reviewer: review?.user?.login, environments: [] };
+    group.environments.push(quote(environment));
+    grouped.set(key, group);
+  }
+  return [...grouped.values()].map(({ state, reviewer, environments }) => {
+    const names = environments.join(", ");
+    if (state === "rejected") return `Rejected: ${names}${reviewer ? ` by @${reviewer}` : ""}; run cancelled`;
+    if (!state && data.run.status === "completed" && data.run.conclusion !== "success") {
+      return `Deployment wait for ${names} ended; run ${data.run.conclusion ?? "completed"}`;
+    }
+    return `Approved: ${names}${reviewer ? ` (by @${reviewer})` : ""}${data.run.status === "completed" ? "" : "; the run continues"}`;
+  });
 }
 
 export function snapshotOfRun(data: RunData): RunSnapshot {
@@ -152,6 +179,8 @@ export function describeRunChanges(previous: RunSnapshot, data: RunData, release
   }
   const newlyWaiting = data.waiting.filter((environment) => !previous.waiting.includes(environment));
   if (newlyWaiting.length) wake.push(approvalLine(newlyWaiting, run.html_url));
+  const cleared = previous.waiting.filter((environment) => !data.waiting.includes(environment));
+  if (cleared.length && run.run_attempt === previous.attempt) wake.push(...reviewLines(cleared, data));
 
   for (const job of data.jobs) {
     const value = `${job.status}/${job.conclusion ?? ""}`;

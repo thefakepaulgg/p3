@@ -125,10 +125,11 @@ describe("run subscriptions", () => {
     expect(messages[0]!.message.content).toContain("untrusted data");
 
     routes[base] = run({ status: "completed", conclusion: "success", updated_at: "2026-01-01T10:12:30Z" });
+    routes[`${base}/approvals`] = [];
     routes[jobsPath] = { jobs: [job(1, "Build", "completed", "success"), job(2, "Publish", "completed", "success")] };
     await poll();
     expect(messages).toHaveLength(2);
-    expect(messages[1]!.message.content).toContain('- job "Publish" succeeded\n- Run completed: success in 12m 30s (attempt 1)');
+    expect(messages[1]!.message.content).toContain('- job "Publish" succeeded\n- Approved: "release"\n- Run completed: success in 12m 30s (attempt 1)');
     expect(entries.at(-1).data.runs).toEqual([]);
     const listed = await tools.get("pr_subscriptions").execute("2", {});
     expect(listed.details.runs).toEqual([]);
@@ -191,6 +192,74 @@ describe("run subscriptions", () => {
     await late.poll();
     expect(late.messages[0]!.message.content).toContain('No "release.yml" run appeared for "v1.0.0-rc.1" within 30 minutes; unsubscribed.');
     expect(late.entries.at(-1).data.runs).toEqual([]);
+  });
+
+  describe("deployment reviews", () => {
+    const approvalsPath = `${base}/approvals`;
+    const pendingPath = `${base}/pending_deployments`;
+    async function waitingRun(environments = ["release"]) {
+      const routes: Record<string, unknown> = {
+        [base]: run({ status: "waiting" }), [jobsPath]: { jobs: [job(1, "Publish", "waiting")] },
+        [pendingPath]: environments.map((name) => ({ environment: { name } })),
+      };
+      const watched = harness(routes);
+      await watched.tools.get("run_subscribe").execute("1", { repository: REPO, run_id: 7 });
+      return { ...watched, routes };
+    }
+    const review = (state: string, login: string, ...environments: string[]) =>
+      ({ state, user: { login }, comment: "", environments: environments.map((name) => ({ name })) });
+
+    test("waited, then approved, reported once with the reviewer", async () => {
+      const { routes, messages, poll, calls } = await waitingRun();
+      await poll(); await poll();
+      expect(messages).toHaveLength(0);
+      expect(calls).not.toContain(approvalsPath);
+      routes[base] = run();
+      routes[jobsPath] = { jobs: [job(1, "Publish", "in_progress")] };
+      routes[approvalsPath] = [review("approved", "paul", "release", "release")];
+      await poll();
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.options.deliverAs).toBe("steer");
+      expect(messages[0]!.message.content).toContain('- Approved: "release" (by @paul); the run continues');
+      await poll();
+      expect(messages).toHaveLength(1);
+    });
+
+    test("waited, then rejected", async () => {
+      const { routes, messages, poll } = await waitingRun();
+      routes[base] = run({ status: "completed", conclusion: "failure" });
+      routes[jobsPath] = { jobs: [job(1, "Publish", "completed", "failure")] };
+      routes[approvalsPath] = [review("rejected", "paul", "release")];
+      await poll();
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.message.content).toContain('- Rejected: "release" by @paul; run cancelled\n- Run completed: failure');
+    });
+
+    test("waited, then approved while the approvals endpoint is still empty", async () => {
+      const { routes, messages, poll } = await waitingRun();
+      routes[base] = run();
+      routes[jobsPath] = { jobs: [job(1, "Publish", "in_progress")] };
+      routes[approvalsPath] = [];
+      await poll();
+      expect(messages[0]!.message.content).toContain('- Approved: "release"; the run continues');
+    });
+
+    test("several environments are each reported once as their waits clear", async () => {
+      const { routes, messages, poll } = await waitingRun(["release", "store"]);
+      routes[pendingPath] = [{ environment: { name: "store" } }];
+      routes[approvalsPath] = [review("approved", "paul", "release")];
+      await poll();
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.message.content).toContain('- Approved: "release" (by @paul)');
+      await poll();
+      expect(messages).toHaveLength(1);
+      routes[base] = run();
+      routes[approvalsPath] = [review("approved", "ana", "store"), review("approved", "paul", "release")];
+      await poll();
+      expect(messages).toHaveLength(2);
+      expect(messages[1]!.message.content).toContain('- Approved: "store" (by @ana); the run continues');
+      expect(messages[1]!.message.content).not.toContain('"release" (by');
+    });
   });
 
   test("requires a run ID or a ref with a workflow", async () => {
