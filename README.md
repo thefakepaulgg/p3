@@ -116,6 +116,8 @@ Subagent list/status includes `available_actions` and `nextAction`. `unknown` me
 
 ### Durable independent branch work
 
+`workspace_agent` accepts an optional `model` for both `create` and `open`: a route alias (`sol`, `luna`, `opus`, `sonnet`, `haiku`), `provider/model`, or an unambiguous model ID, using the same explicit model/provider resolution as `subagent`. Explicit selections use that route's thinking default and do not silently fall back; unavailable, ambiguous, or unauthenticated selections fail before worktree placement. Omit `model` to preserve inheritance of the primary's current model and thinking level. This launch option does not override saved-session models during resume.
+
 New `workspace_agent` launches record their objective, canonical repository/branch, checkout, and exact saved executor under the Pi agent directory's `state/branch-work/`. These records are independent of the launching primary's lifetime; existing worktrees are not guessed into records. An already recorded branch refuses a second executor.
 
 `workspace_agent_control` supports `list`, `status`, `pause`, and `resume`. `resume` requires a new explicit `message`; it never repeats the original task. A missing process may be restarted only from its verified saved Pi session, on a fresh interactive user request, after proving absence and an unoccupied matching checkout. Deleted or ambiguous checkouts are not recreated. Pause preserves the objective, session and worktree; these operations do not mean acceptance or task completion. Records are not automatically retired when a response finishes.

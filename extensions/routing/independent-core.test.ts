@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { CoreRpcError, setCoreTestTransportForTests } from "./core-socket.ts";
 import { registerIndependentAgentTools } from "./independent.ts";
 import { setMuxForTests } from "./mux.ts";
+import { routes } from "./policy.ts";
 
 // workspace_agent / workspace_agent_control / message_agent against an in-memory Herdr Core.
 
@@ -85,7 +86,10 @@ beforeEach(() => {
     on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
     exec: async (_command: string, args: string[]) => { const [, cwd, ...rest] = args; return git(cwd, ...rest); },
     getThinkingLevel: () => "off",
-  } as any);
+  } as any, (_ctx, requested) => {
+    if (requested !== "opus") throw new Error(`Unexpected test model: ${requested}`);
+    return routes.opus;
+  });
 });
 afterEach(() => {
   setCoreTestTransportForTests();
@@ -98,6 +102,14 @@ const run = (name: string, params: any) => tools.get(name).execute("id", params,
 const text = (result: any) => result.content[0].text as string;
 
 describe("workspace agents on Herdr Core", () => {
+  test("explicit model selection reaches the Core peer launch", async () => {
+    const result = await run("workspace_agent", { action: "create", branch: "model-peer", task: "Implement task", description: "Model peer", model: "opus" });
+    expect(result.isError).not.toBe(true);
+    const args = calls.find((call) => call.method === "terminal.run")!.params.argv;
+    expect(args[args.indexOf("--model") + 1]).toBe(`${routes.opus.provider}/${routes.opus.model}`);
+    expect(args[args.indexOf("--thinking") + 1]).toBe(routes.opus.thinking);
+  });
+
   test("create places a worktree peer in its own space, detached from this session, and sends the task after readiness", async () => {
     const result = await run("workspace_agent", { action: "create", branch: "peer-one", description: "peer one", task: "Do the thing" });
     expect(text(result)).toContain("Started independent agent");

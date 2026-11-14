@@ -488,7 +488,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     return { content: [{ type: "text" as const, text: result.text }], details: result.details };
   };
 
-  registerIndependentAgentTools(pi);
+  registerIndependentAgentTools(pi, (ctx, requested) => resolveRoute(ctx, requested, true).config);
 
   pi.registerTool({
     name: "message_parent",

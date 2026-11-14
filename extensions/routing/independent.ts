@@ -3,7 +3,8 @@ import { realpathSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Server } from "node:net";
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Route } from "./policy.ts";
 import { Type } from "typebox";
 import { readHerdrSessionId, waitForHerdrAgentReady } from "./herdr.ts";
 import { mux, detectMux, selfIdentity, selfPlacement } from "./mux.ts";
@@ -22,6 +23,7 @@ const WorkspaceAgentParams = Type.Object({
   repo: Type.Optional(Type.String({ minLength: 1, description: "Repository checkout path. Omit to use the current workspace's repository." })),
   path: Type.Optional(Type.String({ minLength: 1, description: "Existing worktree path (open only)" })),
   task: Type.String({ minLength: 1, description: "Initial assignment for the independent agent" }),
+  model: Type.Optional(Type.String({ minLength: 1, description: "Model route alias, provider/model, or unambiguous model ID for this launch. Omit to inherit the primary's model/thinking. Explicit selections do not fall back." })),
   description: Type.String({ minLength: 1, maxLength: 80, description: "Agent/workspace label" }),
   files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32 })),
 });
@@ -71,7 +73,7 @@ async function promptAgent(pi: ExtensionAPI, target: string, text: string) {
   }
 }
 
-export function registerIndependentAgentTools(pi: ExtensionAPI) {
+export function registerIndependentAgentTools(pi: ExtensionAPI, resolveModel: (ctx: ExtensionContext, requested: string) => Route) {
   // Peers are identified by the Pi session label core terminals carry; Herdr TUI learns it from its own integration.
   if (detectMux() === "core") registerRoutedSessionIdentity(pi);
   let inbox: Server | undefined;
@@ -237,6 +239,9 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
       const { paneId: primaryPaneId, workspaceId } = await requirePane(pi);
       if (params.action === "create" && params.path) throw new Error("path is only supported when opening a worktree");
       if (params.action === "open" && (!!params.branch === !!params.path)) throw new Error("Open by exactly one of branch or path");
+      const selected = params.model !== undefined ? resolveModel(ctx, params.model) : undefined;
+      const model = selected ? ["--model", `${selected.provider}/${selected.model}`, "--thinking", selected.thinking]
+        : ctx.model ? ["--model", `${ctx.model.provider}/${ctx.model.id}`, "--thinking", pi.getThinkingLevel()] : [];
       // Core spaces are not repositories: without an explicit repo it starts from this session's folder.
       const source = await mux().worktreeList(pi, params.repo || detectMux() === "core" ? { cwd: resolve(ctx.cwd, params.repo ?? ".") } : { workspaceId });
       const evidence = prepareEvidence(params.files, ctx.cwd, pathForResultRef);
@@ -261,7 +266,6 @@ export function registerIndependentAgentTools(pi: ExtensionAPI) {
       failure.stage = "agent_start"; failure.ids = { branch, paneId, workspaceId: newWorkspaceId };
       const agent = `i-${randomUUID().slice(0, 12)}`;
       const assignedSessionId = randomUUID();
-      const model = ctx.model ? ["--model", `${ctx.model.provider}/${ctx.model.id}`, "--thinking", pi.getThinkingLevel()] : [];
       const startArgs = [...model, "--session-id", assignedSessionId, "--name", params.description];
       for (const delay of [150, 350, 750, 1500]) {
         await new Promise((resolve) => setTimeout(resolve, delay));
