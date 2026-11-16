@@ -155,9 +155,11 @@ export const coreMux: Mux = {
       : undefined;
   },
   // A worker "pane" is its terminal: closing it ends the program and removes the record.
+  // A finished terminal can still be killed; an already removed one is fine (closing is idempotent).
   async closePane(_pi, paneId) {
-    await call("terminal.kill", { terminal: paneId }, 15_000);
-    await call("terminal.rm", { terminal: paneId });
+    const ignoreRemoved = (error: unknown) => { if (!/agent_not_found/.test(error instanceof Error ? error.message : String(error))) throw error; };
+    await call("terminal.kill", { terminal: paneId }, 15_000).catch(ignoreRemoved);
+    await call("terminal.rm", { terminal: paneId }).catch(ignoreRemoved);
   },
   // Core cannot close a tab or space: a tab is closed by ending its terminals (the App drops empty panes and tabs).
   async closeTab(_pi, tabId) {

@@ -154,7 +154,7 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     }
     const targets = [...shown];
     const parentPaneId = routingManifest?.parentPaneId;
-    const isChildPane = !ownsManifest && parentPaneId && selfIdentity().id !== parentPaneId;
+    const isChildPane = !ownsManifest && parentPaneId && selfIdentity().id !== parentPaneId && mux().backend !== "core";
     if (isChildPane) {
       if (!lines.length) lines.push("Subagents");
       lines.splice(1, 0, "↩ Parent · main");
@@ -206,7 +206,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       rendered.push(ctx.ui.theme.fg("dim", "╰─"));
       return rendered;
     };
-    if (ctx.mode !== "tui") {
+    // The Herdr App shows agents itself and has no panes to switch to, so the card is read-only there.
+    if (ctx.mode !== "tui" || mux().backend === "core") {
       try { ctx.ui.setWidget(WIDGET_KEY, renderLines(), { placement: "belowEditor" }); } catch { /* the UI may already be gone */ }
       return;
     }
@@ -301,10 +302,24 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     return agent!;
   };
 
+  // Herdr Core: a finished or removed terminal is definitively gone, so its pane can be released without verification.
+  const isGoneCoreTerminal = (error: unknown) => mux().backend === "core" && /agent_not_found/.test(error instanceof Error ? error.message : String(error));
+
+  /** The verified agent, or undefined when its Herdr Core terminal is already gone. */
+  const liveAgentOrGone = async (task: TaskHandle) => {
+    try { return await verifiedAgent(task); }
+    catch (error) { if (isGoneCoreTerminal(error)) return undefined; throw error; }
+  };
+
+  const releaseGonePane = async (task: TaskHandle) => {
+    await mux().closePane(pi, task.paneId!).catch(() => undefined);
+    updateTask(task, { paneClosedAt: Date.now() });
+  };
+
   const closeAfterReceipt = async (task: TaskHandle) => {
     if (task.paneRetention !== "close" || task.paneClosedAt || !task.paneId || !task.completionNotifiedAt) return;
     try {
-      await verifiedAgent(task);
+      if (!await liveAgentOrGone(task)) { await releaseGonePane(task); return; }
       const receipt = task.assignmentId ? readAssignmentReceipt(task.assignmentId) : undefined;
       if (!receipt || receipt.outcome !== "completed" || receipt.requestId !== task.requestId || receipt.generation !== task.outcomeGeneration || readPendingAssignmentAsk(task.assignmentId!)) return;
       const deadline = Date.now() + 10000;
@@ -554,7 +569,8 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     if (isActiveTask(task)) throw new Error("The task is still active; stop it before closing its pane");
     if (task.pendingCompletion) throw new Error("Result delivery is pending; retain the pane until receipt is proven");
     if (!task.paneClosedAt) {
-      const agent = await verifiedAgent(task);
+      const agent = await liveAgentOrGone(task);
+      if (!agent) { await releaseGonePane(task); return `Removed the finished terminal for ${task.label}; any verified durable result remains available`; }
       if (!["idle", "done"].includes(agent.status)) throw new Error("Worker is still executing or blocked; explicitly stop it before closing");
       await ensureWorkerEditor(task, false, true);
       await mux().closePane(pi, task.paneId);
@@ -646,9 +662,11 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     completionInFlight.delete(task.handle);
     updateTask(task, { state: "stopped", pendingCompletion: false, pendingAskId: undefined, endedAt: Date.now() });
     if (closePane && task.paneId) {
-      await verifiedAgent(task);
-      await mux().closePane(pi, task.paneId);
-      updateTask(task, { paneClosedAt: Date.now() });
+      if (!await liveAgentOrGone(task)) await releaseGonePane(task);
+      else {
+        await mux().closePane(pi, task.paneId);
+        updateTask(task, { paneClosedAt: Date.now() });
+      }
     }
     return `Stopped subagent ${task.handle}${closePane ? " and closed its pane" : ""}; external effects were not rolled back`;
   };
