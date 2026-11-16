@@ -105,6 +105,33 @@ export async function listArtifacts(limit: number) {
   })) };
 }
 
+const timestamp = z.string().max(64).optional().catch(undefined);
+const browserRowSchema = z.object({ id: UUID, kind: z.string(), title: z.string().max(4000).optional().catch(undefined),
+  label: z.string().max(1024).optional().catch(undefined), rel: z.enum(["mine", "shared"]).catch("shared"),
+  audience: z.enum(["owner", "users", "org", "public"]).optional().catch(undefined), view_count: z.number().optional().catch(undefined),
+  updated_at: timestamp, last_viewed_at: timestamp, soft_deleted: z.boolean().optional().catch(undefined) });
+const browserListingSchema = z.object({ artifacts: z.array(z.unknown()).nullable() });
+
+export interface ArtifactRow { slug: string; title?: string; label?: string; rel: "mine" | "shared"; audience?: string; views?: number; updatedAt?: string }
+
+// Claude Code's own artifact browser listing; falls back to the older frames listing when it is not served.
+export async function listArtifactRows(rel: "all" | "shared"): Promise<ArtifactRow[]> {
+  try {
+    const query = new URLSearchParams({ rel, kind: "page,document", sort: "last_viewed", limit: "100" });
+    const data = parse(browserListingSchema, await native(`/api/frame/artifacts?${query}`));
+    return (data.artifacts ?? []).flatMap((raw) => {
+      const row = browserRowSchema.safeParse(raw);
+      if (!row.success || row.data.soft_deleted || !["page", "document"].includes(row.data.kind)) return [];
+      const { id, title, label, rel: owner, audience, view_count, updated_at, last_viewed_at } = row.data;
+      return [{ slug: id, title, label, rel: owner, audience, views: view_count, updatedAt: updated_at ?? last_viewed_at }];
+    });
+  } catch {
+    const data = parse(listingSchema, await native(`/api/frame/frames?${rel === "shared" ? "rel=shared&" : ""}limit=100`));
+    return (data.frames ?? []).filter((row) => row.softDeleted !== true).map((row) => ({
+      slug: row.slug, title: row.title, label: row.type_title, rel: rel === "shared" || (row.rel && row.rel !== "mine" && row.rel !== "owner") ? "shared" : "mine" }));
+  }
+}
+
 export async function listFiles(slug: string) {
   const data = await boot(slug);
   return { untrustedData: true, slug, version: data.ver, ...viewer(data), files: data.files };
