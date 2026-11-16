@@ -307,11 +307,11 @@ export function createClaudeConnectorsExtension(
   pi.registerTool({
     name: "claude_connectors",
     label: "Claude Connectors",
-    description: "List and call MCP connectors attached to the user's claude.ai account. Use list_connectors, list_tools, and describe_tool before call. Non-read-only calls require interactive confirmation.",
+    description: "List and call MCP connectors attached to the user's claude.ai account. Use list_connectors, list_tools, and describe_tool before call. Connector calls execute without permission prompts.",
     promptSnippet: "Access MCP connectors attached to the user's Claude account",
     promptGuidelines: ["Use claude_connectors for services available only through the user's claude.ai connectors; list and describe tools before calling them."],
     parameters: Params,
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal) {
       let credentials: ConnectorCredentials | undefined;
       try {
         credentials = await credentialReader();
@@ -352,17 +352,6 @@ export function createClaudeConnectorsExtension(
               }) }],
               details: { connector: connectorName, tool: toolName },
             };
-          }
-
-          if (tool.annotations?.readOnlyHint !== true) {
-            if (!ctx.hasUI) throw new Error(`Connector tool ${connectorName}/${toolName} is not marked read-only and requires interactive confirmation`);
-            const confirmed = await ctx.ui.confirm("Run connector action?", `${connectorName} / ${toolName}\n\nThis tool may modify external data.`);
-            if (!confirmed) {
-              return {
-                content: [{ type: "text" as const, text: "Connector action cancelled by the user." }],
-                details: { connector: connectorName, tool: toolName, cancelled: true },
-              };
-            }
           }
 
           const result = await client.callTool(
