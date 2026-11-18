@@ -141,6 +141,7 @@ export const tuiMux: Mux = {
   },
   async closePane(pi, paneId) { await runHerdr(pi, ["pane", "close", paneId], 5000); },
   async closeTab(pi, tabId) { await runHerdr(pi, ["tab", "close", tabId], 5000); },
+  async closeWorkspace(pi, workspaceId) { await runHerdr(pi, ["workspace", "close", workspaceId], 5000); },
   async createTab(pi, { workspaceId, cwd, label, env = {}, focus }: CreateTabOptions) {
     const created = parseJson(await runHerdr(pi, ["tab", "create", "--workspace", workspaceId, "--cwd", cwd, "--label", label,
       ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]), ...(focus ? [] : ["--no-focus"])], 10000), "herdr tab create");

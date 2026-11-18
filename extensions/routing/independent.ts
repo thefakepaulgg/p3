@@ -15,6 +15,7 @@ import { prepareEvidence } from "./evidence.ts";
 import { listBranchWork, readBranchWork, withBranchWorkLock, writeBranchWork, type BranchWork } from "./branch-work.ts";
 import { peerInboxPath, peerMessageStatus, sendPeerMessage, startPeerInbox, type PeerMessage, type PeerMessageState } from "./peer-messages.ts";
 import { shouldInterruptPeer } from "./peer-priority.ts";
+import { real, removalBlocker, removeWorktree, within } from "./worktree-cleanup.ts";
 import { canMessage, connectSiblings, connectUserDirected, disconnectSiblings, disconnectUserDirected, peerIdentity, recordChild } from "./peer-links.ts";
 
 const WorkspaceAgentParams = Type.Object({
@@ -228,6 +229,25 @@ export function registerIndependentAgentTools(pi: ExtensionAPI, resolveModel: (c
     return agent;
   };
 
+  const closeWork = async (work: BranchWork, cwd: string, failure: Partial<OrchestrationErrorDetails>) => {
+    if (work.status === "removed") throw new Error("This work is already removed");
+    const { paneId, workspaceId } = await requirePane(pi);
+    if (paneId === work.executor.pane || sameWorkspace(workspaceId, work.executor.workspace) || within(work.worktree, real(cwd)))
+      throw new Error("Cannot close the workspace you are running in. Ask its launching primary, or the user/ChatGPT, to close it instead.");
+    const self = peerIdentity(await getAgent(paneId), paneId);
+    const executor = await verifyWorkExecutor(work).catch(() => undefined);
+    if (!(executor && canMessage(self, peerIdentity(executor, work.executor.pane))) && (!directTurn || Date.now() - directTurn.at > 300000)) throw unauthorized();
+    failure.stage = "worktree_check";
+    const unsafe = await removalBlocker(pi, work);
+    if (unsafe) throw new Error(`Worktree is not safe to remove (${unsafe}); nothing was closed or changed`);
+    failure.stage = "terminal_close"; failure.retrySafe = "unknown";
+    await mux().closeWorkspace(pi, work.executor.workspace);
+    failure.stage = "worktree_removal";
+    const reason = await removeWorktree(pi, work);
+    if (reason) throw new Error(`Terminals were closed but the worktree was not removed (${reason})`);
+    return { content: [{ type: "text" as const, text: `Closed ${work.branch}: workspace terminals stopped, worktree and branch removed.` }], details: { work } };
+  };
+
   pi.registerTool({
     name: "workspace_agent",
     label: "Workspace Agent",
@@ -302,9 +322,9 @@ export function registerIndependentAgentTools(pi: ExtensionAPI, resolveModel: (c
   });
 
   pi.registerTool({
-    name: "workspace_agent_control", label: "Workspace Work", description: "Inspect durable branch work across primary restarts. Pause or explicitly resume its exact saved Pi session. A missing executor may be restarted only on an interactive user request after proving absence; the original task and tools are never replayed.",
+    name: "workspace_agent_control", label: "Workspace Work", description: "Inspect durable branch work across primary restarts. Pause or explicitly resume its exact saved Pi session. Close a finished peer: stops its workspace terminals, then removes its clean, pushed (or merged) worktree and branch; refuses otherwise and from inside that workspace. A missing executor may be restarted only on an interactive user request after proving absence; the original task and tools are never replayed.",
     parameters: Type.Object({
-      action: StringEnum(["list", "status", "pause", "resume"] as const),
+      action: StringEnum(["list", "status", "pause", "resume", "close"] as const),
       repo: Type.Optional(Type.String({ minLength: 1 })), branch: Type.Optional(Type.String({ minLength: 1 })),
       message: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "Explicit next instruction for resume; the original task is never replayed automatically." })),
       files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), { maxItems: 32 })),
@@ -324,9 +344,10 @@ export function registerIndependentAgentTools(pi: ExtensionAPI, resolveModel: (c
         if (params.action === "status") {
           let runtime = "unknown";
           try { runtime = (await verifyWorkExecutor(work)).status; } catch { /* Preserve open work when observation is unavailable. */ }
-          const available_actions = runtime === "unknown" ? ["status"] : ["status", "pause", ...(["idle", "done", "blocked"].includes(runtime) ? ["resume"] : [])];
+          const available_actions = runtime === "unknown" ? ["status", "close"] : ["status", "pause", "close", ...(["idle", "done", "blocked"].includes(runtime) ? ["resume"] : [])];
           return { content: [{ type: "text" as const, text: `${work.branch} [${work.status}] · executor ${runtime}\nObjective: ${work.objective}` }], details: { work, runtime, available_actions, nextAction: runtime === "unknown" ? `Inspect the saved session ${work.executor.sessionPath} and checkout; no replacement or task replay was started.` : "Use pause or supply an explicit resume instruction when needed." } };
         }
+        if (params.action === "close") return await closeWork(work, ctx.cwd, failure);
         const evidence = prepareEvidence(params.files, ctx.cwd, pathForResultRef);
         if (params.action === "resume" && !params.message?.trim()) throw new Error("Resume requires an explicit next instruction; inspect earlier effects before continuing");
         failure.stage = "executor_control"; failure.retrySafe = "unknown"; failure.ids = { branch: work.branch, paneId: work.executor.pane, sessionId: work.executor.sessionId };

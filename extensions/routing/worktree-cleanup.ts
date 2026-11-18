@@ -4,8 +4,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { listBranchWork, readBranchWork, withBranchWorkLock, writeBranchWork, type BranchWork } from "./branch-work.ts";
 import { mux } from "./mux.ts";
 
-const real = (path: string) => { try { return realpathSync(path); } catch { return path; } };
-const within = (parent: string, child: string) => child === parent || child.startsWith(parent + sep);
+export const real = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+export const within = (parent: string, child: string) => child === parent || child.startsWith(parent + sep);
 
 const git = async (pi: ExtensionAPI, cwd: string, args: string[]): Promise<string> => {
   const result = await pi.exec("git", ["-C", cwd, ...args], { timeout: 30_000 });
@@ -36,7 +36,7 @@ async function mergedIntoPr(pi: ExtensionAPI, path: string, oid?: string): Promi
 }
 
 /** Why the checkout must stay (or, when safe, whether the merged PR head proves it fully merged). */
-async function blocker(pi: ExtensionAPI, work: BranchWork): Promise<{ reason?: string; proven?: boolean }> {
+async function blocker(pi: ExtensionAPI, work: BranchWork, checkOccupied = true): Promise<{ reason?: string; proven?: boolean }> {
   const path = work.worktree;
   if (!existsSync(path)) return { reason: "checkout is missing" };
   if (await git(pi, path, ["symbolic-ref", "--quiet", "--short", "HEAD"]) !== work.branch) return { reason: "checkout is on another branch" };
@@ -47,12 +47,17 @@ async function blocker(pi: ExtensionAPI, work: BranchWork): Promise<{ reason?: s
   const proven = await mergedIntoPr(pi, path, work.mergedHeadOid);
   if (!proven && await git(pi, path, ["log", "HEAD", "--not", "--remotes", "--oneline"])) return { reason: "unpushed commits" };
   if (await git(pi, path, ["submodule", "foreach", "--quiet", "--recursive", "git status --porcelain"])) return { reason: "submodules are not clean" };
-  if (await occupied(pi, path)) return { reason: "a live agent, pane or process is using it" };
+  if (checkOccupied && await occupied(pi, path)) return { reason: "a live agent, pane or process is using it" };
   return { proven };
 }
 
-/** Remove a merged record's checkout, then its branch. Returns the blocker, or undefined once removed. */
-async function removeWorktree(pi: ExtensionAPI, work: BranchWork): Promise<string | undefined> {
+/** Why the checkout is unsafe to remove, ignoring whoever still occupies it (checked again on removal). */
+export async function removalBlocker(pi: ExtensionAPI, work: BranchWork): Promise<string | undefined> {
+  return (await blocker(pi, work, false)).reason;
+}
+
+/** Remove a record's checkout, then its branch. Returns the blocker, or undefined once removed. */
+export async function removeWorktree(pi: ExtensionAPI, work: BranchWork): Promise<string | undefined> {
   const { reason, proven } = await blocker(pi, work);
   if (reason) return reason;
   const main = (await registeredWorktrees(pi, work.worktree))[0]!;
