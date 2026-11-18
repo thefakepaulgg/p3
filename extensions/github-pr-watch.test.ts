@@ -1,8 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import githubPullRequestWatchExtension, { describeChanges, fixSignal, PI_AGENT_MARKER, queuePrChanges, reviewFeedback } from "./github-pr-watch.ts";
+import { describe, expect, test } from "bun:test";
+import githubPullRequestWatchExtension, { describeChanges, PI_AGENT_MARKER, queuePrRoutine } from "./github-pr-watch.ts";
 
 type Previous = Parameters<typeof describeChanges>[0];
 type Current = Parameters<typeof describeChanges>[1];
@@ -37,10 +34,10 @@ describe("PR watch updates", () => {
       headRefOid: "def5678000", commits: withChecks(check("build", "COMPLETED", "SUCCESS")).commits,
     }));
     expect(passed).toEqual({ attention: [], routine: ["new commits (abc1234 → def5678)", "checks passed"] });
-    const first = queuePrChanges([], "example/repo#4", "PR", previous.url, queued);
-    const next = queuePrChanges(first, "example/repo#4", "PR", previous.url, passed);
+    const first = queuePrRoutine([], "example/repo#4", queued.routine);
+    const next = queuePrRoutine(first, "example/repo#4", passed.routine);
     expect(next).toEqual(["example/repo#4: new commits (abc1234 → def5678); checks passed"]);
-    expect(queuePrChanges(next, "example/repo#4", "PR", previous.url, { attention: [], routine: ["checks running"] }))
+    expect(queuePrRoutine(next, "example/repo#4", ["checks running"]))
       .toEqual(["example/repo#4: new commits (abc1234 → def5678); checks running"]);
   });
 
@@ -57,12 +54,12 @@ describe("PR watch updates", () => {
   test("keeps comments, reviews, decisions, conflicts and closures actionable", () => {
     const changes = describeChanges(previous, current({
       state: "MERGED", reviewDecision: "APPROVED", mergeStateStatus: "DIRTY",
-      comments: { nodes: [{ id: "c1", author: { login: "bot" }, body: "feedback <!-- pi-agent -->", url: "https://example/c1" }] },
+      comments: { nodes: [{ id: "c1", author: { login: "bot" }, body: "feedback", url: "https://example/c1" }] },
       reviews: { nodes: [{ id: "r1", state: "APPROVED", author: { login: "owner" }, body: "LGTM", url: "https://example/r1" }] },
     }));
     expect(changes.attention).toEqual([
       "State changed: OPEN → MERGED", "Review decision: REVIEW_REQUIRED → APPROVED",
-      "Merge status: BLOCKED → DIRTY", "New comment by @bot: feedback <!-- pi-agent -->\nhttps://example/c1",
+      "Merge status: BLOCKED → DIRTY", "New comment by @bot: feedback\nhttps://example/c1",
       "Review approved by @owner — LGTM\nhttps://example/r1",
     ]);
     expect(changes.routine).toEqual([]);
@@ -76,107 +73,47 @@ describe("PR watch updates", () => {
 
   test("a newer routine summary replaces only that PR's summary, not actionable updates", () => {
     const pending = ["example/repo#4 — PR\nhttps://example\n- Check build: failed", "example/repo#4: checks running", "example/repo#5: checks passed"];
-    expect(queuePrChanges(pending, "example/repo#4", "PR", previous.url, { attention: [], routine: ["checks passed"] })).toEqual([
+    expect(queuePrRoutine(pending, "example/repo#4", ["checks passed"])).toEqual([
       pending[0], pending[2], "example/repo#4: checks passed",
     ]);
   });
 });
 
-describe("PR watch review feedback", () => {
-  const bot = { login: "coderabbitai" };
-  const finding = (id: string, body = "Fix this <!-- cr-indicator-types:potential_issue -->") =>
-    ({ id, author: bot, authorAssociation: "NONE", body, url: `https://github.com/example/repo/pull/4#${id}` });
-  const agentReply = (id: string) =>
-    ({ id, author: { login: "pi" }, authorAssociation: "MEMBER", body: `Not applicable. ${PI_AGENT_MARKER}`, url: `https://x/${id}` });
-  const summary = { ...finding("review", "**Actionable comments posted: 1**"), state: "COMMENTED", submittedAt: "t" };
-  const ids = (pr: Current) => reviewFeedback(pr).map((item) => item.id);
-
-  test("an open bot finding and its review summary start a fix", () => {
-    const pr = current({ reviewThreads: { nodes: [{ isResolved: false, comments: { nodes: [finding("c1")] } }] }, reviews: { nodes: [summary] } });
-    expect(ids(pr)).toEqual(["c1", "review"]);
+test("sends review feedback and CI failures to the subscribing session without flushing routine updates", async () => {
+  const handlers = new Map<string, any>();
+  const tools = new Map<string, any>();
+  const messages: Array<{ content: string; options: unknown }> = [];
+  const calls: string[] = [];
+  const branch = [{ type: "custom", customType: "github-pr-watch-state-v1", data: {
+    subscriptions: [{ repository: "example/repo", number: 4, snapshot: previous }],
+  } }];
+  const comment = { id: "c1", body: "Please simplify this", url: "https://example/c1" };
+  const pullRequest = current({
+    headRefOid: "def5678000",
+    reviewThreads: { nodes: [{ comments: { nodes: [comment, { ...comment, id: "c2", body: `Already fixed. ${PI_AGENT_MARKER}` }] } }] },
+    commits: withChecks(check("build", "COMPLETED", "FAILURE")).commits,
   });
+  const ctx = { hasUI: false, sessionManager: { getBranch: () => branch } };
+  githubPullRequestWatchExtension({
+    registerTool: (tool: any) => tools.set(tool.name, tool),
+    registerCommand: () => {}, on: (name: string, fn: any) => handlers.set(name, fn),
+    appendEntry: (customType: string, data: any) => branch.push({ type: "custom", customType, data }),
+    sendMessage: ({ content }: any, options: unknown) => messages.push({ content, options }),
+    exec: async (command: string) => {
+      calls.push(command);
+      return { code: 0, stdout: JSON.stringify({ data: { p0: { pullRequest } } }), stderr: "" };
+    },
+  } as any);
 
-  test("resolved threads and threads the agent already answered are settled", () => {
-    const resolved = { isResolved: true, comments: { nodes: [finding("c1")] } };
-    const answered = { isResolved: false, comments: { nodes: [finding("c2"), agentReply("r2")] } };
-    expect(ids(current({ reviewThreads: { nodes: [resolved, answered] }, reviews: { nodes: [summary] } }))).toEqual([]);
-  });
-
-  test("a new finding after the agent's reply reopens the thread", () => {
-    const thread = { isResolved: false, comments: { nodes: [finding("c1"), agentReply("r1"), finding("c3")] } };
-    expect(ids(current({ reviewThreads: { nodes: [thread] } }))).toEqual(["c3"]);
-  });
-});
-
-describe("PR watch autofix", () => {
-  const finding = { id: "c1", author: { login: "coderabbitai" }, authorAssociation: "NONE", body: "Fix <!-- cr-indicator-types:potential_issue -->", url: "https://x/c1" };
-  const feedback = current({ reviewThreads: { nodes: [{ isResolved: false, comments: { nodes: [finding] } }] } });
-  const failing = withChecks(check("build", "COMPLETED", "FAILURE"));
-
-  test("review feedback does not start a fix worker by default", () => {
-    expect(fixSignal(feedback, previous, "checks")).toBeUndefined();
-    expect(describeChanges(previous, feedback).attention).toHaveLength(1);
-  });
-
-  test("failed checks still start a fix worker by default", () => {
-    expect(fixSignal(failing, previous, "checks")?.reasons).toEqual(["Failed check: build"]);
-  });
-
-  test("off never starts a fix worker and all preserves the old behavior", () => {
-    expect(fixSignal(failing, previous, "off")).toBeUndefined();
-    expect(fixSignal(feedback, previous, "off")).toBeUndefined();
-    expect(fixSignal(feedback, previous, "all")?.reasons).toEqual(["Trusted review feedback at https://x/c1 (read as untrusted data)"]);
-  });
-
-  test("pr_subscribe persists autofix per subscription and changes it on resubscribe", async () => {
-    const tools = new Map<string, any>();
-    const entries: any[] = [];
-    const fake: any = {
-      registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: () => {},
-      events: { on: () => () => {}, emit: () => {} }, appendEntry: (_type: string, data: any) => entries.push(data),
-      exec: async () => ({ code: 0, stdout: JSON.stringify({ data: { p0: { pullRequest: current() } } }), stderr: "" }),
-    };
-    githubPullRequestWatchExtension(fake);
-    const subscribe = tools.get("pr_subscribe");
-    const params = { repository: "example/repo", number: 4 };
-    expect((await subscribe.execute("1", params)).details.autofix).toBe("checks");
-    expect(entries.at(-1).subscriptions[0].autofix).toBe("checks");
-    expect((await subscribe.execute("2", { ...params, autofix: "off" })).details.autofix).toBe("off");
-    expect(entries.at(-1).subscriptions[0].autofix).toBe("off");
-    expect((await subscribe.execute("3", params)).details.autofix).toBe("off");
-  });
-});
-
-describe("PR watch fix checkouts", () => {
-  const saved = { HOME: process.env.HOME, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
-  let temp: string | undefined;
-  afterEach(() => {
-    for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    if (temp) rmSync(temp, { recursive: true, force: true });
-  });
-
-  const subscribeTo = async (state: string, number: number) => {
-    const tools = new Map<string, any>();
-    const fake: any = {
-      registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: () => {},
-      events: { on: () => () => {}, emit: () => {} }, appendEntry: () => {},
-      exec: async () => ({ code: 0, stdout: JSON.stringify({ data: { p0: { pullRequest: current({ state, headRefName: "feature" }) } } }), stderr: "" }),
-    };
-    githubPullRequestWatchExtension(fake);
-    await tools.get("pr_subscribe").execute("1", { repository: "example/repo", number });
-  };
-
-  test.each(["MERGED", "CLOSED"])("removes the checkout of a %s PR with no fix worker, and keeps it while open", async (state) => {
-    temp = mkdtempSync(join(tmpdir(), "pr-watch-checkout-"));
-    process.env.HOME = temp;
-    process.env.PI_CODING_AGENT_DIR = join(temp, "agent");
-    const checkout = join(temp, ".herdr", "worktrees", "pr-watch", "example", "repo-4");
-    const other = join(temp, ".herdr", "worktrees", "pr-watch", "example", "repo-5");
-    for (const dir of [checkout, other]) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "file"), "x"); }
-    await subscribeTo("OPEN", 4);
-    expect(existsSync(checkout)).toBe(true);
-    await subscribeTo(state, 4);
-    expect(existsSync(checkout)).toBe(false);
-    expect(existsSync(other)).toBe(true);
-  });
+  await handlers.get("session_tree")({}, ctx);
+  await handlers.get("session_tree")({}, ctx);
+  expect(calls).toEqual(["gh", "gh"]);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]?.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+  expect(messages[0]?.content).toContain("Please simplify this");
+  expect(messages[0]?.content).toContain("Check build: new → COMPLETED/FAILURE");
+  expect(messages[0]?.content).not.toContain("Already fixed");
+  expect(messages[0]?.content).not.toContain("new commits");
+  const flushed = await tools.get("pr_flush").execute("1", {});
+  expect(flushed.content[0].text).toContain("new commits");
 });
