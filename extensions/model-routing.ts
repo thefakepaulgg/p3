@@ -177,11 +177,6 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
     const signature = initial.lines.join("\n");
     if (signature === widgetSignature) return;
     widgetSignature = signature;
-    if (!initial.lines.length) {
-      routedWidget = undefined;
-      try { ctx.ui.setWidget(WIDGET_KEY, undefined); } catch { /* the UI may already be gone */ }
-      return;
-    }
     const renderLines = (selectedHandle?: string) => {
       const current = widgetData();
       if (!current.lines.length) return [];
@@ -206,12 +201,13 @@ export default function modelRoutingExtension(pi: ExtensionAPI) {
       rendered.push(ctx.ui.theme.fg("dim", "╰─"));
       return rendered;
     };
-    // The Herdr App shows agents itself and has no panes to switch to, so the card is read-only there.
-    if (ctx.mode !== "tui" || mux().backend === "core") {
-      try { ctx.ui.setWidget(WIDGET_KEY, renderLines(), { placement: "belowEditor" }); } catch { /* the UI may already be gone */ }
+    if (ctx.mode !== "tui") {
+      try { ctx.ui.setWidget(WIDGET_KEY, initial.lines.length ? renderLines() : undefined, { placement: "belowEditor" }); } catch { /* the UI may already be gone */ }
       return;
     }
+    // Registered once and kept (rendering nothing when empty): re-setting a widget moves it below the others.
     if (routedWidget) { routedWidget.requestRender(); return; }
+    if (!initial.lines.length) return;
     try {
       ctx.ui.setWidget(WIDGET_KEY, (tui) => {
         routedWidget = new RoutedTaskWidget(
