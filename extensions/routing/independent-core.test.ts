@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoreRpcError, setCoreTestTransportForTests } from "./core-socket.ts";
@@ -84,7 +84,10 @@ beforeEach(() => {
   registerIndependentAgentTools({
     registerTool: (tool: any) => tools.set(tool.name, tool),
     on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-    exec: async (_command: string, args: string[]) => { const [, cwd, ...rest] = args; return git(cwd, ...rest); },
+    exec: async (command: string, args: string[]) => {
+      if (command === "lsof") return { code: 0, stdout: "n/\n", stderr: "" };
+      const [, cwd, ...rest] = args; return git(cwd, ...rest);
+    },
     getThinkingLevel: () => "off",
   } as any, (_ctx, requested) => {
     if (requested !== "opus") throw new Error(`Unexpected test model: ${requested}`);
@@ -176,5 +179,44 @@ describe("workspace agents on Herdr Core", () => {
     expect(sends.map((call) => call.params.text)).toEqual(["Continue"]);
     expect(resumed.details.work.executor).toMatchObject({ workspace: old.workspace, sessionId: old.sessionId });
     expect(resumed.details.work.executor.pane).not.toBe(old.pane);
+  });
+
+  describe("close", () => {
+    const createPeer = async (branch: string) => {
+      git(repo, "init", "-q", "--bare", join(temp, "origin.git"));
+      git(repo, "remote", "add", "origin", join(temp, "origin.git"));
+      git(repo, "push", "-q", "origin", "main");
+      const created = await run("workspace_agent", { action: "create", branch, description: branch, task: "Task" });
+      return { pane: created.details.paneId as string, worktree: created.details.worktree as string };
+    };
+    const kills = () => calls.filter((call) => call.method === "terminal.kill");
+
+    test("stops the workspace terminals, then removes the worktree and branch and records removal", async () => {
+      const { pane, worktree } = await createPeer("close-ok");
+      const result = await run("workspace_agent_control", { action: "close", branch: "close-ok" });
+      expect(text(result)).toContain("Closed close-ok");
+      expect(kills().map((call) => call.params.terminal)).toEqual([pane]);
+      expect(terminals.has(pane)).toBe(false);
+      expect(existsSync(worktree)).toBe(false);
+      expect(git(repo, "branch", "--list", "close-ok").stdout.trim()).toBe("");
+      expect(text(await run("workspace_agent_control", { action: "list" }))).toContain("close-ok [removed]");
+    });
+
+    test("an unclean worktree is refused before anything is closed", async () => {
+      const { worktree } = await createPeer("close-dirty");
+      writeFileSync(join(worktree, "wip.txt"), "x");
+      const result = await run("workspace_agent_control", { action: "close", branch: "close-dirty" });
+      expect(JSON.stringify(result)).toContain("uncommitted changes");
+      expect(kills()).toHaveLength(0);
+      expect(existsSync(worktree)).toBe(true);
+    });
+
+    test("an agent running inside the worktree cannot close it", async () => {
+      const { worktree } = await createPeer("close-self");
+      const result = await tools.get("workspace_agent_control").execute("id", { action: "close", branch: "close-self" }, undefined, undefined, { cwd: worktree });
+      expect(JSON.stringify(result)).toContain("launching primary");
+      expect(kills()).toHaveLength(0);
+      expect(existsSync(worktree)).toBe(true);
+    });
   });
 });

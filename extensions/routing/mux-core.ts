@@ -167,6 +167,10 @@ export const coreMux: Mux = {
     for (const terminal of listed?.terminals ?? []) await coreMux.closePane(_pi, String(terminal.address)).catch(() => undefined);
     for (const [token, slot] of slots) if (slot.tabId === tabId) slots.delete(token);
   },
+  async closeWorkspace(pi, workspaceId) {
+    if (!workspaceId) throw new Error("closeWorkspace requires a workspace ID");
+    for (const pane of await coreMux.listPanes(pi, workspaceId) ?? []) await coreMux.closePane(pi, pane.paneId);
+  },
   async createTab(_pi, options: CreateTabOptions) { return reserve(options.workspaceId || undefined, undefined, options.cwd, options.env, options.labels); },
   async startAgent(_pi, name, paneId, args) {
     const slot = slots.get(paneId);

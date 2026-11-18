@@ -75,6 +75,8 @@ export interface Mux {
   listPanes(pi: ExtensionAPI, workspaceId?: string): Promise<MuxPane[] | undefined>;
   closePane(pi: ExtensionAPI, paneId: string): Promise<void>;
   closeTab(pi: ExtensionAPI, tabId: string): Promise<void>;
+  /** Core cannot close a space: closing every terminal in it is how the App drops it. */
+  closeWorkspace(pi: ExtensionAPI, workspaceId: string): Promise<void>;
   createTab(pi: ExtensionAPI, options: CreateTabOptions): Promise<{ paneId?: string; tabId?: string }>;
   /**
    * Allocate and start a routed Pi worker. Resolves once the process is started (the TUI also returns the
