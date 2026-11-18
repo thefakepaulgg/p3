@@ -17,6 +17,7 @@ pi -e git:github.com/therealpaulgg/p3
 ## Included resources
 
 - Advisor, model-routing, task-list, tutor-mode, and workflow extensions
+- Automatic session naming
 - Direct claude.ai connector access and Telegram notification extensions
 - Catppuccin, Dracula, Synthwave, and Matrix themes
 - The `rpiv` workflow
@@ -161,6 +162,25 @@ Peer-message interruption and Jev compaction still use Jev and do not read this 
 The personal Auto loader registers `openai-codex/auto` using `extensions/routing/auto.ts`; it is not automatically enabled by the shareable package. Choose **Auto (sticky + failover)** in `/model` to retain the primary model already selected and enable provider failover. Auto does not ask Jev to downgrade or cost-optimize the ongoing primary conversation; task-based selection is for fresh subagents. A physical Opus default or a manual `/route` selection does not opt into failover.
 
 Reasoning effort is capped at **High**, including manual selections and outgoing supported provider payloads. Above-High subagent overrides are rejected. Route defaults are Haiku/Opus/Sol Medium and Sonnet/Luna High. Reload Pi after updating these extensions or the model catalog.
+
+## Automatic session naming
+
+After the first prompt and reply, `session-naming` asks a small model for a 3-6 word sentence-case title and sets it as the session name. It runs after the agent turn without awaiting, so it never delays the loop, and failures are silent (set `P3_SESSION_NAMING_DEBUG=1` to log them).
+
+- It never replaces a name it did not set: a session started with `--name`, a resumed session that already has a name, or any rename (for example `/name`) at any point turns it off for that session.
+- It re-checks the title once after `retitleAfterTurns` more user turns and changes it only if the topic clearly shifted.
+- It skips print/JSON mode, background subagents, and Herdr helpers. Routed workers are already named by their launcher.
+- The model defaults to the small routing tier (Haiku 5.5, then GPT-6 Luna via `openai-codex` or `openai`), with the session's current provider first; models without credentials or in a usage cooldown are skipped. Two failed attempts stop it for the session.
+
+```json
+{
+  "p3": {
+    "sessionNaming": { "enabled": true, "models": ["anthropic/claude-haiku-5-5"], "retitleAfterTurns": 8 }
+  }
+}
+```
+
+`models` is an ordered `provider/model` list; `retitleAfterTurns: 0` disables the re-title check.
 
 ## Experimental opt-in MCP Events
 
