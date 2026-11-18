@@ -8,6 +8,7 @@ import { saveRoutedInstruction } from "./editor-guard.ts";
 import { workerPolicyArgs } from "./worker-policy.ts";
 import { mux, selfIdentity, type MuxAgent, type WorkerLaunchProgress } from "./mux.ts";
 import { normalizeTuiAgent } from "./mux-tui.ts";
+import { CoreRpcError } from "./core-socket.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { clampThinkingLevel, type Route } from "./policy.ts";
 import { buildCompletionMessage, buildInterruptedMessage, COMPLETION_KIND, isActiveTask, type TaskHandle } from "./state.ts";
@@ -310,8 +311,26 @@ export async function launchHerdrAgent(pi: ExtensionAPI, task: string, descripti
     // One socket request both submits and observes the first working transition. If Herdr
     // 0.8.0's delayed Enter is swallowed, submit only the existing composer text and verify
     // activity; never paste the prompt twice.
+    const submit = () => mux().prompt(pi, agent, prompt, { awaitStart: true });
     try {
-      await mux().prompt(pi, agent, prompt, { awaitStart: true });
+      try {
+        await submit();
+      } catch (error) {
+        // Core emits this exact error before typing anything. Retry once, only on the
+        // original ready Pi session. A fresh session may not have a JSONL header yet.
+        const expectedSessionId = options.continuation?.id ?? options.assignmentId;
+        if (mux().backend !== "core" || !expectedSessionId || !(error instanceof CoreRpcError) || error.kind !== "unavailable" ||
+          error.message !== `unavailable: ${agent} is still starting: its output has not settled`) throw error;
+        const live = await mux().getAgent(pi, agent);
+        const savedId = readHerdrSessionId(live?.sessionPath);
+        if (!live || live.paneId !== worker.paneId || live.terminalId !== worker.terminalId || live.status !== "idle" ||
+          !sessionPath || live.sessionPath !== sessionPath || live.reportedSessionId !== expectedSessionId ||
+          (savedId !== undefined && savedId !== expectedSessionId)) {
+          throw new Error("Worker startup identity is unverified or replaced", { cause: error });
+        }
+        progress.retryAttempted = true;
+        await submit();
+      }
     } catch (error) {
       if (!/agent_prompt_stalled/.test(error instanceof Error ? error.message : String(error))) throw error;
       await mux().sendKeys(pi, agent, ["enter"]);

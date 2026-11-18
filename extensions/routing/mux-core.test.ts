@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { CoreRpcError, requestCore, resolveCoreSocketPath, setCoreTestTransportForTests } from "./core-socket.ts";
 import { launchHerdrAgent } from "./herdr.ts";
 import { routes } from "./policy.ts";
+import { registerRoutedSessionIdentity } from "./session-identity.ts";
 import { coreMux, normalizeCoreTerminal } from "./mux-core.ts";
 import { detectMux, isReservedPane, mux, selfIdentity, setMuxForTests } from "./mux.ts";
 
@@ -191,10 +192,15 @@ describe("core mux operations", () => {
 
   test("session and metadata are published as labels; the same session is not re-sent", async () => {
     terminals.set("t7", terminal("t7"));
-    await coreMux.reportSession(pi, "t7", "/s/a.jsonl", 1, "startup");
-    await coreMux.reportSession(pi, "t7", "/s/a.jsonl", 2);
+    process.env.HC_TERMINAL_ID = "t7";
+    const handlers = new Map<string, Function>();
+    registerRoutedSessionIdentity({ on: (event: string, handler: Function) => handlers.set(event, handler) } as any);
+    const path = join(temp, "not-yet-persisted.jsonl");
+    const ctx = { mode: "tui", sessionManager: { getSessionFile: () => path, getSessionId: () => "pi-session-id" } };
+    await handlers.get("session_start")!({ reason: "startup" }, ctx);
+    await handlers.get("agent_start")!({}, ctx);
     expect(calls.filter((call) => call.method === "terminal.label")).toHaveLength(1);
-    expect(terminals.get("t7").labels["p3.session"]).toBe("/s/a.jsonl");
+    expect(await coreMux.getAgent(pi, "t7")).toMatchObject({ sessionPath: path, reportedSessionId: "pi-session-id" });
     await coreMux.reportMetadata(pi, "t7", "pi-routing:delegation", { subagents: "2 subagents active" });
     expect(terminals.get("t7").labels["p3.subagents"]).toBe("2 subagents active");
     await coreMux.reportMetadata(pi, "t7", "pi-routing:delegation", { subagents: null });
@@ -359,6 +365,43 @@ describe("routed worker launch on core", () => {
     expect(send.text).toContain(`p3:routed-request ${assignment}`);
     expect(send.text).toContain("Inspect only");
     expect(calls.findIndex((call) => call.method === "terminal.send")).toBeGreaterThan(calls.findIndex((call) => call.method === "terminal.run"));
+  });
+
+  test.each(["matching", "replaced session", "unverified session", "missing terminal", "ambiguous send", "still settling"])("launch handles a startup send failure: %s", async (scenario) => {
+    const path = join(temp, "yet-to-be-written.jsonl");
+    const base = installFakeCore();
+    let sends = 0;
+    let delivered = 0;
+    setCoreTestTransportForTests(async (method, params, timeout) => {
+      const result = await base(method, params, timeout);
+      if (method === "terminal.run") {
+        result.status = { state: "idle" };
+        result.labels["p3.session"] = path;
+        result.labels["p3.session-id"] = assignment;
+      }
+      if (method === "terminal.send") {
+        if (++sends === 1 || scenario === "still settling") {
+          if (scenario === "ambiguous send") throw new Error("core_socket_timeout: terminal.send timed out");
+          if (scenario === "replaced session") terminals.get("t7").labels["p3.session-id"] = randomUUID();
+          if (scenario === "unverified session") delete terminals.get("t7").labels["p3.session-id"];
+          if (scenario === "missing terminal") terminals.delete("t7");
+          throw new CoreRpcError("unavailable", "t7 is still starting: its output has not settled");
+        }
+        delivered++;
+      }
+      return result;
+    });
+    const launch = launchHerdrAgent(pi, "Inspect only", "Slow Core task", "luna", routes.luna, "/repo", 1000, undefined, [], false, { assignmentId: assignment });
+    if (scenario === "matching") {
+      expect(await launch).toMatchObject({ terminalId: "t7", sessionId: assignment, sessionPath: path });
+    } else {
+      const expected = scenario === "ambiguous send" ? /core_socket_timeout/ : scenario === "still settling" ? /output has not settled/ : /unverified or replaced|agent_not_found/;
+      await expect(launch).rejects.toThrow(expected);
+    }
+    expect(sends).toBe(scenario === "matching" || scenario === "still settling" ? 2 : 1);
+    expect(delivered).toBe(scenario === "matching" ? 1 : 0);
+    expect(calls.filter((call) => call.method === "terminal.run")).toHaveLength(1);
+    expect(calls.some((call) => ["terminal.keys", "terminal.kill"].includes(call.method))).toBe(false);
   });
 
   test("a worker that exits during startup fails the launch without a rollback guess", async () => {

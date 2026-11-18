@@ -12,6 +12,7 @@ import type { CreateTabOptions, Mux, MuxAgent, MuxPane, WorkerLaunchRequest, Wor
 
 export const LABEL_HANDLE = "p3.handle";
 export const LABEL_SESSION = "p3.session";
+const LABEL_SESSION_ID = "p3.session-id";
 export const LABEL_ASSIGNMENT = "p3.assignment";
 /** The Herdr App shows a core terminal carrying both of these (an id it does not know becomes a new space/tab). */
 export const LABEL_SPACE = "herdr.space";
@@ -44,7 +45,8 @@ export const normalizeCoreTerminal = (raw: any): MuxAgent => {
     id: address, name: raw.name ?? undefined, kind: isPi ? "pi" : undefined, paneId: address, terminalId: address,
     workspaceId: labels[LABEL_SPACE], tabId: labels[LABEL_TAB],
     status: String(raw.status?.state ?? (raw.state === "finished" ? "exited" : "unknown")),
-    sessionPath: labels[LABEL_SESSION], launchPending: isPi ? !ready : undefined, interactiveReady: isPi ? ready : undefined, raw,
+    sessionPath: labels[LABEL_SESSION], reportedSessionId: labels[LABEL_SESSION_ID],
+    launchPending: isPi ? !ready : undefined, interactiveReady: isPi ? ready : undefined, raw,
   };
 };
 
@@ -220,10 +222,11 @@ export const coreMux: Mux = {
     progress.stage = "interactive_readiness";
     return worker;
   },
-  async reportSession(_pi, terminalId, sessionPath) {
-    if (publishedSession.get(terminalId) === sessionPath) return;
-    await call("terminal.label", { terminal: terminalId, labels: { [LABEL_SESSION]: sessionPath } });
-    publishedSession.set(terminalId, sessionPath);
+  async reportSession(_pi, terminalId, sessionPath, _sequence, _startSource, sessionId) {
+    const identity = JSON.stringify([sessionPath, sessionId]);
+    if (publishedSession.get(terminalId) === identity) return;
+    await call("terminal.label", { terminal: terminalId, labels: { [LABEL_SESSION]: sessionPath, [LABEL_SESSION_ID]: sessionId ?? "" } });
+    publishedSession.set(terminalId, identity);
   },
   async reportMetadata(_pi, terminalId, _source, tokens) {
     // A label with an empty value is removed.

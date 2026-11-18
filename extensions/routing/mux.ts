@@ -20,6 +20,8 @@ export interface MuxAgent {
   status: string;
   /** Saved Pi session file reported by the backend. */
   sessionPath?: string;
+  /** Core only: Pi's live session ID, even before the JSONL file is written. */
+  reportedSessionId?: string;
   launchPending?: boolean;
   interactiveReady?: boolean;
   raw: any;
@@ -83,7 +85,7 @@ export interface Mux {
    * backend's start record); readiness is observed afterwards through getAgent.
    */
   launchWorker(pi: ExtensionAPI, request: WorkerLaunchRequest, progress: WorkerLaunchProgress): Promise<WorkerIdentity & { started?: MuxAgent }>;
-  reportSession(pi: ExtensionAPI, paneId: string, sessionPath: string, sequence: number, startSource?: string): Promise<void>;
+  reportSession(pi: ExtensionAPI, paneId: string, sessionPath: string, sequence: number, startSource?: string, sessionId?: string): Promise<void>;
   /** String values set a token; null clears it. */
   reportMetadata(pi: ExtensionAPI, paneId: string, source: string, tokens: Record<string, string | null>): Promise<void>;
   worktreeList(pi: ExtensionAPI, request: { cwd?: string; workspaceId?: string }): Promise<WorktreeSource>;

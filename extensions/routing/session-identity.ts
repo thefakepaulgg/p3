@@ -16,7 +16,7 @@ export function registerRoutedSessionIdentity(pi: ExtensionAPI): void {
     if (ctx.mode !== "tui" || !backend || !pane || !path) return;
     // Herdr selects Pi session identity from this canonical source. A custom source
     // is accepted but invisible to agent.get. Leave lifecycle state to Herdr/native hooks.
-    await mux().reportSession(pi, pane, path, ++sequence, reason);
+    await mux().reportSession(pi, pane, path, ++sequence, reason, backend === "core" ? ctx.sessionManager.getSessionId() : undefined);
   };
   pi.on("session_start", (event, ctx) => publish(ctx, event.reason));
   // A new Pi session may not have a file until its first turn starts.
