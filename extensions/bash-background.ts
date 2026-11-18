@@ -70,6 +70,7 @@ export default function bashBackground(pi: ExtensionAPI) {
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let refreshView: (() => void) | undefined;
   let closeView: (() => void) | undefined;
+  let repaintWidget: (() => void) | undefined;
   /** Jobs whose completion message has been sent or deferred but not yet admitted (message_start). */
   const undelivered = new Set<string>();
   /** Completions held during the settle tail, where a steer could be stranded after Pi's last queue check. */
@@ -110,6 +111,18 @@ export default function bashBackground(pi: ExtensionAPI) {
   const jobText = (job: Job) =>
     `Job ${job.id}: ${statusOf(job)} (${elapsedSeconds(job)}s)\nCommand: ${commandLabel(job.command)}\n\n${job.finalText || textOf(job.latest) || "(no output yet)"}`;
 
+  const widgetLines = (ctx: ExtensionContext) => {
+    const running = [...jobs.values()].filter((job) => job.state === "running");
+    if (!running.length) return [];
+    const theme = ctx.ui.theme;
+    return [
+      `${theme.fg("dim", "╭─")} ${theme.fg("accent", theme.bold(`Bash jobs · ${running.length} running`))}${theme.fg("muted", " · /bash-jobs")}`,
+      ...running.slice(0, 4).map((job) => `${theme.fg("dim", "│")} ${theme.fg("accent", "●")} ${theme.fg("text", truncateToWidth(uiText(commandLabel(job.command)).replace(/\s+/g, " "), 52))}${theme.fg("muted", ` · ${elapsedSeconds(job)}s`)}`),
+      ...(running.length > 4 ? [theme.fg("dim", `│ … ${running.length - 4} more`)] : []),
+      theme.fg("dim", "╰─"),
+    ];
+  };
+
   const refreshUi = () => {
     if (disposed || !uiCtx) return;
     const running = [...jobs.values()].filter((job) => job.state === "running");
@@ -121,14 +134,15 @@ export default function bashBackground(pi: ExtensionAPI) {
       refreshTimer.unref();
     }
     try {
-      const theme = uiCtx.ui.theme;
-      const lines = running.length ? [
-        `${theme.fg("dim", "╭─")} ${theme.fg("accent", theme.bold(`Bash jobs · ${running.length} running`))}${theme.fg("muted", " · /bash-jobs")}`,
-        ...running.slice(0, 4).map((job) => `${theme.fg("dim", "│")} ${theme.fg("accent", "●")} ${theme.fg("text", truncateToWidth(uiText(commandLabel(job.command)).replace(/\s+/g, " "), 52))}${theme.fg("muted", ` · ${elapsedSeconds(job)}s`)}`),
-        ...(running.length > 4 ? [theme.fg("dim", `│ … ${running.length - 4} more`)] : []),
-        theme.fg("dim", "╰─"),
-      ] : undefined;
-      uiCtx.ui.setWidget(WIDGET_KEY, lines, { placement: "belowEditor" });
+      if (repaintWidget) repaintWidget();
+      else if (running.length) {
+        // Registered once and kept: re-setting a widget moves it below the others, which reorders the cards.
+        const ctx = uiCtx;
+        ctx.ui.setWidget(WIDGET_KEY, (tui) => {
+          repaintWidget = () => tui.requestRender();
+          return { render: (width: number) => widgetLines(ctx).map((line) => truncateToWidth(line, width)), invalidate() {} };
+        }, { placement: "belowEditor" });
+      }
       refreshView?.();
     } catch { /* the UI may already be gone */ }
   };
@@ -434,6 +448,7 @@ export default function bashBackground(pi: ExtensionAPI) {
     refreshView = undefined;
     try { closeView?.(); } catch { /* the UI may already be gone */ }
     closeView = undefined;
+    repaintWidget = undefined;
     try { uiCtx?.ui.setWidget(WIDGET_KEY, undefined); } catch { /* the UI may already be gone */ }
     uiCtx = undefined;
     for (const job of jobs.values()) {
