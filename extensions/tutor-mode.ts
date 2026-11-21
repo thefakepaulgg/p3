@@ -19,7 +19,6 @@ const ALLOWED_TOOLS = new Set([
   "web_search",
   "memory_search",
   "session_search",
-  "task_list",
   PROGRESS_TOOL,
   BUILD_TOOL,
 ]);

@@ -27,7 +27,6 @@
       "./extensions/reasoning-ceiling.ts",
       "./extensions/session-naming.ts",
       "./extensions/model-style.ts",
-      "./extensions/tasks.ts",
       "./extensions/telegram-notify.ts",
       "./extensions/tutor-mode.ts",
       "./extensions/workflow-engine.ts"
